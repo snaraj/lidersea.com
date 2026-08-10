@@ -98,7 +98,7 @@ jobs:
           helm package chart --version "${version}" --app-version "${version}" -d "${RUNNER_TEMP}"
           printf '%s' "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
           push_log="${RUNNER_TEMP}/chart-push.log"
-          helm push "${RUNNER_TEMP}/lidersea-com-${version}.tgz" "oci://ghcr.io/snaraj/charts" | tee "${push_log}"
+          helm push "${RUNNER_TEMP}/lidersea-com-${version}.tgz" "oci://ghcr.io/snaraj/charts" 2>&1 | tee "${push_log}"
           chart_digest="$(awk '/^Digest:/{print $2}' "${push_log}")"
           test -n "${chart_digest}"
           cosign sign --yes "${CHART}@${chart_digest}"

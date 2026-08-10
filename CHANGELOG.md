@@ -8,6 +8,15 @@ SemVer and match image/chart tags exactly.
 
 Nothing yet.
 
+## [0.1.6] - 2026-08-10
+
+### Fixed
+- Release pipeline: capture helm push's stderr so the chart digest is
+  read for signing and the Release notes. v0.1.5 published a signed
+  image and an unsigned chart artifact before the digest parse refused;
+  tags are immutable, so v0.1.6 is the first complete signed release
+  (image + signed OCI chart + GitHub Release).
+
 ## [0.1.5] - 2026-08-10
 
 ### Fixed

@@ -1,0 +1,7 @@
+# Build outputs and local artifacts
+frontend/node_modules/
+internal/web/dist/*
+!internal/web/dist/.gitkeep
+coverage.out
+*.cover.out
+.DS_Store

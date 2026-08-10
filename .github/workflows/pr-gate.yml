@@ -132,7 +132,9 @@ jobs:
       - name: Lint and render the chart
         run: |
           helm lint chart
-          helm template smoke chart >/dev/null
+          # The chart requires the platform's Kubernetes target (>=1.36);
+          # helm template defaults to older capabilities without this flag.
+          helm template smoke chart --kube-version v1.36.0 >/dev/null
       - name: Chart version must match VERSION
         run: |
           IFS= read -r version < VERSION

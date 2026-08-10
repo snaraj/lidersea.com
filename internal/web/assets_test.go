@@ -10,8 +10,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/snaraj/website-infrastructure/websites/lidersea.com/internal/server"
-	website "github.com/snaraj/website-infrastructure/websites/lidersea.com/internal/web"
+	"github.com/snaraj/lidersea.com/internal/server"
+	website "github.com/snaraj/lidersea.com/internal/web"
 )
 
 // builtAssetReference finds Vite's content-addressed script and stylesheet URLs

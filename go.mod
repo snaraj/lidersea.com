@@ -1,4 +1,4 @@
-module github.com/snaraj/website-infrastructure/websites/lidersea.com
+module github.com/snaraj/lidersea.com
 
 go 1.26.0
 

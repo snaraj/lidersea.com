@@ -1,21 +1,74 @@
-# lidersea.com — Go + Svelte
+# lidersea.com
 
-This intentionally small launch site is a Svelte build embedded into a
-dependency-free Go HTTP binary and packaged in a shell-less distroless image.
-Both the raw HTML fallback and hydrated page say `Hello World!` and `Website
-coming soon!`; the origin also exposes read-only `/livez` and `/readyz` probes.
-Keeping the second site self-contained gives `lidersea.com` its own image,
-release identity, rollback boundary, and production checks without coupling it
-to changes for `naranjo.online`.
+[![PR gate](https://github.com/snaraj/lidersea.com/actions/workflows/pr-gate.yml/badge.svg)](https://github.com/snaraj/lidersea.com/actions/workflows/pr-gate.yml)
+[![CodeQL](https://github.com/snaraj/lidersea.com/actions/workflows/codeql.yml/badge.svg)](https://github.com/snaraj/lidersea.com/actions/workflows/codeql.yml)
+[![Release](https://img.shields.io/github/v/release/snaraj/lidersea.com?sort=semver)](https://github.com/snaraj/lidersea.com/releases)
 
-The Node, npm, Go, builder, and runtime versions are exact repository pins. The
-Svelte check and dependency-free source tests run before the build; generated
-output must then satisfy local-resource, content-hash, source-map, and byte
-budgets before Go tests serve the real embedded bundle and verify its cache and
-security-header contract. Publication produces and verifies one amd64/arm64 OCI
-graph, but the all-zero chart digest and `deploymentReady: false` deliberately
-keep deployment blocked until a reviewed digest is promoted and the separate
-Flux release is explicitly unsuspended.
+The web home of Lidersea — luxury yacht maintenance, customization, and
+detailing. This site is built to the same standard as the craft it
+represents: a Svelte frontend embedded into a single dependency-free Go
+binary, shipped as a distroless multi-arch container and a Helm chart,
+deployed by digest behind Cloudflare.
 
-Python is not in this application or image. Repository-level Python remains
-limited to dependency-free local policy and redaction checks.
+## How it works
+
+```mermaid
+flowchart LR
+    dev[Svelte source] -->|vite build| dist[Hashed static bundle]
+    dist -->|go:embed| bin[Go binary]
+    bin -->|3-stage build| img["Distroless image (amd64+arm64)"]
+    chart[Helm chart] --> rel
+    img -->|cosign signed, digest pinned| rel[Release vX.Y.Z]
+    rel -->|GitOps pulls by digest| k8s[Kubernetes on the platform]
+    k8s --> cf[Cloudflare Tunnel] --> visitors((Visitors))
+```
+
+The Go service serves the embedded bundle with strict caching, conditional
+requests, security headers, and `/livez` + `/readyz` probes on port 8080,
+with no runtime dependency beyond the Go standard library.
+
+## Development
+
+```sh
+# Frontend first — the Go embed test expects the built bundle.
+cd frontend
+npm ci --ignore-scripts
+npm run check && npm test && npm run build
+
+# Backend
+cd ..
+go vet ./... && go test ./...
+
+# Container (both production architectures)
+docker build .
+```
+
+Toolchain pins live in CI (`node 24.19.0`, `npm 11.17.0`, `go 1.26.5`);
+CI is authoritative.
+
+## Releases
+
+Pushing `vX.Y.Z` (matching `VERSION` and the chart version — CI enforces
+the three-way lock) publishes everything at once:
+
+- `ghcr.io/snaraj/lidersea-com:vX.Y.Z` — multi-arch image, keyless-signed
+  (Cosign), with SBOM and SLSA provenance; deployment consumes the digest.
+- `ghcr.io/snaraj/charts/lidersea-com` — the Helm chart as a signed OCI
+  artifact at the same version.
+- A GitHub Release recording the immutable digests.
+
+Version tags are immutable and never reused — the publisher refuses, with
+no override. History lives in [CHANGELOG.md](CHANGELOG.md); the security
+posture in [SECURITY.md](SECURITY.md).
+
+## Media
+
+Small UI assets live under `frontend/src/assets/` in documented categories
+with size ceilings. Heavy media (portfolio video, high-resolution
+photography, audio) never enters this repository or the image — it is
+served from dedicated platform storage, built for it.
+
+## License
+
+Code is [MIT](LICENSE). Site content — text, images, video, audio,
+branding — is **all rights reserved**; the license does not extend to it.

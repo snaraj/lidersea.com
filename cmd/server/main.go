@@ -14,8 +14,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/snaraj/website-infrastructure/websites/lidersea.com/internal/server"
-	website "github.com/snaraj/website-infrastructure/websites/lidersea.com/internal/web"
+	"github.com/snaraj/lidersea.com/internal/server"
+	website "github.com/snaraj/lidersea.com/internal/web"
 )
 
 // main owns process termination, leaving run able to return startup and serving

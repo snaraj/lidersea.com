@@ -102,7 +102,7 @@ func TestBuiltFrontendIsEmbeddedAndServed(t *testing.T) {
 	if got := root.Header().Get("Content-Type"); !strings.HasPrefix(got, "text/html") {
 		t.Errorf("root Content-Type = %q", got)
 	}
-	if got := root.Header().Get("Cache-Control"); got != "no-store" {
+	if got := root.Header().Get("Cache-Control"); got != "no-cache" {
 		t.Errorf("root Cache-Control = %q", got)
 	}
 	if etag := root.Header().Get("ETag"); !strongETag.MatchString(etag) {

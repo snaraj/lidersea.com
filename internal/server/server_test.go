@@ -50,8 +50,33 @@ func TestRootAndSecurityHeaders(t *testing.T) {
 	if got := response.Header().Get("Strict-Transport-Security"); got != "max-age=31536000" {
 		t.Errorf("Strict-Transport-Security = %q", got)
 	}
-	if got := response.Header().Get("Cache-Control"); got != "no-store" {
+	if got := response.Header().Get("Cache-Control"); got != "no-cache" {
 		t.Errorf("Cache-Control = %q", got)
+	}
+}
+
+// TestNoRequestMethodCanEverMutate is the executable safety contract that
+// permits TLS 1.3 0-RTT (early data) at the edge. 0-RTT carries a replay risk,
+// so it is only admissible where no request can change server state. Every
+// route here answers reads and refuses every mutating method, and this test
+// exists so that property can never silently regress into a replayable one.
+func TestNoRequestMethodCanEverMutate(t *testing.T) {
+	siteHandler := testHandler(t)
+	mutating := []string{
+		http.MethodPost,
+		http.MethodPut,
+		http.MethodPatch,
+		http.MethodDelete,
+	}
+	routes := []string{"/", "/livez", "/readyz", "/assets/app-abc.js", "/missing"}
+	for _, route := range routes {
+		for _, method := range mutating {
+			response := httptest.NewRecorder()
+			siteHandler.ServeHTTP(response, httptest.NewRequest(method, route, nil))
+			if response.Code == http.StatusOK {
+				t.Errorf("%s %s was accepted; 0-RTT requires every route to be read-only", method, route)
+			}
+		}
 	}
 }
 

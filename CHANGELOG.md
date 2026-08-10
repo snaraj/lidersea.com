@@ -8,6 +8,15 @@ SemVer and match image/chart tags exactly.
 
 Nothing yet.
 
+## [0.1.5] - 2026-08-10
+
+### Fixed
+- Release pipeline: removed the invalid GitHub attestation step (buildx
+  SLSA provenance + SBOM and the Cosign signature remain the integrity
+  evidence). v0.1.4 published a valid signed image but no chart or
+  GitHub Release; tags are immutable, so v0.1.5 is the first complete
+  release.
+
 ## [0.1.4] - 2026-08-10
 
 ### Added

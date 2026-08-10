@@ -6,7 +6,12 @@ SemVer and match image/chart tags exactly.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.1.4] - 2026-08-10
+
 ### Added
+- Go module renamed to the standalone identity github.com/snaraj/lidersea.com.
 - Standalone repository: complete history imported from the
   `website-infrastructure` monorepo with authorship preserved.
 - Production CI: PR gate (frontend + Go tests with coverage, chart lint,

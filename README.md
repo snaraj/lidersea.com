@@ -1,8 +1,12 @@
 # lidersea.com
 
-[![PR gate](https://github.com/snaraj/lidersea.com/actions/workflows/pr-gate.yml/badge.svg)](https://github.com/snaraj/lidersea.com/actions/workflows/pr-gate.yml)
-[![CodeQL](https://github.com/snaraj/lidersea.com/actions/workflows/codeql.yml/badge.svg)](https://github.com/snaraj/lidersea.com/actions/workflows/codeql.yml)
+[![PR gate](https://github.com/snaraj/lidersea.com/actions/workflows/pr-gate.yml/badge.svg?branch=main)](https://github.com/snaraj/lidersea.com/actions/workflows/pr-gate.yml)
+[![CodeQL](https://github.com/snaraj/lidersea.com/actions/workflows/codeql.yml/badge.svg?branch=main)](https://github.com/snaraj/lidersea.com/actions/workflows/codeql.yml)
 [![Release](https://img.shields.io/github/v/release/snaraj/lidersea.com?sort=semver)](https://github.com/snaraj/lidersea.com/releases)
+[![Go coverage](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fsnaraj%2Flidersea.com%2Fbadges%2Fgo-coverage.json)](https://github.com/snaraj/lidersea.com/actions/workflows/pr-gate.yml)
+[![Frontend coverage](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fsnaraj%2Flidersea.com%2Fbadges%2Ffrontend-coverage.json)](https://github.com/snaraj/lidersea.com/actions/workflows/pr-gate.yml)
+[![Go version](https://img.shields.io/github/go-mod/go-version/snaraj/lidersea.com)](go.mod)
+[![License: MIT](https://img.shields.io/github/license/snaraj/lidersea.com)](LICENSE)
 
 The web home of Lidersea — luxury yacht maintenance, customization, and
 detailing. This site is built to the same standard as the craft it

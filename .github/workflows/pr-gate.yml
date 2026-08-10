@@ -2,6 +2,8 @@ name: PR gate
 
 on:
   pull_request:
+  push:
+    branches: [main]
   workflow_dispatch:
 
 permissions: {}
@@ -162,3 +164,65 @@ jobs:
           context: .
           platforms: linux/amd64,linux/arm64
           push: false
+
+  coverage-badges:
+    # Runs only on main pushes: recomputes both coverages and publishes
+    # shields-endpoint JSONs to the generated single-commit `badges` branch
+    # (no history value; force-updating it is the documented exception to
+    # the no-force-push rule). Zero external services or accounts.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24.19.0'
+          check-latest: false
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.26.5'
+          check-latest: false
+          cache: false
+      - name: Compute coverage percentages
+        id: cov
+        env:
+          GOTOOLCHAIN: local
+        run: |
+          cd frontend
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm run build
+          front="$(node --test --experimental-test-coverage tests/*.test.mjs 2>&1 \
+            | awk -F'|' '/all files/{gsub(/ /,"",$2); print $2; exit}')"
+          cd ..
+          CGO_ENABLED=0 go test -covermode=atomic -coverprofile="${RUNNER_TEMP}/cp.out" ./...
+          gopct="$(go tool cover -func="${RUNNER_TEMP}/cp.out" | awk '/^total:/{gsub(/%/,"",$3); print $3}')"
+          test -n "${gopct}" && test -n "${front}"
+          printf 'go=%s\n' "${gopct}" >> "${GITHUB_OUTPUT}"
+          printf 'front=%s\n' "${front}" >> "${GITHUB_OUTPUT}"
+      - name: Publish badge JSONs to the badges branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GO_PCT: ${{ steps.cov.outputs.go }}
+          FRONT_PCT: ${{ steps.cov.outputs.front }}
+        run: |
+          color() {
+            awk -v p="$1" 'BEGIN{ if (p>=90) print "brightgreen"; else if (p>=75) print "green"; else if (p>=60) print "yellow"; else print "orange" }'
+          }
+          work="${RUNNER_TEMP}/badges"
+          mkdir -p "${work}" && cd "${work}"
+          git init -q -b badges .
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          printf '{"schemaVersion":1,"label":"go coverage","message":"%s%%","color":"%s"}\n' \
+            "${GO_PCT}" "$(color "${GO_PCT}")" > go-coverage.json
+          printf '{"schemaVersion":1,"label":"frontend coverage","message":"%s%%","color":"%s"}\n' \
+            "${FRONT_PCT}" "$(color "${FRONT_PCT}")" > frontend-coverage.json
+          git add . && git commit -qm "coverage badges for ${GITHUB_SHA}"
+          git push -q --force "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" badges

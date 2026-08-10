@@ -70,7 +70,13 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if name == "" {
 		// index.html points at content-addressed assets and must be revalidated on
 		// every navigation so a rollout is visible without a stale shell page.
-		serveBytes(w, r, "index.html", h.index, "no-store")
+		// "no-cache" keeps that guarantee — a revalidation is still mandatory —
+		// while allowing the edge and browser to STORE the shell, so an unchanged
+		// site answers a navigation with a small 304 instead of shipping the whole
+		// document from the origin again. "no-store" would forbid storage outright
+		// and make every navigation a full origin round trip for no safety gain:
+		// this document is public, holds no visitor data, and its ETag is a digest.
+		serveBytes(w, r, "index.html", h.index, "no-cache")
 		return
 	}
 	if !fs.ValidPath(name) {

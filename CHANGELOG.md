@@ -8,6 +8,22 @@ SemVer and match image/chart tags exactly.
 
 Nothing yet.
 
+## [0.1.7] - 2026-08-11
+
+### Changed
+- Serve the application shell as `no-cache` instead of `no-store`, so the
+  edge and browser may store it while still revalidating every navigation.
+  An unchanged site now answers with a small `304` instead of shipping the
+  whole document from the origin through the tunnel each time; the shell
+  was the one uncacheable resource on an otherwise fully cached site. The
+  document is public and its `ETag` is a content digest, so nothing is
+  traded for the gain. Content-hashed assets keep their immutable caching.
+
+### Added
+- `TestNoRequestMethodCanEverMutate` pins that every route refuses every
+  mutating method — the executable safety contract that makes TLS 1.3
+  0-RTT (early data, which can be replayed) admissible at the edge.
+
 ## [0.1.6] - 2026-08-10
 
 ### Fixed

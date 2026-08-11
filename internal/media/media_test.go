@@ -146,10 +146,18 @@ func TestFullResponsesCarryTheImmutableIdentity(t *testing.T) {
 // TestRangeBehaviorMatrix is the explicit video-seeking contract: every
 // class of Range request against the 4096-byte video fixture, with exact
 // status, Content-Range, and body-slice assertions.
+//
+// The handler under test is deliberately sized AFTER the matrix, to
+// len(tests): the subtests run in parallel and each in-flight response
+// correctly holds one concurrency slot, so a semaphore smaller than the
+// matrix would make the handler shed legitimate requests with 503 — correct
+// product behavior, nondeterministic test. This matrix exercises Range
+// algebra only; admission control under overload has its own deliberate,
+// deterministic test (TestBoundedConcurrencySheds), so shedding coverage is
+// not lost by admitting every subtest here.
 func TestRangeBehaviorMatrix(t *testing.T) {
 	t.Parallel()
-	h, fixtures := testHandler(t, 4)
-	video := fixtures[1]
+	video := testsupport.MediaFixtures()[1]
 	size := len(video.Bytes)
 
 	tests := []struct {
@@ -222,6 +230,11 @@ func TestRangeBehaviorMatrix(t *testing.T) {
 			wantRange:   fmt.Sprintf("bytes */%d", size),
 		},
 	}
+	// One slot per parallel subtest: every request must be admitted, never
+	// shed — see the function comment. testsupport fixtures are
+	// deterministic, so this handler serves byte-identical content at the
+	// same digest URL as the fixture captured above.
+	h, _ := testHandler(t, len(tests))
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
@@ -351,7 +364,7 @@ func TestMutatingMethodsAreRejected(t *testing.T) {
 // root teaches an attacker nothing.
 func TestUnservablePathsAreOpaque404s(t *testing.T) {
 	t.Parallel()
-	h, fixtures := testHandler(t, 4)
+	fixtures := testsupport.MediaFixtures()
 	digest := fixtures[0].Digest
 	targets := map[string]string{
 		"missing name":         "/media/immutable/" + digest,
@@ -369,6 +382,12 @@ func TestUnservablePathsAreOpaque404s(t *testing.T) {
 		"unsafe bytes in name": "/media/immutable/" + digest + "/a b.avif",
 		"digest as name":       "/media/immutable/" + digest + "/" + digest,
 	}
+	// One slot per parallel subtest, for the same reason as the Range
+	// matrix: several targets ("unknown digest", "wrong name") are valid URL
+	// shapes that correctly reach the slot acquire before their 404, so a
+	// semaphore smaller than the table could shed them with 503 instead.
+	// Overload behavior itself is pinned by TestBoundedConcurrencySheds.
+	h, _ := testHandler(t, len(targets))
 	for name, target := range targets {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()

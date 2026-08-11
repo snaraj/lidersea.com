@@ -18,19 +18,35 @@ import (
 	website "github.com/snaraj/lidersea.com/internal/web"
 )
 
-// main owns process termination, leaving run able to return startup and serving
-// failures through one structured log path.
+const (
+	// maxRequestHeaderBytes bounds all request metadata far below net/http's
+	// 1 MiB default. Every route on this origin answers small GET and HEAD
+	// requests, so megabyte header allowances would serve attackers, not
+	// visitors. The value matches naranjo.online.
+	maxRequestHeaderBytes = 32 * 1024
+)
+
+// main owns process termination and the operating-system signal contract:
+// Kubernetes sends SIGTERM before a pod's grace period expires, and deriving
+// the lifecycle context from both SIGTERM and local interrupts here gives
+// every environment the same orderly shutdown path through run.
 func main() {
-	if err := run(); err != nil {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := run(ctx, os.Getenv); err != nil {
 		slog.Error("server stopped", "error", err)
 		os.Exit(1)
 	}
 }
 
-// run assembles the immutable site, starts its hardened HTTP server, and blocks
-// until the server fails or the operating system requests a graceful shutdown.
-func run() error {
-	port, err := listenPort(os.Getenv("PORT"))
+// run assembles the immutable site, starts its hardened HTTP server, and
+// blocks until the server fails or ctx is cancelled, then drains gracefully.
+// The context and the environment lookup are parameters rather than process
+// globals so tests can drive the complete lifecycle — configuration, serving,
+// and shutdown — deterministically, and in parallel where no real signal or
+// socket forbids it.
+func run(ctx context.Context, lookupEnv func(string) string) error {
+	port, err := listenPort(lookupEnv("PORT"))
 	if err != nil {
 		return err
 	}
@@ -53,15 +69,11 @@ func run() error {
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      15 * time.Second,
 		IdleTimeout:       60 * time.Second,
-		MaxHeaderBytes:    1 << 20,
+		MaxHeaderBytes:    maxRequestHeaderBytes,
 	}
 
-	// Kubernetes sends SIGTERM before a pod's grace period expires; handling both
-	// SIGTERM and local interrupts uses the same orderly shutdown path everywhere.
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 	// A one-result buffer lets the serving goroutine report an early failure even
-	// when signal cancellation wins the select and shutdown begins first.
+	// when context cancellation wins the select and shutdown begins first.
 	errCh := make(chan error, 1)
 	go func() {
 		slog.Info("lidersea.com listening", "port", port)

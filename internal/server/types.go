@@ -1,10 +1,50 @@
-// types.go collects the package's type declarations so the data model can be
-// surveyed in one place. The construction, routing, and serving logic stays in
-// server.go.
+// types.go collects the package's type declarations and package-level
+// const/var blocks so the data model can be surveyed in one place. The
+// construction, routing, and serving logic stays in server.go; surface API
+// serving stays in surfaces.go; configuration parsing stays in config.go.
 
 package server
 
-import "io/fs"
+import (
+	"io/fs"
+
+	"github.com/snaraj/lidersea.com/internal/media"
+)
+
+// Request body caps for the gated write routes, far below the transport's
+// tolerance: a review is a paragraph and an estimate is at most one hundred
+// short lines, so anything larger is not a client.
+const (
+	// maxReviewRequestBytes bounds a POST /api/reviews body.
+	maxReviewRequestBytes = 16 * 1024
+	// maxEstimateRequestBytes bounds a POST /api/estimates/preview body.
+	maxEstimateRequestBytes = 32 * 1024
+)
+
+// reviewStorageUnavailableReason is the honest answer of the review write
+// path until the platform storage layer exists: the contract is live, the
+// persistence is not, and the response says so instead of pretending to
+// accept the submission.
+const reviewStorageUnavailableReason = "review storage is not configured; submissions are not persisted yet"
+
+// Config selects which optional capabilities the handler serves. The zero
+// value is the production default and the strictest state: every gate off,
+// media disabled, the origin purely read-only. Each field only ever ADDS a
+// narrowly-scoped capability — no setting here (or anywhere) can weaken the
+// security-header policy, the CSP, or the read-only contract of any other
+// route, and malformed configuration fails startup in ConfigFromEnv rather
+// than defaulting anything on.
+type Config struct {
+	// Media configures the digest-immutable media pipeline (read-only GETs).
+	Media media.Config
+	// ReviewsWriteEnabled admits POST on exactly /api/reviews
+	// (REVIEWS_WRITE_ENABLED). Default off.
+	ReviewsWriteEnabled bool
+	// EstimatesEnabled registers the POST-only /api/estimates/preview
+	// compute route (ESTIMATES_ENABLED). Default off: the route is an opaque
+	// 404, indistinguishable from any unknown /api/ path.
+	EstimatesEnabled bool
+}
 
 // handler serves the immutable frontend files after New has validated the
 // bundle's entrypoint. It remains private so callers cannot bypass the mux's
@@ -15,4 +55,19 @@ type handler struct {
 	// index is loaded during construction so a broken image fails before the
 	// process becomes ready rather than failing on the first visitor request.
 	index []byte
+}
+
+// apiHandler serves the surface catalog under /api/: the registry's explicit
+// routes and nothing else. It is private for the same reason handler is —
+// every response must pass through the securityHeaders wrapper.
+type apiHandler struct {
+	// cfg carries the write-path gates; the zero value serves reads only.
+	cfg Config
+}
+
+// reviewWriteUnavailable is the data payload of the honest 503 the review
+// write path returns while no persistence exists.
+type reviewWriteUnavailable struct {
+	// Reason is reviewStorageUnavailableReason.
+	Reason string `json:"reason"`
 }

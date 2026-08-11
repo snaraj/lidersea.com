@@ -1,0 +1,133 @@
+// reviews_test pins the reviews/v1 contract: sample well-formedness, the
+// server-computed aggregate's integer-tenths math, and the strict submission
+// validation guarding the gated write path.
+
+package surface
+
+import (
+	"strings"
+	"testing"
+	"time"
+)
+
+// TestReviewsSnapshotAggregateIsServerMath recomputes the aggregate from the
+// served list independently and requires exact agreement: histogram totals,
+// count, and the half-up integer-tenths mean. Clients render these numbers;
+// this test is why they never need to derive them.
+func TestReviewsSnapshotAggregateIsServerMath(t *testing.T) {
+	t.Parallel()
+	data := ReviewsSnapshot()
+	if len(data.Reviews) == 0 {
+		t.Fatal("sample snapshot has no reviews")
+	}
+	if data.Aggregate.Count != len(data.Reviews) {
+		t.Errorf("aggregate count = %d, want %d", data.Aggregate.Count, len(data.Reviews))
+	}
+	sum, histogramTotal := 0, 0
+	var histogram [5]int
+	for _, review := range data.Reviews {
+		sum += review.Rating
+		histogram[review.Rating-1]++
+	}
+	for _, n := range data.Aggregate.Histogram {
+		histogramTotal += n
+	}
+	if histogramTotal != data.Aggregate.Count {
+		t.Errorf("histogram sums to %d, want %d", histogramTotal, data.Aggregate.Count)
+	}
+	if histogram != data.Aggregate.Histogram {
+		t.Errorf("histogram = %v, want %v", data.Aggregate.Histogram, histogram)
+	}
+	tenths := (sum*10 + len(data.Reviews)/2) / len(data.Reviews)
+	if want := float64(tenths) / 10; data.Aggregate.Average != want {
+		t.Errorf("average = %v, want %v (integer tenths, half up)", data.Aggregate.Average, want)
+	}
+}
+
+// TestAggregateEdges covers the empty set (an honest zero aggregate, no
+// division) and a hand-checked rounding case.
+func TestAggregateEdges(t *testing.T) {
+	t.Parallel()
+	empty := aggregate(nil)
+	if empty.Count != 0 || empty.Average != 0 || empty.Histogram != [5]int{} {
+		t.Errorf("aggregate(nil) = %+v, want zeros", empty)
+	}
+	// Ratings 5 and 4: mean 4.5 exactly; tenths math must not truncate it.
+	two := aggregate([]Review{{Rating: 5}, {Rating: 4}})
+	if two.Average != 4.5 {
+		t.Errorf("aggregate mean = %v, want 4.5", two.Average)
+	}
+	// Ratings 5, 5, 4: mean 4.666… rounds half up to 4.7.
+	three := aggregate([]Review{{Rating: 5}, {Rating: 5}, {Rating: 4}})
+	if three.Average != 4.7 {
+		t.Errorf("aggregate mean = %v, want 4.7", three.Average)
+	}
+}
+
+// TestSampleReviewsAreWellFormed requires every sample review to satisfy the
+// contract shape: ids, in-range integer ratings, first-party source,
+// parseable timestamps, and text within the submission caps (samples must
+// obey the same bounds the write path enforces).
+func TestSampleReviewsAreWellFormed(t *testing.T) {
+	t.Parallel()
+	seen := map[string]bool{}
+	for _, review := range sampleReviews() {
+		if review.ID == "" || seen[review.ID] {
+			t.Errorf("review id %q missing or duplicated", review.ID)
+		}
+		seen[review.ID] = true
+		if review.Rating < 1 || review.Rating > 5 {
+			t.Errorf("%s: rating %d out of range", review.ID, review.Rating)
+		}
+		if review.Source != ReviewSourceFirstParty {
+			t.Errorf("%s: source = %q, want %q", review.ID, review.Source, ReviewSourceFirstParty)
+		}
+		if _, err := time.Parse(time.RFC3339, review.CreatedAt); err != nil {
+			t.Errorf("%s: createdAt %q is not RFC 3339", review.ID, review.CreatedAt)
+		}
+		if err := ValidateReviewSubmission(ReviewSubmission{Author: review.Author, Rating: review.Rating, Text: review.Text}); err != nil {
+			t.Errorf("%s: sample violates the submission contract: %v", review.ID, err)
+		}
+	}
+}
+
+// TestValidateReviewSubmission drives the whole validation table: the 1-5
+// integer rating bounds, required fields, whitespace-only rejection, and the
+// byte-length caps at their exact boundaries.
+func TestValidateReviewSubmission(t *testing.T) {
+	t.Parallel()
+	valid := ReviewSubmission{Author: "Charter owner", Rating: 5, Text: "Excellent work."}
+	tests := []struct {
+		name    string
+		mutate  func(*ReviewSubmission)
+		wantErr bool
+	}{
+		{name: "valid", mutate: func(s *ReviewSubmission) {}},
+		{name: "rating low", mutate: func(s *ReviewSubmission) { s.Rating = 0 }, wantErr: true},
+		{name: "rating high", mutate: func(s *ReviewSubmission) { s.Rating = 6 }, wantErr: true},
+		{name: "rating negative", mutate: func(s *ReviewSubmission) { s.Rating = -1 }, wantErr: true},
+		{name: "rating boundary one", mutate: func(s *ReviewSubmission) { s.Rating = 1 }},
+		{name: "author empty", mutate: func(s *ReviewSubmission) { s.Author = "" }, wantErr: true},
+		{name: "author whitespace", mutate: func(s *ReviewSubmission) { s.Author = "   " }, wantErr: true},
+		{name: "author at cap", mutate: func(s *ReviewSubmission) { s.Author = strings.Repeat("a", 120) }},
+		{name: "author over cap", mutate: func(s *ReviewSubmission) { s.Author = strings.Repeat("a", 121) }, wantErr: true},
+		{name: "text empty", mutate: func(s *ReviewSubmission) { s.Text = "" }, wantErr: true},
+		{name: "text whitespace", mutate: func(s *ReviewSubmission) { s.Text = " \n\t" }, wantErr: true},
+		{name: "text at cap", mutate: func(s *ReviewSubmission) { s.Text = strings.Repeat("b", 2000) }},
+		{name: "text over cap", mutate: func(s *ReviewSubmission) { s.Text = strings.Repeat("b", 2001) }, wantErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			submission := valid
+			test.mutate(&submission)
+			err := ValidateReviewSubmission(submission)
+			if (err != nil) != test.wantErr {
+				t.Errorf("ValidateReviewSubmission(%+v) error = %v, wantErr %v", submission, err, test.wantErr)
+			}
+			if err != nil && (strings.Contains(err.Error(), submission.Author) && submission.Author != "") {
+				t.Errorf("validation error %q echoes client input", err)
+			}
+		})
+	}
+}

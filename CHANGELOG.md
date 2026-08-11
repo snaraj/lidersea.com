@@ -6,9 +6,38 @@ SemVer and match image/chart tags exactly.
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+- End-to-end lifecycle tests for the server process over real TCP sockets:
+  serve → graceful drain on context cancellation and on a real SIGTERM,
+  invalid `PORT` rejection before any socket opens, and surfaced bind
+  failures (`EADDRINUSE`).
+- Fault-injection tests through a hand-written instrumented filesystem
+  (`faultFS`): the fail-closed 500 response when a read fails after a
+  successful stat (headers intact, no internal detail leaked), and proof
+  that `index.html` is read exactly once at construction, never per
+  request.
+- The PR gate now enforces a Go total-coverage floor (88%, measured 91.2%
+  at introduction). The floor only ratchets upward.
 
-## [0.1.7] - 2026-08-11
+### Changed
+- `run` receives its lifecycle context and environment lookup as
+  parameters; `main` owns the signal contract. Behavior is unchanged —
+  the seam exists so the full lifecycle is testable and subtests can run
+  in parallel without process-global state.
+- Request header metadata is capped at 32 KiB instead of net/http's 1 MiB
+  default, matching naranjo.online.
+- Ambiguous request paths (traversal, dot segments, duplicate separators,
+  trailing slashes, backslashes, NUL bytes) now receive a terminal 404
+  before routing instead of a canonicalizing redirect, matching
+  naranjo.online.
+
+### Fixed
+- Documentation drift: `src/lib/media.ts` and `frontend/src/assets/` are
+  naranjo.online structures that do not exist here yet; AGENTS.md and
+  README now say so explicitly instead of implying they are present.
+- The 0.1.7 release date below (released 2026-08-10, not 2026-08-11).
+
+## [0.1.7] - 2026-08-10
 
 ### Changed
 - Serve the application shell as `no-cache` instead of `no-store`, so the

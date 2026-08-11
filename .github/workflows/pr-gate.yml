@@ -100,17 +100,32 @@ jobs:
           go vet ./...
           CGO_ENABLED=0 go test ./...
           go test -race ./...
-      - name: Report Go test coverage
+      - name: Enforce and report Go test coverage
         env:
           GOTOOLCHAIN: local
+          # Ratchet-only floor (total statement coverage, measured at 91.2%
+          # when introduced). Raise it as coverage grows; lowering it weakens
+          # an enforced check and is out of policy.
+          GO_COVERAGE_FLOOR: '88.0'
         run: |
           CGO_ENABLED=0 go test -covermode=atomic \
             -coverprofile="${RUNNER_TEMP}/site.cover.out" ./...
+          total="$(go tool cover -func="${RUNNER_TEMP}/site.cover.out" \
+            | awk '/^total:/{gsub(/%/,"",$3); print $3}')"
+          test -n "${total}"
           {
             printf '### Go coverage\n\n```\n'
             go tool cover -func="${RUNNER_TEMP}/site.cover.out" | tail -n 8
-            printf '```\n'
+            printf '```\n\ntotal %s%% against a %s%% floor\n' \
+              "${total}" "${GO_COVERAGE_FLOOR}"
           } >> "${GITHUB_STEP_SUMMARY}"
+          awk -v got="${total}" -v floor="${GO_COVERAGE_FLOOR}" 'BEGIN {
+            if (got + 0 < floor + 0) {
+              printf "Go coverage %.1f%% is below the %.1f%% floor\n", got, floor
+              exit 1
+            }
+            printf "Go coverage %.1f%% meets the %.1f%% floor\n", got, floor
+          }'
       - name: Report frontend test coverage
         working-directory: frontend
         run: |

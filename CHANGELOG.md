@@ -6,6 +6,10 @@ SemVer and match image/chart tags exactly.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.1.9] - 2026-08-11
+
 ### Added
 - Visitor-scenario end-to-end suites: a hand-written stdlib mock-browser
   harness (`internal/testsupport.Visitor`) remembers and replays ETags

@@ -42,12 +42,20 @@ func run(ctx context.Context, lookupEnv func(string) string) error {
 	if err != nil {
 		return err
 	}
+	// Surface and media configuration parses fail-closed before any socket
+	// opens: the zero-value default is the strictly read-only origin, and a
+	// malformed or partial gate crashes the pod here instead of serving with
+	// guessed intent.
+	cfg, err := server.ConfigFromEnv(lookupEnv)
+	if err != nil {
+		return err
+	}
 
 	assets, err := website.FileSystem()
 	if err != nil {
 		return err
 	}
-	handler, err := server.New(assets)
+	handler, err := server.NewSite(assets, cfg)
 	if err != nil {
 		return err
 	}

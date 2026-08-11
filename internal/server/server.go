@@ -14,12 +14,23 @@ import (
 	"path"
 	"strings"
 	"time"
+
+	"github.com/snaraj/lidersea.com/internal/media"
 )
 
 // New constructs the complete lidersea.com HTTP handler from built frontend
-// assets. Construction validates index.html up front, wires Kubernetes probe
-// endpoints, and applies one security-header policy to every response.
+// assets with the default configuration: every write gate off and the media
+// pipeline disabled — the strictly read-only origin.
 func New(assets fs.FS) (http.Handler, error) {
+	return NewSite(assets, Config{})
+}
+
+// NewSite constructs the complete lidersea.com HTTP handler for an explicit
+// configuration. Construction validates index.html up front, wires
+// Kubernetes probe endpoints, the surface API, and (when configured) the
+// media pipeline, and applies the one non-configurable security-header
+// policy to every response in every mode.
+func NewSite(assets fs.FS, cfg Config) (http.Handler, error) {
 	index, err := fs.ReadFile(assets, "index.html")
 	if err != nil {
 		return nil, fmt.Errorf("read embedded index: %w", err)
@@ -28,6 +39,17 @@ func New(assets fs.FS) (http.Handler, error) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/livez", health)
 	mux.HandleFunc("/readyz", health)
+	mux.Handle("/api/", &apiHandler{cfg: cfg})
+	if cfg.Media.Enabled {
+		// Disabled (the default), the media URL class falls through to the
+		// static handler's opaque 404s: an absent pipeline is
+		// indistinguishable from absent content.
+		mediaHandler, err := media.NewHandler(cfg.Media)
+		if err != nil {
+			return nil, err
+		}
+		mux.Handle(media.URLPathPrefix, mediaHandler)
+	}
 	mux.Handle("/", h)
 	return securityHeaders(rejectAmbiguousPath(mux)), nil
 }

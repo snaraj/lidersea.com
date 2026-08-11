@@ -40,7 +40,7 @@ func New(assets fs.FS) (http.Handler, error) {
 	mux.HandleFunc("/livez", health)
 	mux.HandleFunc("/readyz", health)
 	mux.Handle("/", h)
-	return securityHeaders(mux), nil
+	return securityHeaders(rejectAmbiguousPath(mux)), nil
 }
 
 // health provides the shared liveness and readiness response. The service has
@@ -117,6 +117,20 @@ func allowReadMethod(w http.ResponseWriter, r *http.Request) bool {
 	w.Header().Set("Allow", "GET, HEAD")
 	http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	return false
+}
+
+// rejectAmbiguousPath runs before ServeMux so it returns a terminal 404 instead
+// of redirecting traversal or duplicate-separator input to a different route.
+// Canonical paths make the edge, Go router, and rooted filesystem agree on the
+// exact resource a visitor requested.
+func rejectAmbiguousPath(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.ContainsAny(r.URL.Path, "\\\x00") || path.Clean(r.URL.Path) != r.URL.Path {
+			http.NotFound(w, r)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // serveBytes applies cache metadata and delegates byte-range, conditional, and

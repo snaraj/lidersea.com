@@ -12,6 +12,16 @@ image:
 service:
   port: 8080
 
+# THE deployment-provider binding point — the only sanctioned location for a
+# provider name in this repository (a pin test enforces that). The origin
+# speaks standard HTTP only; which edge stack may reach it is injected here,
+# so a provider swap is a values override, never a template or code edit.
+# Defaults bind the current Cloudflare Tunnel deployment (namespace and pod
+# app label of the connector allowed through the NetworkPolicy).
+ingress:
+  peerNamespace: cloudflare-public
+  peerAppName: cloudflare-public
+
 resources:
   requests:
     cpu: 25m

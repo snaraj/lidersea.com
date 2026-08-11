@@ -1,7 +1,7 @@
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: cloudflared-to-lidersea-com
+  name: ingress-to-lidersea-com
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "lidersea-com.labels" . | nindent 4 }}
@@ -14,15 +14,17 @@ spec:
     - Ingress
     - Egress
   ingress:
-    # The public tunnel is the only workload allowed to reach this origin, and
-    # it may use only the application's unprivileged HTTP port.
+    {{- /* Only the configured ingress peer may reach the origin, and only on
+    the application's unprivileged HTTP port. The peer identity is injected
+    from values — the deployment-provider binding point — so the template
+    stays provider-neutral by doctrine. */}}
     - from:
         - namespaceSelector:
             matchLabels:
-              kubernetes.io/metadata.name: cloudflare-public
+              kubernetes.io/metadata.name: {{ .Values.ingress.peerNamespace }}
           podSelector:
             matchLabels:
-              app.kubernetes.io/name: cloudflare-public
+              app.kubernetes.io/name: {{ .Values.ingress.peerAppName }}
       ports:
         - port: {{ .Values.service.port }}
           protocol: TCP

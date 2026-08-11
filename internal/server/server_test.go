@@ -24,7 +24,7 @@ func testHandler(t *testing.T) http.Handler {
 }
 
 // TestRootAndSecurityHeaders protects the uncached document response and the
-// browser-security baseline that must remain present behind Cloudflare.
+// browser-security baseline that must remain present behind the edge.
 func TestRootAndSecurityHeaders(t *testing.T) {
 	request := httptest.NewRequest(http.MethodGet, "https://example.invalid/", nil)
 	response := httptest.NewRecorder()

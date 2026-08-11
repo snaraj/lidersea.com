@@ -6,8 +6,8 @@ metadata:
   labels:
     {{- include "lidersea-com.labels" . | nindent 4 }}
 spec:
-  # ClusterIP keeps the origin private; Cloudflare reaches it only through the
-  # in-cluster tunnel connector selected by the NetworkPolicy.
+  # ClusterIP keeps the origin private; the edge reaches it only through the
+  # in-cluster ingress connector selected by the NetworkPolicy.
   type: ClusterIP
   selector:
     app.kubernetes.io/name: {{ include "lidersea-com.name" . }}

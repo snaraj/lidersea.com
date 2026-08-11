@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/schema#",
   "type": "object",
   "additionalProperties": false,
-  "required": ["replicaCount", "deploymentReady", "image", "service", "resources"],
+  "required": ["replicaCount", "deploymentReady", "image", "service", "ingress", "resources"],
   "definitions": {
     "cpuQuantity": {
       "type": "string",
@@ -40,6 +40,24 @@
       "additionalProperties": false,
       "required": ["port"],
       "properties": {"port": {"type": "integer", "const": 8080}}
+    },
+    "ingress": {
+      "type": "object",
+      "description": "The deployment-provider binding point: identifies the only ingress peer allowed to reach the origin. The origin itself is provider-neutral and speaks standard HTTP; swapping edge providers is a values override here, never a template or code edit.",
+      "additionalProperties": false,
+      "required": ["peerNamespace", "peerAppName"],
+      "properties": {
+        "peerNamespace": {
+          "type": "string",
+          "description": "Namespace of the ingress connector's pods (DNS-1123 label).",
+          "pattern": "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$"
+        },
+        "peerAppName": {
+          "type": "string",
+          "description": "app.kubernetes.io/name label of the ingress connector's pods.",
+          "pattern": "^[A-Za-z0-9]([-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?$"
+        }
+      }
     },
     "resources": {
       "type": "object",

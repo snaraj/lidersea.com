@@ -5,17 +5,9 @@
 package web
 
 import (
-	"embed"
 	"fmt"
 	"io/fs"
 )
-
-// frontendAssets is populated by the pinned Svelte build before Go compilation.
-// Keeping the embed pattern rooted at dist prevents source files and development
-// configuration from becoming reachable through the production HTTP server.
-//
-//go:embed dist/*
-var frontendAssets embed.FS
 
 // FileSystem returns a read-only view rooted at the generated frontend output.
 // The server receives fs.FS rather than embed.FS so its HTTP behavior can be

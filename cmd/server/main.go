@@ -18,14 +18,6 @@ import (
 	website "github.com/snaraj/lidersea.com/internal/web"
 )
 
-const (
-	// maxRequestHeaderBytes bounds all request metadata far below net/http's
-	// 1 MiB default. Every route on this origin answers small GET and HEAD
-	// requests, so megabyte header allowances would serve attackers, not
-	// visitors. The value matches naranjo.online.
-	maxRequestHeaderBytes = 32 * 1024
-)
-
 // main owns process termination and the operating-system signal contract:
 // Kubernetes sends SIGTERM before a pod's grace period expires, and deriving
 // the lifecycle context from both SIGTERM and local interrupts here gives
@@ -89,9 +81,7 @@ func run(ctx context.Context, lookupEnv func(string) string) error {
 	case <-ctx.Done():
 	}
 
-	// Bound graceful shutdown so a stuck connection cannot hold a rollout open
-	// indefinitely. Kubernetes can still terminate the process after this window.
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 	return httpServer.Shutdown(shutdownCtx)
 }

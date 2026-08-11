@@ -148,7 +148,7 @@ func TestBuiltFrontendIsEmbeddedAndServed(t *testing.T) {
 			return nil
 		}
 
-		publicPath := "/" + strings.TrimPrefix(path, "./")
+		publicPath := "/" + path
 		cacheControl := "no-cache"
 		if strings.HasPrefix(publicPath, "/assets/") {
 			if !contentHashedAsset.MatchString(publicPath) {

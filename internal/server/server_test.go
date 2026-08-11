@@ -3,7 +3,6 @@
 package server
 
 import (
-	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -20,8 +19,7 @@ func testHandler(t *testing.T) http.Handler {
 		"assets/app-abc.js": &fstest.MapFile{Data: []byte("console.log('hello')")},
 		".gitkeep":          &fstest.MapFile{Data: []byte("build placeholder")},
 	}
-	var filesystem fs.FS = assets
-	siteHandler, err := New(filesystem)
+	siteHandler, err := New(assets)
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}

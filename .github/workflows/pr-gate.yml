@@ -235,8 +235,13 @@ jobs:
           # coverage badge returns when real component tests execute the
           # code. The TAP reporter is pinned so the summary format cannot
           # change with TTY detection.
+          # awk must consume the full TAP stream: exiting at the first match
+          # sends node EPIPE mid-write, which pipefail (correctly) surfaces
+          # as failure even on a healthy suite. END-print keeps pipefail's
+          # guarantee - a failing suite still fails the step via node's own
+          # exit status - without the self-inflicted SIGPIPE.
           front="$(node --test --test-reporter=tap tests/*.test.mjs 2>&1 \
-            | awk '/^# pass /{print $3; exit}')"
+            | awk '/^# pass /{count=$3} END{print count}')"
           cd ..
           CGO_ENABLED=0 go test -covermode=atomic -coverprofile="${RUNNER_TEMP}/cp.out" ./...
           # Same scaffolding exclusion as the enforcement step, so the badge

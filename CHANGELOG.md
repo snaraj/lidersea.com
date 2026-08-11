@@ -6,6 +6,10 @@ SemVer and match image/chart tags exactly.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.1.8] - 2026-08-11
+
 ### Added
 - End-to-end lifecycle tests for the server process over real TCP sockets:
   serve → graceful drain on context cancellation and on a real SIGTERM,

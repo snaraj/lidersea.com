@@ -114,10 +114,10 @@ func TestBuiltFrontendIsEmbeddedAndServed(t *testing.T) {
 		}
 	}
 	body := root.Body.String()
-	for _, required := range []string{"data-static-fallback", "Hello World!", "Website coming soon!"} {
-		if !strings.Contains(body, required) {
-			t.Fatalf("built root lacks %q: %q", required, body)
-		}
+	// Structure, never copy: the static-fallback marker is the document
+	// contract; the shell's text will change when the real site ships.
+	if !strings.Contains(body, "data-static-fallback") {
+		t.Fatalf("built root lacks the static application fallback marker: %q", body)
 	}
 	if strings.Contains(body, "/src/main.ts") {
 		t.Fatalf("built root still references a development entrypoint: %q", body)
@@ -148,7 +148,7 @@ func TestBuiltFrontendIsEmbeddedAndServed(t *testing.T) {
 			return nil
 		}
 
-		publicPath := "/" + strings.TrimPrefix(path, "./")
+		publicPath := "/" + path
 		cacheControl := "no-cache"
 		if strings.HasPrefix(publicPath, "/assets/") {
 			if !contentHashedAsset.MatchString(publicPath) {

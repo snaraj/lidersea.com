@@ -3,33 +3,28 @@
 package server
 
 import (
-	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"testing/fstest"
+
+	"github.com/snaraj/lidersea.com/internal/testsupport"
 )
 
-// testHandler builds the production handler around deterministic in-memory
-// files, isolating HTTP policy tests from frontend compilation details.
+// testHandler builds the production handler around the canonical in-memory
+// bundle, isolating HTTP policy tests from frontend compilation details.
 func testHandler(t *testing.T) http.Handler {
 	t.Helper()
-	assets := fstest.MapFS{
-		"index.html":        &fstest.MapFile{Data: []byte("<!doctype html><h1>Hello World!</h1><p>Website coming soon!</p>")},
-		"assets/app-abc.js": &fstest.MapFile{Data: []byte("console.log('hello')")},
-		".gitkeep":          &fstest.MapFile{Data: []byte("build placeholder")},
-	}
-	var filesystem fs.FS = assets
-	siteHandler, err := New(filesystem)
+	siteHandler, err := New(testsupport.FrontendFS())
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
 	return siteHandler
 }
 
-// TestRootAndSecurityHeaders protects the uncached document response, its exact
-// temporary launch copy, and the browser-security baseline behind Cloudflare.
+// TestRootAndSecurityHeaders protects the uncached document response and the
+// browser-security baseline that must remain present behind the edge.
 func TestRootAndSecurityHeaders(t *testing.T) {
 	request := httptest.NewRequest(http.MethodGet, "https://example.invalid/", nil)
 	response := httptest.NewRecorder()
@@ -37,10 +32,10 @@ func TestRootAndSecurityHeaders(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d", response.Code)
 	}
-	for _, text := range []string{"Hello World!", "Website coming soon!"} {
-		if !strings.Contains(response.Body.String(), text) {
-			t.Errorf("body does not contain %q: %q", text, response.Body.String())
-		}
+	// The sentinel decouples the assertion from real site copy: the document
+	// body is fixture-owned structure, not a content contract.
+	if !strings.Contains(response.Body.String(), testsupport.FrontendShellSentinel) {
+		t.Fatalf("body does not contain the fixture sentinel: %q", response.Body.String())
 	}
 	for _, header := range []string{"Content-Security-Policy", "Strict-Transport-Security", "X-Content-Type-Options"} {
 		if response.Header().Get(header) == "" {
@@ -68,7 +63,7 @@ func TestNoRequestMethodCanEverMutate(t *testing.T) {
 		http.MethodPatch,
 		http.MethodDelete,
 	}
-	routes := []string{"/", "/livez", "/readyz", "/assets/app-abc.js", "/missing"}
+	routes := []string{"/", "/livez", "/readyz", "/assets/app-abc123.js", "/missing"}
 	for _, route := range routes {
 		for _, method := range mutating {
 			response := httptest.NewRecorder()
@@ -85,14 +80,14 @@ func TestNoRequestMethodCanEverMutate(t *testing.T) {
 func TestAssetCachingAndConditionalRequest(t *testing.T) {
 	siteHandler := testHandler(t)
 	first := httptest.NewRecorder()
-	siteHandler.ServeHTTP(first, httptest.NewRequest(http.MethodGet, "/assets/app-abc.js", nil))
+	siteHandler.ServeHTTP(first, httptest.NewRequest(http.MethodGet, "/assets/app-abc123.js", nil))
 	if first.Code != http.StatusOK {
 		t.Fatalf("first status = %d", first.Code)
 	}
 	if got := first.Header().Get("Cache-Control"); got != "public, max-age=31536000, immutable" {
 		t.Errorf("Cache-Control = %q", got)
 	}
-	secondRequest := httptest.NewRequest(http.MethodGet, "/assets/app-abc.js", nil)
+	secondRequest := httptest.NewRequest(http.MethodGet, "/assets/app-abc123.js", nil)
 	secondRequest.Header.Set("If-None-Match", first.Header().Get("ETag"))
 	second := httptest.NewRecorder()
 	siteHandler.ServeHTTP(second, secondRequest)
@@ -104,7 +99,7 @@ func TestAssetCachingAndConditionalRequest(t *testing.T) {
 // TestAssetRangeRequest locks partial-response support to net/http's bounded
 // reader instead of adding a second ad hoc implementation for static UI assets.
 func TestAssetRangeRequest(t *testing.T) {
-	request := httptest.NewRequest(http.MethodGet, "/assets/app-abc.js", nil)
+	request := httptest.NewRequest(http.MethodGet, "/assets/app-abc123.js", nil)
 	request.Header.Set("Range", "bytes=0-6")
 	response := httptest.NewRecorder()
 	testHandler(t).ServeHTTP(response, request)

@@ -16,17 +16,6 @@ import (
 	"time"
 )
 
-// handler serves the immutable frontend files after New has validated the
-// bundle's entrypoint. It remains private so callers cannot bypass the mux's
-// health endpoints or the securityHeaders wrapper.
-type handler struct {
-	// assets is the read-only, build-generated frontend filesystem.
-	assets fs.FS
-	// index is loaded during construction so a broken image fails before the
-	// process becomes ready rather than failing on the first visitor request.
-	index []byte
-}
-
 // New constructs the complete lidersea.com HTTP handler from built frontend
 // assets. Construction validates index.html up front, wires Kubernetes probe
 // endpoints, and applies one security-header policy to every response.

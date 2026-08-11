@@ -12,18 +12,18 @@ const [fallback, component, styles] = await Promise.all([
 // assertions keep the accessible, responsive first response intact even when
 // JavaScript is slow, unavailable, or rejected by a visitor's policy.
 test('static and hydrated shells preserve the same accessible identity', () => {
-  for (const source of [fallback, component]) {
-    assert.match(source, /Hello World!/);
-    assert.match(source, /Website coming soon!/);
-  }
   assert.match(fallback, /<html lang="en">/);
   assert.match(fallback, /name="viewport"/);
   assert.match(fallback, /data-static-fallback/);
   assert.match(fallback, /<main aria-labelledby="static-page-title"/);
+  // Structure, never copy: each shell must render a non-empty labelling
+  // heading, but the text itself is temporary placeholder content and will be
+  // replaced by the real site — it is deliberately not a contract.
+  assert.match(fallback, /<h1 id="static-page-title">[^<]+<\/h1>/);
   assert.match(component, /<svelte:head>/);
   assert.match(component, /name="description"/);
   assert.match(component, /<main aria-labelledby="page-title">/);
-  assert.match(component, /<h1 id="page-title">Hello World!<\/h1>/);
+  assert.match(component, /<h1 id="page-title">[^<]+<\/h1>/);
 });
 
 test('initial source remains local and viewport-responsive', () => {

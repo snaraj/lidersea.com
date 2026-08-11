@@ -15,6 +15,8 @@ import (
 	"sync"
 	"testing"
 	"testing/fstest"
+
+	"github.com/snaraj/lidersea.com/internal/testsupport"
 )
 
 // faultFS is a deep mock around an in-memory filesystem: it records every
@@ -59,15 +61,6 @@ func (f *faultFS) readsOf(name string) int {
 	return count
 }
 
-// healthyFiles returns the minimal deterministic bundle every subtest here
-// starts from.
-func healthyFiles() fstest.MapFS {
-	return fstest.MapFS{
-		"index.html":        &fstest.MapFile{Data: []byte("<!doctype html><h1>ok</h1>")},
-		"assets/app-abc.js": &fstest.MapFile{Data: []byte("console.log('ok')")},
-	}
-}
-
 // TestReadFailureAfterStatIsFailClosed forces the gap between a successful
 // Stat and a failed read — a torn image or filesystem fault — and requires an
 // opaque 500 that never leaks the internal error while still carrying the
@@ -76,15 +69,15 @@ func healthyFiles() fstest.MapFS {
 func TestReadFailureAfterStatIsFailClosed(t *testing.T) {
 	t.Parallel()
 	fsys := &faultFS{
-		files:    healthyFiles(),
-		readErrs: map[string]error{"assets/app-abc.js": errors.New("injected read fault")},
+		files:    testsupport.FrontendFS(),
+		readErrs: map[string]error{"assets/app-abc123.js": errors.New("injected read fault")},
 	}
 	siteHandler, err := New(fsys)
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
 	response := httptest.NewRecorder()
-	siteHandler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/assets/app-abc.js", nil))
+	siteHandler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/assets/app-abc123.js", nil))
 	if response.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want %d", response.Code, http.StatusInternalServerError)
 	}
@@ -101,7 +94,7 @@ func TestReadFailureAfterStatIsFailClosed(t *testing.T) {
 			t.Errorf("500 response missing %s", header)
 		}
 	}
-	if got := fsys.readsOf("assets/app-abc.js"); got != 1 {
+	if got := fsys.readsOf("assets/app-abc123.js"); got != 1 {
 		t.Errorf("failing asset read %d times, want exactly 1", got)
 	}
 }
@@ -112,7 +105,7 @@ func TestReadFailureAfterStatIsFailClosed(t *testing.T) {
 // exactly once at construction and never again while serving.
 func TestIndexReadOnceAtConstruction(t *testing.T) {
 	t.Parallel()
-	fsys := &faultFS{files: healthyFiles()}
+	fsys := &faultFS{files: testsupport.FrontendFS()}
 	siteHandler, err := New(fsys)
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -140,7 +133,7 @@ func TestIndexReadOnceAtConstruction(t *testing.T) {
 // parseable request URLs.
 func TestAmbiguousPathsAreTerminalNotFound(t *testing.T) {
 	t.Parallel()
-	fsys := &faultFS{files: healthyFiles()}
+	fsys := &faultFS{files: testsupport.FrontendFS()}
 	siteHandler, err := New(fsys)
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
@@ -148,10 +141,10 @@ func TestAmbiguousPathsAreTerminalNotFound(t *testing.T) {
 	for name, target := range map[string]string{
 		"parent traversal":    "/../index.html",
 		"dot segment":         "/./index.html",
-		"leading duplicate":   "//assets/app-abc.js",
-		"interior duplicate":  "/assets//app-abc.js",
-		"trailing slash":      "/assets/app-abc.js/",
-		"backslash separator": "/assets\\app-abc.js",
+		"leading duplicate":   "//assets/app-abc123.js",
+		"interior duplicate":  "/assets//app-abc123.js",
+		"trailing slash":      "/assets/app-abc123.js/",
+		"backslash separator": "/assets\\app-abc123.js",
 		"embedded nul":        "/assets/app\x00.js",
 	} {
 		t.Run(name, func(t *testing.T) {

@@ -220,6 +220,11 @@ jobs:
         env:
           GOTOOLCHAIN: local
         run: |
+          # pipefail makes the TAP-count pipeline fail closed: node --test
+          # exiting nonzero fails this step and publishes nothing, instead of
+          # the pipeline silently taking awk's exit status and letting a
+          # partially failing suite publish a green count on a main push.
+          set -o pipefail
           cd frontend
           npm ci --ignore-scripts --no-audit --no-fund
           npm run build

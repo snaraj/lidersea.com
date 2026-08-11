@@ -101,17 +101,3 @@ func TestNewEnvelopeCarriesTheDescriptor(t *testing.T) {
 		}
 	}
 }
-
-// TestSamplePublishedAtIsFixedUTC pins the sample-payload property the cache
-// identity depends on: a constant UTC instant, so sample envelopes marshal
-// to identical bytes on every request, replica, and restart.
-func TestSamplePublishedAtIsFixedUTC(t *testing.T) {
-	t.Parallel()
-	first, second := SamplePublishedAt(), SamplePublishedAt()
-	if !first.Equal(second) || first.Location() != time.UTC {
-		t.Errorf("SamplePublishedAt = %v then %v, want one fixed UTC instant", first, second)
-	}
-	if first.IsZero() {
-		t.Error("SamplePublishedAt is the zero time")
-	}
-}

@@ -1,16 +1,17 @@
-// Package surface defines lidersea.com's surface catalog: the surface/v1
-// envelope every JSON endpoint speaks, the registry of the surfaces this
-// site serves, and each surface's pure data logic. The package is transport-
-// free — it produces values, never HTTP — so every contract here is testable
-// as plain functions and the server package owns all routing and headers.
+// Package surface defines lidersea.com's surface vocabulary: the surface/v1
+// envelope every JSON endpoint speaks and the registry of the surfaces this
+// site serves. It is deliberately thin — a contract package, not a logic
+// package: each surface's data and rules live in that surface's own domain
+// package (internal/board, internal/reviews, internal/estimates), and the
+// server layer composes domain payloads into envelopes at its routes.
 package surface
 
 import "time"
 
 // NewEnvelope wraps a surface payload in the site's one response shape. The
 // caller supplies the generation instant explicitly: embedded samples pass
-// their fixed publication instant (keeping response bytes and ETags stable),
-// while computed responses pass their real generation time.
+// their domain's fixed publication instant (keeping response bytes and ETags
+// stable), while computed responses pass their real generation time.
 func NewEnvelope(d Descriptor, status Status, generatedAt time.Time, data any) Envelope {
 	return Envelope{
 		Schema:      Schema,
@@ -21,11 +22,4 @@ func NewEnvelope(d Descriptor, status Status, generatedAt time.Time, data any) E
 		Status:      status,
 		Data:        data,
 	}
-}
-
-// SamplePublishedAt exposes the fixed publication instant of the embedded
-// sample payloads, so the server builds envelopes carrying exactly the
-// samples' generation time.
-func SamplePublishedAt() time.Time {
-	return samplePublishedAt
 }

@@ -1,11 +1,14 @@
-// board.go implements the media-mosaic/v1 surface: the embedded sample board
-// and its cursor pagination. The sample ships first so the UI can build
-// against the real contract; real content arrives when the platform storage
-// layer lands and a publishing flow writes digest-addressed files under the
-// media root (the chart's media volume is documented, deliberately unwired,
-// until that storage design is decided).
-
-package surface
+// Package board is the media-mosaic/v1 domain: the mosaic board's data
+// model, its embedded sample content, and cursor pagination. It is pure —
+// no HTTP, no I/O, no envelope knowledge — so the server layer composes it
+// into responses and every behavior here is testable as plain functions.
+//
+// The sample board ships first so the UI builds against the real contract;
+// real content arrives when the platform storage layer lands and a
+// publishing flow writes digest-addressed files under the media root (the
+// chart's media volume is documented, deliberately unwired, until that
+// storage design is decided).
+package board
 
 import (
 	"crypto/sha256"
@@ -13,17 +16,23 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"time"
 )
 
 // ErrUnknownCursor reports a pagination cursor that names no block. It is a
 // client error: cursors are only ever issued by a previous page.
 var ErrUnknownCursor = errors.New("unknown board cursor")
 
-// BoardPage returns one page of the board. An empty cursor starts from the
-// newest block; otherwise the page starts after the block the cursor names.
-// The page size is fixed server-side (boardPageSize) so pagination has no
-// client-tunable cost knob.
-func BoardPage(cursor string) (BoardData, error) {
+// PublishedAt is the generation instant of the sample board, exposed so the
+// composing layer can stamp envelopes with exactly the data's provenance.
+func PublishedAt() time.Time {
+	return samplePublishedAt
+}
+
+// Page returns one page of the board. An empty cursor starts from the newest
+// block; otherwise the page starts after the block the cursor names. The
+// page size is fixed here so pagination has no client-tunable cost knob.
+func Page(cursor string) (Data, error) {
 	blocks := sampleBoard()
 	start := 0
 	if cursor != "" {
@@ -35,12 +44,12 @@ func BoardPage(cursor string) (BoardData, error) {
 			}
 		}
 		if start < 0 {
-			return BoardData{}, ErrUnknownCursor
+			return Data{}, ErrUnknownCursor
 		}
 	}
 
-	end := min(start+boardPageSize, len(blocks))
-	page := BoardData{Blocks: blocks[start:end]}
+	end := min(start+pageSize, len(blocks))
+	page := Data{Blocks: blocks[start:end]}
 	if end < len(blocks) {
 		page.NextCursor = blocks[end-1].ID
 	}
@@ -103,59 +112,59 @@ func sampleBoard() []Block {
 
 	return []Block{
 		{
-			ID: "hull-restoration", Kind: BlockKindImage, Media: hull,
+			ID: "hull-restoration", Kind: KindImage, Media: hull,
 			Text:      &Text{Title: "Hull restoration", Body: "Oxidation removal, compound, and a full polish."},
 			Tags:      []string{"hull", "polish"},
 			CreatedAt: "2026-08-09T14:00:00Z",
 			Span:      2,
 		},
 		{
-			ID: "detailing-walkthrough", Kind: BlockKindVideo, Media: walkthrough,
+			ID: "detailing-walkthrough", Kind: KindVideo, Media: walkthrough,
 			Tags:      []string{"detailing", "walkthrough"},
 			CreatedAt: "2026-08-07T10:30:00Z",
 		},
 		{
-			ID: "craft-note", Kind: BlockKindText,
+			ID: "craft-note", Kind: KindText,
 			Text:      &Text{Title: "Why detail matters", Body: "Salt is relentless. A sealed, detailed finish is the difference between weathering a season and wearing it."},
 			Tags:      []string{"notes"},
 			CreatedAt: "2026-08-05T09:00:00Z",
 		},
 		{
-			ID: "teak-brightwork", Kind: BlockKindImage, Media: teak,
+			ID: "teak-brightwork", Kind: KindImage, Media: teak,
 			Text:      &Text{Title: "Teak brightwork", Body: "Stripped, sanded, and oiled to grain."},
 			Tags:      []string{"teak", "brightwork"},
 			CreatedAt: "2026-08-02T16:45:00Z",
 		},
 		{
-			ID: "helm-refit", Kind: BlockKindImage, Media: helm,
+			ID: "helm-refit", Kind: KindImage, Media: helm,
 			Tags:      []string{"refit", "interior"},
 			CreatedAt: "2026-07-28T12:00:00Z",
 		},
 		{
-			ID: "ceramic-coating", Kind: BlockKindVideo, Media: ceramic,
+			ID: "ceramic-coating", Kind: KindVideo, Media: ceramic,
 			Text:      &Text{Title: "Ceramic coating", Body: "Waterline to rail in one continuous pass."},
 			Tags:      []string{"coating"},
 			CreatedAt: "2026-07-21T11:15:00Z",
 		},
 		{
-			ID: "service-note", Kind: BlockKindText,
+			ID: "service-note", Kind: KindText,
 			Text:      &Text{Title: "Seasonal programs", Body: "Monthly wash-downs, quarterly details, and haul-out prep on a standing schedule."},
 			Tags:      []string{"notes", "programs"},
 			CreatedAt: "2026-07-14T08:00:00Z",
 		},
 		{
-			ID: "interior-detail", Kind: BlockKindImage, Media: interior,
+			ID: "interior-detail", Kind: KindImage, Media: interior,
 			Tags:      []string{"interior", "detailing"},
 			CreatedAt: "2026-07-06T15:20:00Z",
 		},
 		{
-			ID: "propeller-polish", Kind: BlockKindImage, Media: propeller,
+			ID: "propeller-polish", Kind: KindImage, Media: propeller,
 			Text:      &Text{Title: "Running gear", Body: "Propspeed-ready polish on shafts and props."},
 			Tags:      []string{"running-gear"},
 			CreatedAt: "2026-06-30T13:05:00Z",
 		},
 		{
-			ID: "mooring-note", Kind: BlockKindText,
+			ID: "mooring-note", Kind: KindText,
 			Text:      &Text{Body: "Now booking end-of-season detailing slots."},
 			Tags:      []string{},
 			CreatedAt: "2026-06-24T09:40:00Z",

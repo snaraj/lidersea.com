@@ -103,11 +103,11 @@ jobs:
       - name: Enforce and report Go test coverage
         env:
           GOTOOLCHAIN: local
-          # Ratchet-only floor (total statement coverage, measured at 91.2%
+          # Ratchet-only floor (total statement coverage, measured at 97.6%
           # when last raised, with test scaffolding excluded — see the filter
           # below). Raise it as coverage grows; lowering it weakens an
           # enforced check and is out of policy.
-          GO_COVERAGE_FLOOR: '88.2'
+          GO_COVERAGE_FLOOR: '95.0'
         run: |
           CGO_ENABLED=0 go test -covermode=atomic \
             -coverprofile="${RUNNER_TEMP}/site.cover.out" ./...

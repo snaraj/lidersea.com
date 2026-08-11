@@ -1,8 +1,7 @@
-// board_test pins the media-mosaic/v1 contract: block well-formedness, the
-// zero-CLS media metadata, the digest-immutable URL class of every sample
-// address, and the cursor walk's completeness.
-
-package surface
+// Package board tests pin the media-mosaic/v1 domain: block
+// well-formedness, the zero-CLS media metadata, the digest-immutable URL
+// class of every sample address, and the cursor walk's completeness.
+package board
 
 import (
 	"errors"
@@ -17,26 +16,26 @@ import (
 // either importing the other's constant.
 var immutableMediaURL = regexp.MustCompile(`^/media/immutable/[0-9a-f]{64}/[A-Za-z0-9][A-Za-z0-9._-]*$`)
 
-// TestBoardPaginationWalksEveryBlockExactlyOnce follows cursors from the
-// first page to exhaustion and requires full, duplicate-free, order-
-// preserving coverage with the fixed page size on every non-final page.
-func TestBoardPaginationWalksEveryBlockExactlyOnce(t *testing.T) {
+// TestPaginationWalksEveryBlockExactlyOnce follows cursors from the first
+// page to exhaustion and requires full, duplicate-free, order-preserving
+// coverage with the fixed page size on every non-final page.
+func TestPaginationWalksEveryBlockExactlyOnce(t *testing.T) {
 	t.Parallel()
 	seen := map[string]bool{}
 	var order []string
 	cursor := ""
 	pages := 0
 	for {
-		page, err := BoardPage(cursor)
+		page, err := Page(cursor)
 		if err != nil {
-			t.Fatalf("BoardPage(%q) error = %v", cursor, err)
+			t.Fatalf("Page(%q) error = %v", cursor, err)
 		}
 		pages++
 		if pages > 10 {
 			t.Fatal("cursor walk did not terminate")
 		}
-		if page.NextCursor != "" && len(page.Blocks) != boardPageSize {
-			t.Errorf("non-final page has %d blocks, want %d", len(page.Blocks), boardPageSize)
+		if page.NextCursor != "" && len(page.Blocks) != pageSize {
+			t.Errorf("non-final page has %d blocks, want %d", len(page.Blocks), pageSize)
 		}
 		for _, block := range page.Blocks {
 			if seen[block.ID] {
@@ -66,30 +65,41 @@ func TestBoardPaginationWalksEveryBlockExactlyOnce(t *testing.T) {
 	}
 }
 
-// TestBoardCursorEdges covers the cursor's failure and boundary behavior: an
+// TestCursorEdges covers the cursor's failure and boundary behavior: an
 // unknown cursor is a client error, and the final block's cursor yields an
 // empty terminal page rather than an error.
-func TestBoardCursorEdges(t *testing.T) {
+func TestCursorEdges(t *testing.T) {
 	t.Parallel()
-	if _, err := BoardPage("no-such-block"); !errors.Is(err, ErrUnknownCursor) {
-		t.Errorf("BoardPage(unknown) error = %v, want ErrUnknownCursor", err)
+	if _, err := Page("no-such-block"); !errors.Is(err, ErrUnknownCursor) {
+		t.Errorf("Page(unknown) error = %v, want ErrUnknownCursor", err)
 	}
 	blocks := sampleBoard()
-	last, err := BoardPage(blocks[len(blocks)-1].ID)
+	last, err := Page(blocks[len(blocks)-1].ID)
 	if err != nil {
-		t.Fatalf("BoardPage(final id) error = %v", err)
+		t.Fatalf("Page(final id) error = %v", err)
 	}
 	if len(last.Blocks) != 0 || last.NextCursor != "" {
 		t.Errorf("page after the final block = %+v, want empty and terminal", last)
 	}
 }
 
-// TestBoardBlocksAreWellFormed requires every sample block to satisfy the
+// TestPublishedAtIsFixedUTC pins the sample-data property the cache identity
+// depends on: a constant UTC instant, so sample payloads marshal to
+// identical bytes on every request, replica, and restart.
+func TestPublishedAtIsFixedUTC(t *testing.T) {
+	t.Parallel()
+	first, second := PublishedAt(), PublishedAt()
+	if !first.Equal(second) || first.Location() != time.UTC || first.IsZero() {
+		t.Errorf("PublishedAt = %v then %v, want one fixed UTC instant", first, second)
+	}
+}
+
+// TestBlocksAreWellFormed requires every sample block to satisfy the
 // media-mosaic/v1 contract the UI reserves layout from: valid kinds, media
 // exactly on media kinds, intrinsic dimensions with a CSS-ready aspect,
 // accessibility text, declared variants, posters on video, parseable
 // timestamps, and non-nil tags.
-func TestBoardBlocksAreWellFormed(t *testing.T) {
+func TestBlocksAreWellFormed(t *testing.T) {
 	t.Parallel()
 	kinds := map[string]int{}
 	for _, block := range sampleBoard() {
@@ -105,7 +115,7 @@ func TestBoardBlocksAreWellFormed(t *testing.T) {
 		}
 
 		switch block.Kind {
-		case BlockKindImage, BlockKindVideo:
+		case KindImage, KindVideo:
 			m := block.Media
 			if m == nil {
 				t.Errorf("%s: %s block without media", block.ID, block.Kind)
@@ -131,14 +141,14 @@ func TestBoardBlocksAreWellFormed(t *testing.T) {
 					t.Errorf("%s: malformed variant %+v", block.ID, v)
 				}
 			}
-			if block.Kind == BlockKindVideo {
+			if block.Kind == KindVideo {
 				if m.Poster == "" || !immutableMediaURL.MatchString(m.Poster) {
 					t.Errorf("%s: video poster %q missing or outside the URL class", block.ID, m.Poster)
 				}
 			} else if m.Poster != "" {
 				t.Errorf("%s: image block carries a poster", block.ID)
 			}
-		case BlockKindText:
+		case KindText:
 			if block.Media != nil {
 				t.Errorf("%s: text block carries media", block.ID)
 			}
@@ -149,7 +159,7 @@ func TestBoardBlocksAreWellFormed(t *testing.T) {
 			t.Errorf("%s: unknown kind %q", block.ID, block.Kind)
 		}
 	}
-	for _, kind := range []string{BlockKindImage, BlockKindVideo, BlockKindText} {
+	for _, kind := range []string{KindImage, KindVideo, KindText} {
 		if kinds[kind] == 0 {
 			t.Errorf("sample board demonstrates no %q block", kind)
 		}

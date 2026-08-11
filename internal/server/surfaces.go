@@ -1,12 +1,15 @@
-// surfaces.go serves the surface catalog under /api/. Routing is explicit:
-// exactly the registry's routes exist, every unknown /api/ path is an opaque
-// 404, and the sitewide read-only contract holds everywhere except the two
-// documented, individually-gated write carve-outs (POST /api/reviews and
-// POST /api/estimates/preview), which are off by default and admit POST on
-// their one route only. The security-header policy — including the CSP's
-// form-action 'none' — is identical in every mode: the UI submits gated
-// writes with fetch(), which default-src 'self' already governs, so opening
-// a gate never touches a header.
+// surfaces.go serves the surface catalog under /api/ by COMPOSING the domain
+// packages: internal/board, internal/reviews, and internal/estimates (with
+// its render subpackage) produce every payload; this file owns only the HTTP
+// boundary — routing, method contracts, gates, decoding, and cache identity.
+// Routing is explicit: exactly the registry's routes exist, every unknown
+// /api/ path is an opaque 404, and the sitewide read-only contract holds
+// everywhere except the two documented, individually-gated write carve-outs
+// (POST /api/reviews and POST /api/estimates/preview), which are off by
+// default and admit POST on their one route only. The security-header
+// policy — including the CSP's form-action 'none' — is identical in every
+// mode: the UI submits gated writes with fetch(), which default-src 'self'
+// already governs, so opening a gate never touches a header.
 
 package server
 
@@ -21,6 +24,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/snaraj/lidersea.com/internal/board"
+	"github.com/snaraj/lidersea.com/internal/estimates"
+	"github.com/snaraj/lidersea.com/internal/estimates/render"
+	"github.com/snaraj/lidersea.com/internal/reviews"
 	"github.com/snaraj/lidersea.com/internal/surface"
 )
 
@@ -42,18 +49,19 @@ func (a *apiHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // serveBoard answers GET /api/board: one cursor-paginated page of the
 // media-mosaic/v1 sample board under the surface envelope. The page size is
-// fixed server-side; the cursor is the only client input and an unknown one
-// is a client error, because cursors are only ever issued by a prior page.
+// fixed in the domain; the cursor is the only client input and an unknown
+// one is a client error, because cursors are only ever issued by a prior
+// page.
 func (a *apiHandler) serveBoard(w http.ResponseWriter, r *http.Request) {
 	if !allowReadMethod(w, r) {
 		return
 	}
-	page, err := surface.BoardPage(r.URL.Query().Get("cursor"))
+	page, err := board.Page(r.URL.Query().Get("cursor"))
 	if err != nil {
 		http.Error(w, "unknown board cursor", http.StatusBadRequest)
 		return
 	}
-	serveSurfaceJSON(w, r, surface.NewEnvelope(surface.Board, surface.StatusOK, surface.SamplePublishedAt(), page))
+	serveSurfaceJSON(w, r, surface.NewEnvelope(surface.Board, surface.StatusOK, board.PublishedAt(), page))
 }
 
 // serveReviews answers /api/reviews. Reads are always available. The write
@@ -73,7 +81,7 @@ func (a *apiHandler) serveReviews(w http.ResponseWriter, r *http.Request) {
 	} else if !allowReadMethod(w, r) {
 		return
 	}
-	env := surface.NewEnvelope(surface.Reviews, surface.StatusOK, surface.SamplePublishedAt(), surface.ReviewsSnapshot())
+	env := surface.NewEnvelope(surface.Reviews, surface.StatusOK, reviews.PublishedAt(), reviews.Snapshot())
 	serveSurfaceJSON(w, r, env)
 }
 
@@ -82,11 +90,11 @@ func (a *apiHandler) serveReviews(w http.ResponseWriter, r *http.Request) {
 // storage layer lands, so a valid submission receives 503 with an
 // unavailable envelope instead of a fabricated acceptance.
 func (a *apiHandler) submitReview(w http.ResponseWriter, r *http.Request) {
-	var submission surface.ReviewSubmission
+	var submission reviews.Submission
 	if !decodeJSONBody(w, r, maxReviewRequestBytes, &submission) {
 		return
 	}
-	if err := surface.ValidateReviewSubmission(submission); err != nil {
+	if err := reviews.ValidateSubmission(submission); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -99,6 +107,12 @@ func (a *apiHandler) submitReview(w http.ResponseWriter, r *http.Request) {
 // ESTIMATES_ENABLED is explicitly on. Off (the default), the route does not
 // exist: an opaque 404 for every method, indistinguishable from any unknown
 // /api/ path, so the disabled surface is invisible rather than discoverable.
+//
+// ?format= selects the response document: the canonical enveloped JSON by
+// default, or a registered rendering (markdown, html) of the same computed
+// estimate. Unknown formats fail closed with 400 — never a silent fallback —
+// and the format is validated BEFORE the body is read, so a bad parameter
+// costs nothing.
 func (a *apiHandler) serveEstimatePreview(w http.ResponseWriter, r *http.Request) {
 	if !a.cfg.EstimatesEnabled {
 		http.NotFound(w, r)
@@ -107,17 +121,41 @@ func (a *apiHandler) serveEstimatePreview(w http.ResponseWriter, r *http.Request
 	if !allowMethods(w, r, http.MethodPost) {
 		return
 	}
-	var req surface.EstimateRequest
+	format := r.URL.Query().Get("format")
+	if format == "" {
+		format = render.FormatJSON
+	}
+	var renderer render.Renderer
+	if format != render.FormatJSON {
+		var known bool
+		if renderer, known = render.For(format); !known {
+			http.Error(w, "unknown estimate format", http.StatusBadRequest)
+			return
+		}
+	}
+	var req estimates.Request
 	if !decodeJSONBody(w, r, maxEstimateRequestBytes, &req) {
 		return
 	}
 	now := time.Now()
-	data, err := surface.ComputeEstimate(req, now)
+	estimate, err := estimates.Compute(req, now)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	writeSurfaceJSON(w, http.StatusOK, surface.NewEnvelope(surface.Estimates, surface.StatusOK, now, data))
+	if renderer == nil {
+		writeSurfaceJSON(w, http.StatusOK, surface.NewEnvelope(surface.Estimates, surface.StatusOK, now, estimate))
+		return
+	}
+	document, err := renderer.Render(estimate)
+	if err != nil {
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Type", renderer.ContentType())
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(document)
 }
 
 // allowMethods is the carve-out companion to allowReadMethod: the identical
@@ -138,9 +176,9 @@ func allowMethods(w http.ResponseWriter, r *http.Request, methods ...string) boo
 // serveSurfaceJSON serves a read envelope with the same cache identity
 // discipline as serveBytes: a digest strong ETag over the exact payload
 // bytes and the no-cache revalidation class, delegating conditional and HEAD
-// behavior to net/http. Sample-backed envelopes carry a fixed generatedAt,
-// so their bytes — and therefore their ETags — are stable and 304
-// revalidation works end to end.
+// behavior to net/http. Sample-backed envelopes carry their domain's fixed
+// publication instant, so their bytes — and therefore their ETags — are
+// stable and 304 revalidation works end to end.
 func serveSurfaceJSON(w http.ResponseWriter, r *http.Request, env surface.Envelope) {
 	payload, err := json.Marshal(env)
 	if err != nil {

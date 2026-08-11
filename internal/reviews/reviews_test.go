@@ -1,8 +1,7 @@
-// reviews_test pins the reviews/v1 contract: sample well-formedness, the
-// server-computed aggregate's integer-tenths math, and the strict submission
-// validation guarding the gated write path.
-
-package surface
+// Package reviews tests pin the reviews/v1 domain: sample well-formedness,
+// the server-computed aggregate's integer-tenths math, and the strict
+// submission validation guarding the gated write path.
+package reviews
 
 import (
 	"strings"
@@ -10,13 +9,13 @@ import (
 	"time"
 )
 
-// TestReviewsSnapshotAggregateIsServerMath recomputes the aggregate from the
-// served list independently and requires exact agreement: histogram totals,
-// count, and the half-up integer-tenths mean. Clients render these numbers;
-// this test is why they never need to derive them.
-func TestReviewsSnapshotAggregateIsServerMath(t *testing.T) {
+// TestSnapshotAggregateIsServerMath recomputes the aggregate from the served
+// list independently and requires exact agreement: histogram totals, count,
+// and the half-up integer-tenths mean. Clients render these numbers; this
+// test is why they never need to derive them.
+func TestSnapshotAggregateIsServerMath(t *testing.T) {
 	t.Parallel()
-	data := ReviewsSnapshot()
+	data := Snapshot()
 	if len(data.Reviews) == 0 {
 		t.Fatal("sample snapshot has no reviews")
 	}
@@ -45,7 +44,7 @@ func TestReviewsSnapshotAggregateIsServerMath(t *testing.T) {
 }
 
 // TestAggregateEdges covers the empty set (an honest zero aggregate, no
-// division) and a hand-checked rounding case.
+// division) and hand-checked rounding cases.
 func TestAggregateEdges(t *testing.T) {
 	t.Parallel()
 	empty := aggregate(nil)
@@ -64,6 +63,16 @@ func TestAggregateEdges(t *testing.T) {
 	}
 }
 
+// TestPublishedAtIsFixedUTC pins the sample-data property the cache identity
+// depends on: a constant UTC instant.
+func TestPublishedAtIsFixedUTC(t *testing.T) {
+	t.Parallel()
+	first, second := PublishedAt(), PublishedAt()
+	if !first.Equal(second) || first.Location() != time.UTC || first.IsZero() {
+		t.Errorf("PublishedAt = %v then %v, want one fixed UTC instant", first, second)
+	}
+}
+
 // TestSampleReviewsAreWellFormed requires every sample review to satisfy the
 // contract shape: ids, in-range integer ratings, first-party source,
 // parseable timestamps, and text within the submission caps (samples must
@@ -79,53 +88,53 @@ func TestSampleReviewsAreWellFormed(t *testing.T) {
 		if review.Rating < 1 || review.Rating > 5 {
 			t.Errorf("%s: rating %d out of range", review.ID, review.Rating)
 		}
-		if review.Source != ReviewSourceFirstParty {
-			t.Errorf("%s: source = %q, want %q", review.ID, review.Source, ReviewSourceFirstParty)
+		if review.Source != SourceFirstParty {
+			t.Errorf("%s: source = %q, want %q", review.ID, review.Source, SourceFirstParty)
 		}
 		if _, err := time.Parse(time.RFC3339, review.CreatedAt); err != nil {
 			t.Errorf("%s: createdAt %q is not RFC 3339", review.ID, review.CreatedAt)
 		}
-		if err := ValidateReviewSubmission(ReviewSubmission{Author: review.Author, Rating: review.Rating, Text: review.Text}); err != nil {
+		if err := ValidateSubmission(Submission{Author: review.Author, Rating: review.Rating, Text: review.Text}); err != nil {
 			t.Errorf("%s: sample violates the submission contract: %v", review.ID, err)
 		}
 	}
 }
 
-// TestValidateReviewSubmission drives the whole validation table: the 1-5
-// integer rating bounds, required fields, whitespace-only rejection, and the
+// TestValidateSubmission drives the whole validation table: the 1-5 integer
+// rating bounds, required fields, whitespace-only rejection, and the
 // byte-length caps at their exact boundaries.
-func TestValidateReviewSubmission(t *testing.T) {
+func TestValidateSubmission(t *testing.T) {
 	t.Parallel()
-	valid := ReviewSubmission{Author: "Charter owner", Rating: 5, Text: "Excellent work."}
+	valid := Submission{Author: "Charter owner", Rating: 5, Text: "Excellent work."}
 	tests := []struct {
 		name    string
-		mutate  func(*ReviewSubmission)
+		mutate  func(*Submission)
 		wantErr bool
 	}{
-		{name: "valid", mutate: func(s *ReviewSubmission) {}},
-		{name: "rating low", mutate: func(s *ReviewSubmission) { s.Rating = 0 }, wantErr: true},
-		{name: "rating high", mutate: func(s *ReviewSubmission) { s.Rating = 6 }, wantErr: true},
-		{name: "rating negative", mutate: func(s *ReviewSubmission) { s.Rating = -1 }, wantErr: true},
-		{name: "rating boundary one", mutate: func(s *ReviewSubmission) { s.Rating = 1 }},
-		{name: "author empty", mutate: func(s *ReviewSubmission) { s.Author = "" }, wantErr: true},
-		{name: "author whitespace", mutate: func(s *ReviewSubmission) { s.Author = "   " }, wantErr: true},
-		{name: "author at cap", mutate: func(s *ReviewSubmission) { s.Author = strings.Repeat("a", 120) }},
-		{name: "author over cap", mutate: func(s *ReviewSubmission) { s.Author = strings.Repeat("a", 121) }, wantErr: true},
-		{name: "text empty", mutate: func(s *ReviewSubmission) { s.Text = "" }, wantErr: true},
-		{name: "text whitespace", mutate: func(s *ReviewSubmission) { s.Text = " \n\t" }, wantErr: true},
-		{name: "text at cap", mutate: func(s *ReviewSubmission) { s.Text = strings.Repeat("b", 2000) }},
-		{name: "text over cap", mutate: func(s *ReviewSubmission) { s.Text = strings.Repeat("b", 2001) }, wantErr: true},
+		{name: "valid", mutate: func(s *Submission) {}},
+		{name: "rating low", mutate: func(s *Submission) { s.Rating = 0 }, wantErr: true},
+		{name: "rating high", mutate: func(s *Submission) { s.Rating = 6 }, wantErr: true},
+		{name: "rating negative", mutate: func(s *Submission) { s.Rating = -1 }, wantErr: true},
+		{name: "rating boundary one", mutate: func(s *Submission) { s.Rating = 1 }},
+		{name: "author empty", mutate: func(s *Submission) { s.Author = "" }, wantErr: true},
+		{name: "author whitespace", mutate: func(s *Submission) { s.Author = "   " }, wantErr: true},
+		{name: "author at cap", mutate: func(s *Submission) { s.Author = strings.Repeat("a", 120) }},
+		{name: "author over cap", mutate: func(s *Submission) { s.Author = strings.Repeat("a", 121) }, wantErr: true},
+		{name: "text empty", mutate: func(s *Submission) { s.Text = "" }, wantErr: true},
+		{name: "text whitespace", mutate: func(s *Submission) { s.Text = " \n\t" }, wantErr: true},
+		{name: "text at cap", mutate: func(s *Submission) { s.Text = strings.Repeat("b", 2000) }},
+		{name: "text over cap", mutate: func(s *Submission) { s.Text = strings.Repeat("b", 2001) }, wantErr: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 			submission := valid
 			test.mutate(&submission)
-			err := ValidateReviewSubmission(submission)
+			err := ValidateSubmission(submission)
 			if (err != nil) != test.wantErr {
-				t.Errorf("ValidateReviewSubmission(%+v) error = %v, wantErr %v", submission, err, test.wantErr)
+				t.Errorf("ValidateSubmission(%+v) error = %v, wantErr %v", submission, err, test.wantErr)
 			}
-			if err != nil && (strings.Contains(err.Error(), submission.Author) && submission.Author != "") {
+			if err != nil && submission.Author != "" && strings.Contains(err.Error(), submission.Author) {
 				t.Errorf("validation error %q echoes client input", err)
 			}
 		})

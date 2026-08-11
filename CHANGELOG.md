@@ -7,6 +7,47 @@ SemVer and match image/chart tags exactly.
 ## [Unreleased]
 
 ### Added
+- Surface API (issues #19/#20/#21, wiring only): the site's own
+  `surface/v1` envelope `{schema, id, kind, title, generatedAt,
+  status: ok|stale|unavailable, data}` with an explicit-route registry —
+  `GET /api/board` (media-mosaic/v1: image/video/text blocks carrying
+  width/height/aspect and pre-declared variants for zero-CLS layout,
+  fixed-size cursor pagination) and `GET /api/reviews` (reviews/v1:
+  embedded samples with a server-computed integer-tenths aggregate).
+  Unknown `/api/` paths are opaque 404s; sample-backed envelopes carry a
+  fixed publication instant so their digest ETags revalidate to 304s;
+  payload budgets (board page ≤ 48 KiB, reviews ≤ 16 KiB) are pinned by
+  tests. Domain logic lives in dedicated packages (`internal/board`,
+  `internal/reviews`, `internal/estimates`) that the server composes.
+- Estimates domain (estimates/v1): pure integer-cent computation — int64
+  cents and basis points only, one documented rounding mode (half up,
+  once, on the summed taxable base), overflow-decomposed tax product
+  proven at the caps' extremes — plus a renderer registry
+  (`internal/estimates/render`: markdown and HTML in pure Go, byte-exact
+  goldens, renderers never recompute; PDF v1 is the browser's
+  print-to-PDF and true server-side PDF is a flagged owner dependency
+  decision) and a delivery contract (`internal/estimates/delivery`:
+  interface plus an honest "not configured" refusal; transport waits on
+  the platform egress design). `POST /api/estimates/preview?format=`
+  ships behind `ESTIMATES_ENABLED` (default off: opaque 404).
+- Gated review write path: `POST /api/reviews` behind
+  `REVIEWS_WRITE_ENABLED` (default off). The default build keeps the
+  GET/HEAD-only contract test and the `form-action 'none'` CSP
+  byte-intact; the enabled mode is a narrowly-scoped carve-out (only
+  this route, strict validation, size caps, honest 503
+  "storage not configured" until persistence exists) asserted by its own
+  explicit suite, and the security-header policy is byte-identical in
+  every mode.
+- Media pipeline (`internal/media`): env-gated
+  (`MEDIA_ENABLED`/`MEDIA_ROOT`/`MEDIA_MAX_CONCURRENT`, all-or-nothing,
+  fail-closed at startup) serving the digest-immutable URL class
+  `/media/immutable/<sha256>/<name>` with explicit Range support pinned
+  by a start/middle/suffix/open/multipart/malformed/416 matrix, digest
+  strong ETags with the immutable cache class, a distroless-safe media
+  content-type allowlist (no SVG), kernel-enforced root containment
+  (`os.Root`), and bounded concurrency with honest 503 shedding. Chart
+  media-volume wiring is documented, deliberately unwired, until the
+  platform storage design lands.
 - Visitor-scenario end-to-end suites: a hand-written stdlib mock-browser
   harness (`internal/testsupport.Visitor`) remembers and replays ETags
   like a browser cache, follows the document's asset references, and
@@ -41,8 +82,9 @@ SemVer and match image/chart tags exactly.
   so the temporary hello-world shell can become the real site without
   breaking behavior tests; AGENTS.md documents this and the other
   sanctioned-evolution paths.
-- Go coverage floor raised 88.0% to 88.2% (ratchet-only; measured 91.2%
-  on the scaffolding-excluded production denominator).
+- Go coverage floor raised 88.0% to 88.2%, then 88.2% to 95.0% with the
+  surface suites (ratchet-only; measured 97.6% on the
+  scaffolding-excluded production denominator).
 
 ### Fixed
 - The frontend badge no longer publishes a vacuous coverage percentage:

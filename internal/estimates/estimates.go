@@ -1,8 +1,10 @@
-// estimates.go implements the estimates/v1 surface: a pure computation
-// module turning line items into integer-cent totals. The math is server-
-// authoritative — client arithmetic is never trusted — and float-free: every
-// money value is an int64 cent amount and the tax rate is integer basis
-// points, so results are exact and identical on every platform.
+// Package estimates is the estimates/v1 domain: a pure computation module
+// turning line items into a canonical integer-cent estimate. It is pure —
+// no HTTP, no I/O, no rendering — so the math is server-authoritative
+// (client arithmetic is never trusted) and float-free: every money value is
+// an int64 cent amount and the tax rate is integer basis points, so results
+// are exact and identical on every platform. Presentation lives in the
+// sibling render package; delivery in the delivery package.
 //
 // ROUNDING MODE (the single documented mode): tax is computed once on the
 // summed taxable base, rounded half up to the nearest cent —
@@ -13,17 +15,16 @@
 // integer products.
 //
 // Persistence, numbering, and sending are future stages on the platform
-// storage layer; preview computes and returns, nothing more.
-
-package surface
+// storage layer; Compute computes and returns, nothing more.
+package estimates
 
 import (
 	"errors"
 	"time"
 )
 
-// Estimate validation errors: static, client-safe strings (never echoes of
-// input), each naming the first violated rule.
+// Validation errors: static, client-safe strings (never echoes of input),
+// each naming the first violated rule.
 var (
 	errCurrencyInvalid = errors.New("currency must be a three-letter uppercase code")
 	errTaxRateInvalid  = errors.New("taxRateBps must be an integer between 0 and 10000")
@@ -34,63 +35,63 @@ var (
 	errItemUnitCents   = errors.New("line item unitCents must be an integer between 0 and 100000000")
 )
 
-// ComputeEstimate validates a request and computes the estimate at the given
-// instant. The input caps double as the overflow proof for the int64 math:
-// one line amount is at most maxQty × maxUnitCents = 10^13 cents, the
-// subtotal at most maxEstimateItems × 10^13 = 10^15, and the tax
-// decomposition below never multiplies more than 10^11 × 10^4 — all far
-// inside int64's 9.2×10^18 range.
-func ComputeEstimate(req EstimateRequest, now time.Time) (EstimateData, error) {
+// Compute validates a request and computes the canonical estimate at the
+// given instant. The input caps double as the overflow proof for the int64
+// math: one line amount is at most maxQty × maxUnitCents = 10^13 cents, the
+// subtotal at most maxItems × 10^13 = 10^15, and the tax decomposition below
+// never multiplies more than 10^11 × 10^4 — all far inside int64's 9.2×10^18
+// range.
+func Compute(req Request, now time.Time) (Estimate, error) {
 	if !validCurrency(req.Currency) {
-		return EstimateData{}, errCurrencyInvalid
+		return Estimate{}, errCurrencyInvalid
 	}
 	if req.TaxRateBps < 0 || req.TaxRateBps > maxTaxRateBps {
-		return EstimateData{}, errTaxRateInvalid
+		return Estimate{}, errTaxRateInvalid
 	}
 	if len(req.Notes) > maxNotesBytes {
-		return EstimateData{}, errNotesTooLong
+		return Estimate{}, errNotesTooLong
 	}
-	if len(req.Items) > maxEstimateItems {
-		return EstimateData{}, errTooManyItems
+	if len(req.Items) > maxItems {
+		return Estimate{}, errTooManyItems
 	}
 
-	data := EstimateData{
+	estimate := Estimate{
 		Currency:   req.Currency,
-		Items:      make([]EstimateLine, 0, len(req.Items)),
+		Items:      make([]Line, 0, len(req.Items)),
 		TaxRateBps: req.TaxRateBps,
 		Notes:      req.Notes,
-		ValidUntil: now.UTC().AddDate(0, 0, estimateValidityDays).Format(time.RFC3339),
-		Status:     EstimateDraft,
+		ValidUntil: now.UTC().AddDate(0, 0, validityDays).Format(time.RFC3339),
+		Status:     StatusDraft,
 	}
 
 	var taxableBase int64
 	for _, item := range req.Items {
 		if item.Description == "" || len(item.Description) > maxDescriptionBytes {
-			return EstimateData{}, errItemDescription
+			return Estimate{}, errItemDescription
 		}
 		if item.Qty < 0 || item.Qty > maxQty {
-			return EstimateData{}, errItemQty
+			return Estimate{}, errItemQty
 		}
 		if item.UnitCents < 0 || item.UnitCents > maxUnitCents {
-			return EstimateData{}, errItemUnitCents
+			return Estimate{}, errItemUnitCents
 		}
 		amount := item.Qty * item.UnitCents
-		data.Items = append(data.Items, EstimateLine{
+		estimate.Items = append(estimate.Items, Line{
 			Description: item.Description,
 			Qty:         item.Qty,
 			UnitCents:   item.UnitCents,
 			Taxable:     item.Taxable,
 			AmountCents: amount,
 		})
-		data.SubtotalCents += amount
+		estimate.SubtotalCents += amount
 		if item.Taxable {
 			taxableBase += amount
 		}
 	}
 
-	data.TaxCents = taxHalfUp(taxableBase, req.TaxRateBps)
-	data.TotalCents = data.SubtotalCents + data.TaxCents
-	return data, nil
+	estimate.TaxCents = taxHalfUp(taxableBase, req.TaxRateBps)
+	estimate.TotalCents = estimate.SubtotalCents + estimate.TaxCents
+	return estimate, nil
 }
 
 // taxHalfUp computes round_half_up(base × bps / 10000) without ever forming

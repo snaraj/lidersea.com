@@ -29,8 +29,10 @@ platform repository's deeper doctrine applies when the two meet.
 - Heavy media never enters git, the bundle, the embed, the image, or a
   ConfigMap/Secret. Small assets respect the documented category and size
   ceilings.
-- Frontend URLs come from `src/lib/media.ts`; components never know hosts,
-  volumes, or origins.
+- No media pipeline exists here yet (`src/lib/media.ts` and
+  `frontend/src/assets/` are naranjo.online structures). When media
+  arrives, frontend URLs come from `src/lib/media.ts`; components never
+  know hosts, volumes, or origins.
 
 ## Versioning and releases
 

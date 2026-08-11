@@ -67,9 +67,10 @@ posture in [SECURITY.md](SECURITY.md).
 
 ## Media
 
-Small UI assets live under `frontend/src/assets/` in documented categories
-with size ceilings. Heavy media (portfolio video, high-resolution
-photography, audio) never enters this repository or the image — it is
+The site ships no media yet. When small UI assets arrive they will live
+under `frontend/src/assets/` in documented categories with size ceilings,
+mirroring naranjo.online. Heavy media (portfolio video, high-resolution
+photography, audio) never enters this repository or the image — it will be
 served from dedicated platform storage, built for it.
 
 ## License

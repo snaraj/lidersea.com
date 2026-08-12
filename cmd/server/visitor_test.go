@@ -149,8 +149,8 @@ func TestVisitorArrivesOverPlainHTTP(t *testing.T) {
 		visitor := insecure.On(t)
 		for _, path := range []string{"/", "/services/detailing?ref=harbor"} {
 			response := visitor.Navigate(path)
-			if response.StatusCode != http.StatusMovedPermanently {
-				t.Fatalf("GET %s over plain http = %d, want 301", path, response.StatusCode)
+			if response.StatusCode != http.StatusPermanentRedirect {
+				t.Fatalf("GET %s over plain http = %d, want 308", path, response.StatusCode)
 			}
 			if got, want := response.Header.Get("Location"), "https://"+host+path; got != want {
 				t.Errorf("Location = %q, want %q — path and query must survive byte for byte", got, want)

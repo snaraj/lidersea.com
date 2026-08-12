@@ -2,16 +2,31 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover"
+    />
     <meta name="color-scheme" content="dark light" />
     <title>lidersea.com</title>
   </head>
   <body>
     <div id="app">
-      <main aria-labelledby="static-page-title" data-static-fallback>
-        <h1 id="static-page-title">Hello World!</h1>
-        <p>Website coming soon!</p>
-      </main>
+      <div class="shell">
+        <!--
+          The chrome is present but empty in the static shell: it reserves
+          exactly the space the mounted theme switcher occupies, so
+          hydration adds a control without moving anything below it. The
+          switcher itself needs script to write a preference, so the static
+          shell honestly shows none.
+        -->
+        <header class="chrome"></header>
+        <main aria-labelledby="static-page-title" data-static-fallback>
+          <div class="message">
+            <h1 id="static-page-title">Hello World!</h1>
+            <p>Website coming soon!</p>
+          </div>
+        </main>
+      </div>
     </div>
     <script type="module" src="/src/main.ts"></script>
   </body>

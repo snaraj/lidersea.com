@@ -173,11 +173,15 @@ conscious edits, never fights:
   pin structure and markers (the `data-static-fallback` marker, fixture
   sentinels, non-empty labelled headings), so shipping real copy must not
   break a handler or shell test.
-- The remote-origin guard in `frontend/tests/experience.test.mjs` today
-  rejects every `//` occurrence in the shell sources. When real content
-  lands, its scoping will need a documented adjustment (still banning
-  remote origins per requirement 1, while permitting legitimate local
-  patterns) — adjust it consciously in that content PR, never delete it.
+- The remote-origin guard in `frontend/tests/experience.test.mjs` is scoped
+  to the two shapes a remote origin can take: an absolute `https?://` URL,
+  and a protocol-relative `//host` reference inside a string, attribute, or
+  `url()`. It previously rejected every `//` occurrence, which also outlawed
+  JavaScript line comments; the narrowing was the documented adjustment the
+  first real component required, and requirement 1 is unchanged in force.
+  Any further scoping is a conscious edit in the PR that needs it, never a
+  deletion — and any remote reference the site ever needs arrives as data
+  from this origin's own API, never as a literal in shell source.
 - Small UI assets, when they arrive, live under documented categories with
   size ceilings, mirroring naranjo.online. Heavy media (portfolio video,
   high-resolution photography, audio) never enters git, the bundle, the
@@ -419,11 +423,15 @@ included; it is the same battery CI enforces:
   production packages. Ratchet only (requirement 7).
 - **Perf budgets are tests.** Payload and bundle caps ship as pinned
   suite assertions, so a budget regression is a red build, never a
-  discussion. No cap constants exist on `main` yet; every surface the
-  feature arcs add (the mosaic media board, reviews, estimates — issues
-  #19–#21) lands WITH its caps pinned as tests. The sibling
-  repository's panels budgets are the pattern; the values re-derive
-  here and are never copied (requirement 5).
+  discussion. Two batteries exist: `internal/web` measures the REAL
+  built artifact (every themed shell variant, each content-addressed
+  asset, the whole embedded bundle), and
+  `frontend/tests/experience.test.mjs` caps shell SOURCE size. Every
+  surface the feature arcs add lands WITH its caps pinned the same way.
+  Caps ratchet DOWN as payloads are trimmed; raising one to admit a
+  regression is the move the budget exists to prevent. The values are
+  derived from this repository's own measurements and are never copied
+  from elsewhere (requirement 5).
 - **Ratchet pairs.** When a stated requirement and shipped behavior
   disagree across lanes, record the gap loudly instead of greenwashing
   it: one green test pins current behavior, and a paired
@@ -484,11 +492,14 @@ placeholder shell predates these floors; they are the bar for every new
 or changed frontend surface, retrofitted by the rendering-lanes arc
 (issue #22):
 
-- **Design tokens only.** `styles.css` becomes a CSS custom-property
-  token layer as the real site lands: palette and spacing live as
-  tokens on `:root` (theme overrides as `[data-theme]` blocks when
-  theming arrives), and components consume tokens — never raw palette
-  literals.
+- **Design tokens only.** `styles.css` is a CSS custom-property token
+  layer: palette and spacing live as tokens on `:root`, theme overrides
+  are `[data-theme]` blocks, and components consume tokens — never raw
+  palette literals. Frontend tests enforce all three: colour literals
+  may appear only in the palette block, every theme must define the same
+  token set, and both palettes are VALIDATED (not asserted) against
+  WCAG 2.2 contrast floors — 4.5:1 for text pairs, 3:1 for interface
+  boundaries.
 - **Dataviz floors.** A value is never encoded by color alone: pair
   color with position, text, or shape, and use palettes validated for
   contrast under every theme.
@@ -502,8 +513,27 @@ or changed frontend surface, retrofitted by the rendering-lanes arc
   video, when it ever arrives, is `playsinline` and muted. Stage 2 —
   browser-emulated smoke lanes in CI — is an owner decision, gated in
   that issue.
+- **Reading themes.** The site serves one shell per theme in
+  `internal/theme`'s catalog (`system`, `light`, `dark`), each stamped
+  with its `data-theme` attribute during `NewSite` and chosen per request
+  by the `lidersea_theme` cookie. The invariants, each pinned by tests:
+  the origin NEVER sets a cookie (the browser writes the preference, the
+  origin only reads it); an absent, unknown, oversized, or hostile cookie
+  value resolves to the default theme and never reaches a document; the
+  shell — and only the shell — answers `Vary: Cookie`, so each variant is
+  its own cached resource with its own digest ETag; and a bundle whose
+  document cannot be stamped fails construction rather than serving an
+  unthemed page. Adding a theme means adding a catalog entry, its
+  `[data-theme]` token block, and its switcher option; nothing else
+  changes.
 - **Zero CLS.** Theme switches and async data arrivals cause no layout
-  shift; space for late content is reserved up front.
+  shift; space for late content is reserved up front. The theme rule is
+  mechanical rather than aspirational: every `[data-theme]` block and the
+  `prefers-color-scheme` mapping may declare CUSTOM PROPERTIES ONLY, so a
+  theme can change colour and nothing that occupies space — a frontend
+  test fails on any other declaration in those blocks. The static shell
+  reserves the chrome the mounted switcher fills, so hydration adds a
+  control without moving the page.
 - **Honest states.** Empty, loading, disabled, and unavailable states
   tell the truth: a missing backend renders an explicit unavailable
   state — an honest "storage not configured" answer, never fabricated

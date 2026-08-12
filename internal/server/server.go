@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/snaraj/lidersea.com/internal/media"
+	"github.com/snaraj/lidersea.com/internal/theme"
 )
 
 // New constructs the complete lidersea.com HTTP handler from built frontend
@@ -26,16 +27,24 @@ func New(assets fs.FS) (http.Handler, error) {
 }
 
 // NewSite constructs the complete lidersea.com HTTP handler for an explicit
-// configuration. Construction validates index.html up front, wires
-// Kubernetes probe endpoints, the surface API, and (when configured) the
-// media pipeline, and applies the one non-configurable security-header
-// policy to every response in every mode.
+// configuration. Construction validates index.html up front and precomputes
+// its themed variants, wires Kubernetes probe endpoints, the surface API,
+// and (when configured) the media pipeline, and applies the one
+// non-configurable security-header policy to every response in every mode.
 func NewSite(assets fs.FS, cfg Config) (http.Handler, error) {
 	index, err := fs.ReadFile(assets, "index.html")
 	if err != nil {
 		return nil, fmt.Errorf("read embedded index: %w", err)
 	}
-	h := &handler{assets: assets, index: index}
+	// One shell per theme, stamped once, here. A shell that cannot carry the
+	// theme attribute is a broken bundle: it would serve every visitor an
+	// unthemed document, so it fails construction alongside a missing
+	// entrypoint rather than degrading silently in front of visitors.
+	shells, err := theme.Variants(index)
+	if err != nil {
+		return nil, fmt.Errorf("stamp themed shells: %w", err)
+	}
+	h := &handler{assets: assets, shells: shells}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/livez", health)
 	mux.HandleFunc("/readyz", health)
@@ -79,6 +88,12 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	name := strings.TrimPrefix(r.URL.Path, "/")
 	if name == "" {
+		// The shell is the one response that depends on a request cookie, so
+		// it is the one response that declares it. Without this, a shared
+		// cache could hand one visitor's themed document to another; with it,
+		// each themed variant keeps its own digest ETag and its own cache
+		// entry. Assets and surfaces read no cookie and declare no variance.
+		w.Header().Set("Vary", "Cookie")
 		// index.html points at content-addressed assets and must be revalidated on
 		// every navigation so a rollout is visible without a stale shell page.
 		// "no-cache" keeps that guarantee — a revalidation is still mandatory —
@@ -87,7 +102,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// document from the origin again. "no-store" would forbid storage outright
 		// and make every navigation a full origin round trip for no safety gain:
 		// this document is public, holds no visitor data, and its ETag is a digest.
-		serveBytes(w, r, "index.html", h.index, "no-cache")
+		serveBytes(w, r, "index.html", h.shell(r), "no-cache")
 		return
 	}
 	if !fs.ValidPath(name) {
@@ -117,6 +132,21 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		cacheControl = "public, max-age=31536000, immutable"
 	}
 	serveBytes(w, r, name, data, cacheControl)
+}
+
+// shell returns the precomputed document for the theme this request asks
+// for. Selection is a lookup and nothing more: the cookie is parsed by the
+// theme domain into a closed catalog value, and the bytes were stamped at
+// construction, so no visitor byte is ever written into a document and no
+// request pays for the transformation. Absent, malformed, oversized, and
+// unknown cookie values all resolve to the default theme, which follows the
+// visitor's own operating-system preference through the stylesheet.
+func (h *handler) shell(r *http.Request) []byte {
+	selected := theme.Default
+	if cookie, err := r.Cookie(theme.CookieName); err == nil {
+		selected, _ = theme.Parse(cookie.Value)
+	}
+	return h.shells[selected]
 }
 
 // allowReadMethod enforces the read-only contract shared by site and probe

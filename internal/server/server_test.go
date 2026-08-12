@@ -10,6 +10,7 @@ import (
 	"testing/fstest"
 
 	"github.com/snaraj/lidersea.com/internal/testsupport"
+	"github.com/snaraj/lidersea.com/internal/theme"
 )
 
 // testHandler builds the production handler around the canonical in-memory
@@ -339,7 +340,7 @@ func TestHealthMethodsAndMissingPath(t *testing.T) {
 		t.Errorf(".gitkeep status = %d", placeholder.Code)
 	}
 	traversal := httptest.NewRecorder()
-	direct := &handler{assets: fstest.MapFS{}, index: []byte("index")}
+	direct := &handler{assets: fstest.MapFS{}, shells: map[theme.Theme][]byte{theme.Default: []byte("index")}}
 	direct.ServeHTTP(traversal, httptest.NewRequest(http.MethodGet, "/../index.html", nil))
 	if traversal.Code != http.StatusNotFound {
 		t.Errorf("traversal status = %d", traversal.Code)

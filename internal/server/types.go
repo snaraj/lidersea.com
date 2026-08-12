@@ -9,6 +9,9 @@ import (
 	"io/fs"
 
 	"github.com/snaraj/lidersea.com/internal/media"
+	"github.com/snaraj/lidersea.com/internal/ratings"
+	"github.com/snaraj/lidersea.com/internal/ratings/collect"
+	"github.com/snaraj/lidersea.com/internal/surface"
 	"github.com/snaraj/lidersea.com/internal/theme"
 )
 
@@ -21,6 +24,16 @@ const (
 	// maxEstimateRequestBytes bounds a POST /api/estimates/preview body.
 	maxEstimateRequestBytes = 32 * 1024
 )
+
+// ratingsStatus maps the ratings domain's freshness verdict onto the
+// envelope's status vocabulary. It is a table rather than a branch so the
+// mapping is total by construction: a freshness value with no entry here
+// resolves to the empty status, which no test tolerates.
+var ratingsStatus = map[ratings.Freshness]surface.Status{
+	ratings.FreshnessCurrent:   surface.StatusOK,
+	ratings.FreshnessAged:      surface.StatusStale,
+	ratings.FreshnessNoRatings: surface.StatusUnavailable,
+}
 
 // reviewStorageUnavailableReason is the honest answer of the review write
 // path until the platform storage layer exists: the contract is live, the
@@ -68,6 +81,17 @@ type Config struct {
 	// compute route (ESTIMATES_ENABLED). Default off: the route is an opaque
 	// 404, indistinguishable from any unknown /api/ path.
 	EstimatesEnabled bool
+	// RatingsCollector configures the optional, gated ratings producer
+	// (RATINGS_COLLECTOR_*). Default off. The handler does not run it — the
+	// process lifecycle does — but it is parsed here so the site has ONE
+	// fail-closed environment door and a typo crashes the pod at startup.
+	RatingsCollector collect.Config
+	// Ratings is the live ratings snapshot the ratings surface serves. Nil
+	// — the production default when nothing else supplies one — makes
+	// NewSite load and validate the embedded snapshot itself. A caller that
+	// also runs the gated collector builds the store first and passes it,
+	// so the collector's refreshes are visible to the surface.
+	Ratings *ratings.Store
 }
 
 // handler serves the immutable frontend files after New has validated the
@@ -90,6 +114,9 @@ type handler struct {
 type apiHandler struct {
 	// cfg carries the write-path gates; the zero value serves reads only.
 	cfg Config
+	// ratings is the validated ratings snapshot, resolved at construction so
+	// no request ever parses the data file.
+	ratings *ratings.Store
 }
 
 // reviewWriteUnavailable is the data payload of the honest 503 the review

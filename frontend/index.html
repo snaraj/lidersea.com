@@ -26,6 +26,13 @@
             <p>Website coming soon!</p>
           </div>
         </main>
+        <!--
+          The ratings strip is reserved here for the same reason as the
+          chrome: its band occupies its final height before any data
+          arrives, so the strip filling in moves nothing. A shell without
+          script shows no ratings and claims none.
+        -->
+        <footer class="ratings" data-ratings-state="static"></footer>
       </div>
     </div>
     <script type="module" src="/src/main.ts"></script>

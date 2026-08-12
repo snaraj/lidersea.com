@@ -1,0 +1,55 @@
+{
+  "publishedAt": "2026-08-12T00:00:00Z",
+  "platforms": [
+    {
+      "id": "google",
+      "name": "Google",
+      "state": "pending",
+      "profileUrl": "",
+      "feedUrl": "",
+      "ratingTenths": 0,
+      "reviewCount": 0,
+      "capturedAt": ""
+    },
+    {
+      "id": "yelp",
+      "name": "Yelp",
+      "state": "pending",
+      "profileUrl": "",
+      "feedUrl": "",
+      "ratingTenths": 0,
+      "reviewCount": 0,
+      "capturedAt": ""
+    },
+    {
+      "id": "facebook",
+      "name": "Facebook",
+      "state": "pending",
+      "profileUrl": "",
+      "feedUrl": "",
+      "ratingTenths": 0,
+      "reviewCount": 0,
+      "capturedAt": ""
+    },
+    {
+      "id": "trustpilot",
+      "name": "Trustpilot",
+      "state": "pending",
+      "profileUrl": "",
+      "feedUrl": "",
+      "ratingTenths": 0,
+      "reviewCount": 0,
+      "capturedAt": ""
+    },
+    {
+      "id": "bbb",
+      "name": "Better Business Bureau",
+      "state": "pending",
+      "profileUrl": "",
+      "feedUrl": "",
+      "ratingTenths": 0,
+      "reviewCount": 0,
+      "capturedAt": ""
+    }
+  ]
+}

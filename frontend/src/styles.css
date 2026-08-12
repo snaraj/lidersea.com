@@ -50,6 +50,9 @@
   --tap-target: 44px;
   --font-size-control: 1rem;
   --chrome-block-size: 3.5rem;
+  --ratings-block-size: 12rem;
+  --meter-block-size: 0.375rem;
+  --meter-inline-size: 4.5rem;
 
   --font-ui: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --motion-fast: 120ms;
@@ -130,7 +133,7 @@ body,
    get the exact answer. */
 .shell {
   display: grid;
-  grid-template-rows: auto 1fr;
+  grid-template-rows: auto 1fr auto;
   min-block-size: 100%;
   padding-inline-start: max(var(--space-md), env(safe-area-inset-left));
   padding-inline-end: max(var(--space-md), env(safe-area-inset-right));
@@ -223,6 +226,112 @@ p {
   color: var(--ink-muted);
   font-size: clamp(1rem, 3vw, 1.5rem);
   letter-spacing: 0.04em;
+}
+
+/* The ratings strip. It reserves its band before any data arrives, so the
+   strip filling in shifts nothing below or above it. */
+.ratings {
+  display: grid;
+  align-content: start;
+  gap: var(--space-sm);
+  min-block-size: var(--ratings-block-size);
+  padding-block-start: var(--space-md);
+  border-block-start: var(--border-hairline) solid var(--edge);
+}
+
+.ratings__title {
+  margin: 0;
+  color: var(--ink);
+  font-size: 1rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.ratings__note {
+  color: var(--ink-muted);
+  font-size: 0.9375rem;
+  letter-spacing: normal;
+}
+
+.ratings__list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ratings__platform {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: var(--space-2xs);
+  min-inline-size: 0;
+  padding: var(--space-sm);
+  border: var(--border-hairline) solid var(--edge);
+  border-radius: var(--radius-md);
+  background: var(--raised);
+}
+
+.ratings__anchor {
+  display: flex;
+  align-items: center;
+  min-block-size: var(--tap-target);
+  color: var(--accent);
+  font-size: var(--font-size-control);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.ratings__anchor--inert {
+  color: var(--ink);
+}
+
+.ratings__anchor:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.ratings__value {
+  color: var(--ink);
+  font-size: 1.25rem;
+  font-weight: 650;
+  line-height: 1;
+}
+
+.ratings__value--pending {
+  color: var(--ink-muted);
+  font-size: var(--font-size-control);
+  font-weight: 500;
+}
+
+.ratings__scale {
+  color: var(--ink-muted);
+  font-size: 0.875rem;
+  font-weight: 500;
+}
+
+.ratings__meter {
+  display: block;
+  inline-size: var(--meter-inline-size);
+  max-inline-size: 100%;
+  block-size: var(--meter-block-size);
+  border-radius: var(--meter-block-size);
+  background: var(--edge);
+}
+
+.ratings__meter-fill {
+  display: block;
+  block-size: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+}
+
+.ratings__count {
+  color: var(--ink-muted);
+  font-size: 0.875rem;
 }
 
 @media (prefers-reduced-motion: reduce) {

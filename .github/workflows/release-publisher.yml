@@ -120,20 +120,37 @@ jobs:
         # Added failure surface, accepted deliberately: this step inserts GHCR
         # reads plus Fulcio and Rekor between image signing and chart
         # publishing, and any failure here burns the version tag (tags are
-        # immutable and never reassigned — requirement 10). The closing
-        # verify-attestation is why that trade is worth taking: GHCR serves no
-        # Referrers API, so discovery rides cosign's `sha256-<hex>` fallback
-        # tag — the same tag that already holds the signature bundle and that
-        # `cosign attest` read-modify-writes — and this check settles, per
-        # release and inside the run that created them, that the attestations
-        # are discoverable and verifiable, instead of finding out days later
-        # at promotion.
+        # immutable and never reassigned — requirement 10). The two closing
+        # checks are why that trade is worth taking. GHCR serves no Referrers
+        # API, so discovery rides cosign's `sha256-<hex>` fallback tag — the
+        # same tag that already holds the signature bundle and that each
+        # `cosign attest` read-modify-writes — so the risk is not only that
+        # nothing is discoverable, but that the second attestation replaces
+        # the first while the step still exits 0 and the release notes promise
+        # one per architecture. `verify-attestation` settles discoverability
+        # and verifiability through the same `--type` path the promotion
+        # ratchet uses; the download-and-count settles that BOTH survived,
+        # reading the predicate type out of the signed statement rather than
+        # trusting the OCI annotation cosign's own filters match on (an
+        # attestation attached by an older cosign filters to zero on both
+        # `download --predicate-type` and `verify-attestation --type`).
+        # Both run inside the run that created the attestations, instead of
+        # the failure surfacing days later at promotion.
+        #
+        # No retry loop, deliberately: a transient registry or Sigstore blip
+        # burning a version tag is the accepted trade, argued above, and a
+        # security check that quietly retries is a security check that
+        # quietly hides state.
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
         run: |
           set -euo pipefail
           src="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
-          # The build step's platforms:, sorted. Update both together.
+          # The build step's platforms:, sorted. Update both together. This
+          # guard is also the ONLY thing that catches a failed inspect: the
+          # process substitution below hides its exit status from `set -e`
+          # and `pipefail`, so a failure arrives as an empty array and is
+          # caught here. Never "simplify" it away.
           expected_platforms='linux/amd64 linux/arm64'
           mapfile -t platforms < <(
             docker buildx imagetools inspect "${IMAGE}@${DIGEST}" \
@@ -158,8 +175,11 @@ jobs:
             ' "${predicate}" >/dev/null
             predicates+=("${predicate}")
           done
-          if cmp -s "${predicates[0]}" "${predicates[1]}"; then
-            printf 'per-platform predicates are byte-identical; refusing to attach one build twice\n' >&2
+          # Set-based, so a third platform cannot slip past a pairwise check.
+          distinct="$(sha256sum "${predicates[@]}" | awk '{print $1}' | sort -u | wc -l)"
+          if [ "${distinct}" -ne "${#predicates[@]}" ]; then
+            printf 'per-platform predicates are not distinct (%s unique of %s); refusing to attach one build twice\n' \
+              "${distinct}" "${#predicates[@]}" >&2
             exit 1
           fi
           for predicate in "${predicates[@]}"; do
@@ -170,6 +190,16 @@ jobs:
             --certificate-identity "${src}/.github/workflows/release-publisher.yml@${GITHUB_REF}" \
             --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
             "${IMAGE}@${DIGEST}" >/dev/null
+          attached="$(
+            cosign download attestation "${IMAGE}@${DIGEST}" \
+              | jq -s --arg type 'https://slsa.dev/provenance/v1' \
+                  '[.[] | select((.payload | @base64d | fromjson).predicateType == $type)] | length'
+          )"
+          if [ "${attached}" -ne "${#predicates[@]}" ]; then
+            printf 'the digest carries %s slsaprovenance1 attestations; %s were attached\n' \
+              "${attached}" "${#predicates[@]}" >&2
+            exit 1
+          fi
       - name: Refuse to reuse an existing chart version, then publish and sign the chart
         run: |
           set -euo pipefail

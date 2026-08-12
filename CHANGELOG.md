@@ -11,12 +11,14 @@ SemVer and match image/chart tags exactly.
   cosign attestations (`slsaprovenance1`) on the immutable image digest,
   immediately after image signing — read back per platform from the
   just-pushed index, bound to this release (builder run, vcs source, vcs
-  revision) before anything is attached, and verified in the same run
-  with `cosign verify-attestation` against this workflow's tag identity,
-  so a release whose attestations are not discoverable fails at release
-  time rather than at promotion. The platform set is derived from the
-  index and asserted to equal the build's, so a missing, extra, or
-  duplicated platform fails the release. No new actions, no new
+  revision) before anything is attached, then verified in the same run —
+  `cosign verify-attestation` against this workflow's tag identity, plus
+  a count of the attestations the digest actually carries afterwards — so
+  a release whose attestations are missing, unverifiable, or clobbered by
+  the fallback-tag read-modify-write fails at release time rather than at
+  promotion. The platform set is derived from the index and asserted to
+  equal the build's, so a missing or extra platform fails the release and
+  no hardcoded list can drift from the build step. No new actions, no new
   permissions (the unused `attestations: write` grant is dropped — this
   workflow uses cosign, never GitHub's attestation API), no skip path;
   effective from the next tagged release. The attestations are a lossy

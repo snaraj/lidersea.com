@@ -43,9 +43,9 @@
     },
     "ingress": {
       "type": "object",
-      "description": "The deployment-provider binding point: identifies the only ingress peer allowed to reach the origin. The origin itself is provider-neutral and speaks standard HTTP; swapping edge providers is a values override here, never a template or code edit.",
+      "description": "The deployment-provider binding point: identifies the only ingress peer allowed to reach the origin. The origin itself is provider-neutral and speaks standard HTTP; swapping edge providers is a values override here, never a template or code edit. Every field is required, so the peer selector can never render with fewer facts than it takes to name one connector.",
       "additionalProperties": false,
-      "required": ["peerNamespace", "peerAppName"],
+      "required": ["peerNamespace", "peerAppName", "peerInstance"],
       "properties": {
         "peerNamespace": {
           "type": "string",
@@ -55,6 +55,12 @@
         "peerAppName": {
           "type": "string",
           "description": "app.kubernetes.io/name label of the ingress connector's pods.",
+          "pattern": "^[A-Za-z0-9]([-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?$"
+        },
+        "peerInstance": {
+          "type": "string",
+          "description": "app.kubernetes.io/instance label of the ingress connector's pods. Required and non-empty: the peer namespace holds several connectors publishing one app name, and this label is the fact that picks out the one that fronts this site. A blank or absent value fails validation instead of rendering a policy open to all of them.",
+          "minLength": 1,
           "pattern": "^[A-Za-z0-9]([-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?$"
         }
       }

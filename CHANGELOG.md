@@ -6,7 +6,20 @@ SemVer and match image/chart tags exactly.
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+- Media Range-matrix test determinism (post-merge advisory on #23, High):
+  the matrix built one handler with `MaxConcurrent: 4` and then ran its
+  subtests in parallel, so more than four in-flight responses made the
+  handler correctly shed with 503 where the test expected 206 — correct
+  product behavior, nondeterministic test. The matrix (and the parallel
+  opaque-404 table, same class) now sizes its handler's semaphore to the
+  subtest count so every request is admitted; overload shedding remains
+  deliberately covered by `TestBoundedConcurrencySheds`. Proven with the
+  media suite at `-count=20` plain and under `-race`, plus three
+  whole-repo runs.
+- AGENTS.md internal drift: the "Quality gates" coverage-floor citation
+  (88.2/91.2, from the handbook PR merging alongside #23) now matches
+  requirement 7's enforced 95.0 (measured 97.6).
 
 ## [0.1.9] - 2026-08-11
 

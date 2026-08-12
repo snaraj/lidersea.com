@@ -390,7 +390,7 @@ included; it is the same battery CI enforces:
     gitleaks git --no-banner --redact --max-target-megabytes=2 .
     gitleaks dir --no-banner --redact .
 
-- **Coverage floor.** `GO_COVERAGE_FLOOR` is 88.2 (measured 91.2 when
+- **Coverage floor.** `GO_COVERAGE_FLOOR` is 95.0 (measured 97.6 when
   last raised), enforced in `.github/workflows/pr-gate.yml` on total
   production statements with `internal/testsupport` filtered from the
   profile — the ONLY exclusion, and it may never grow to cover

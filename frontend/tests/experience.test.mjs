@@ -17,7 +17,14 @@ const stylesCode = styles.replace(/\/\*[\s\S]*?\*\//g, '');
 // Source-size budgets. Perf budgets are tests here, so a shell that grows
 // past its cap is a red build rather than a discussion. The caps are the
 // current sizes rounded up with room to work in; they ratchet DOWN as the
-// shell is trimmed, never up to accommodate bloat.
+// shell is trimmed, never up to accommodate a regression on an unchanged
+// surface.
+//
+// These three were raised when the ratings strip landed, under the
+// new-surface carve-out in AGENTS.md: the caps measured a shell that no
+// longer exists. Old caps 1600 / 2800 / 7400; measured 1421 / 6945 / 9092;
+// new caps 1800 / 7600 / 9800 — 21% / 9% / 7% headroom. The raise is
+// disclosed in the PR body so the headroom can be checked as working room.
 const sourceByteBudgets = { fallback: 1800, component: 7600, styles: 9800 };
 
 // Every declaration block in the stylesheet, as { selector, body } pairs.

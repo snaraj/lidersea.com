@@ -20,7 +20,12 @@ func validFile() File {
 		Platforms: []FilePlatform{
 			{
 				ID: "google", Name: "Google", State: StatePublished,
-				ProfileURL:   "https://www.google.com/maps/place/example",
+				ProfileURL: "https://www.google.com/maps/place/example",
+				// Populated on purpose — see TestValidFileBuilds: the feed URL
+				// must survive authoring and round-tripping while never
+				// reaching the wire, and an all-empty fixture could not tell
+				// "never serialised" from "empty and omitted".
+				FeedURL:      "https://www.google.com/lidersea-ratings.json",
 				RatingTenths: 48, ReviewCount: 120, CapturedAt: "2026-08-11T12:00:00Z",
 			},
 			{ID: "yelp", Name: "Yelp", State: StatePending},
@@ -264,6 +269,20 @@ func TestValidFileBuilds(t *testing.T) {
 	}
 	if data.Platforms[1].Rating != 0 || data.Platforms[1].ReviewCount != 0 {
 		t.Errorf("pending platform carries values: %+v", data.Platforms[1])
+	}
+	// The feed URL is operator plumbing: it must survive authoring — the
+	// collector reads it — and must never reach a visitor. The fixture
+	// carries a NON-EMPTY one, so this assertion fails if the field is ever
+	// given a JSON name, with or without omitempty.
+	if data.Platforms[0].FeedURL == "" {
+		t.Fatal("the fixture lost its feed URL; the serialisation assertion below would be vacuous")
+	}
+	payload, err := json.Marshal(data)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	if strings.Contains(string(payload), "feedUrl") || strings.Contains(string(payload), "lidersea-ratings.json") {
+		t.Fatalf("the served payload exposes feed plumbing: %s", payload)
 	}
 }
 

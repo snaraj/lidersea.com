@@ -444,7 +444,13 @@ included; it is the same battery CI enforces:
   `frontend/tests/experience.test.mjs` caps shell SOURCE size. Every
   surface the feature arcs add lands WITH its caps pinned the same way.
   Caps ratchet DOWN as payloads are trimmed; raising one to admit a
-  regression is the move the budget exists to prevent. The values are
+  regression on an UNCHANGED surface is the move the budget exists to
+  prevent and stays forbidden. The one sanctioned exception: a PR that
+  adds a new surface may raise that surface's cap to its newly measured
+  size plus working room, because the old cap measured a shell that no
+  longer exists. Such a raise is not silent — the PR body states the old
+  cap, the new cap, and the measured size, so a reviewer can check the
+  headroom is working room and not cover for a regression. The values are
   derived from this repository's own measurements and are never copied
   from elsewhere (requirement 5).
 - **Ratchet pairs.** When a stated requirement and shipped behavior

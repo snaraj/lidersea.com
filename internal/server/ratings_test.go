@@ -39,7 +39,13 @@ func publishedFile(captured string) ratings.File {
 		Platforms: []ratings.FilePlatform{
 			{
 				ID: "google", Name: "Google", State: ratings.StatePublished,
-				ProfileURL:   "https://www.google.com/maps/place/example",
+				ProfileURL: "https://www.google.com/maps/place/example",
+				// A POPULATED feed URL, deliberately: the served payload must
+				// omit this field because it is operator plumbing, and an
+				// assertion exercised only against empty values would pass
+				// just as happily if the field were serialised with
+				// omitempty. This fixture is what makes that assertion bite.
+				FeedURL:      "https://www.google.com/lidersea-ratings.json",
 				RatingTenths: 49, ReviewCount: 128, CapturedAt: captured,
 			},
 			{ID: "yelp", Name: "Yelp", State: ratings.StatePending},

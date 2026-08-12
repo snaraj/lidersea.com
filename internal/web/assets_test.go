@@ -30,6 +30,9 @@ var strongETag = regexp.MustCompile(`^"[0-9a-f]{64}"$`)
 
 // expectedOriginHeaders is the complete browser-facing policy shared by the
 // generated shell and its immutable resources at the production Go boundary.
+// HSTS is part of it because every request here is edge-declared TLS (see
+// edgeRequest); the proto-conditional emission itself is pinned by the
+// server package's policy suite.
 var expectedOriginHeaders = map[string]string{
 	"Content-Security-Policy":      "default-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; object-src 'none'",
 	"Cross-Origin-Resource-Policy": "same-origin",
@@ -40,13 +43,23 @@ var expectedOriginHeaders = map[string]string{
 	"X-Frame-Options":              "DENY",
 }
 
+// edgeRequest builds the request shape every real browser produces at this
+// boundary: forwarded by the TLS-terminating edge, which declares the
+// visitor's protocol. The full origin header policy — the HSTS promise
+// included — must answer it.
+func edgeRequest(method, target string) *http.Request {
+	request := httptest.NewRequest(method, target, nil)
+	request.Header.Set("X-Forwarded-Proto", "https")
+	return request
+}
+
 // assertServedFile proves that GET and HEAD expose the same immutable identity,
 // cache policy, content metadata, and browser-security boundary for one file.
 func assertServedFile(t *testing.T, handler http.Handler, publicPath, cacheControl string) {
 	t.Helper()
 
 	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, publicPath, nil))
+	handler.ServeHTTP(response, edgeRequest(http.MethodGet, publicPath))
 	if response.Code != http.StatusOK || response.Body.Len() == 0 {
 		t.Errorf("asset %s = status %d, %d bytes", publicPath, response.Code, response.Body.Len())
 	}
@@ -66,7 +79,7 @@ func assertServedFile(t *testing.T, handler http.Handler, publicPath, cacheContr
 	}
 
 	head := httptest.NewRecorder()
-	handler.ServeHTTP(head, httptest.NewRequest(http.MethodHead, publicPath, nil))
+	handler.ServeHTTP(head, edgeRequest(http.MethodHead, publicPath))
 	if head.Code != http.StatusOK || head.Body.Len() != 0 {
 		t.Errorf("HEAD %s = status %d, %d bytes", publicPath, head.Code, head.Body.Len())
 	}
@@ -95,7 +108,7 @@ func TestBuiltFrontendIsEmbeddedAndServed(t *testing.T) {
 	}
 
 	root := httptest.NewRecorder()
-	siteHandler.ServeHTTP(root, httptest.NewRequest(http.MethodGet, "/", nil))
+	siteHandler.ServeHTTP(root, edgeRequest(http.MethodGet, "/"))
 	if root.Code != http.StatusOK {
 		t.Fatalf("root status = %d", root.Code)
 	}
@@ -169,7 +182,7 @@ func TestBuiltFrontendIsEmbeddedAndServed(t *testing.T) {
 	}
 
 	rootHead := httptest.NewRecorder()
-	siteHandler.ServeHTTP(rootHead, httptest.NewRequest(http.MethodHead, "/", nil))
+	siteHandler.ServeHTTP(rootHead, edgeRequest(http.MethodHead, "/"))
 	if rootHead.Code != http.StatusOK || rootHead.Body.Len() != 0 {
 		t.Errorf("HEAD / = status %d, %d bytes", rootHead.Code, rootHead.Body.Len())
 	}

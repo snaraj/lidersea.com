@@ -129,6 +129,63 @@ func TestVisitorBrowsesTheSite(t *testing.T) {
 	drainScenario(t, runResult)
 }
 
+// TestVisitorArrivesOverPlainHTTP is the not-yet-secure client's story: they
+// typed http://, the edge forwarded the plain request with its http
+// declaration, and the origin answers every such navigation — the front
+// page, a deep link with a query — with a permanent redirect to the same
+// URL over TLS before serving a single byte of content. Landing over TLS,
+// the same pages serve normally and carry the exact year-long HSTS promise;
+// an operator port-forwarding straight to the pod still sees the site, with
+// no promise minted for the edge-less leg. The harness asserts the
+// proto-conditional security baseline on every navigation in all three
+// sessions.
+func TestVisitorArrivesOverPlainHTTP(t *testing.T) {
+	base, runResult := bootScenario(t)
+	host := strings.TrimPrefix(base, "http://")
+	insecure := testsupport.NewInsecureVisitor(t, base)
+	secure := testsupport.NewVisitor(t, base)
+
+	t.Run("every plain navigation bounces to TLS with the URL intact", func(t *testing.T) {
+		visitor := insecure.On(t)
+		for _, path := range []string{"/", "/services/detailing?ref=harbor"} {
+			response := visitor.Navigate(path)
+			if response.StatusCode != http.StatusMovedPermanently {
+				t.Fatalf("GET %s over plain http = %d, want 301", path, response.StatusCode)
+			}
+			if got, want := response.Header.Get("Location"), "https://"+host+path; got != want {
+				t.Errorf("Location = %q, want %q — path and query must survive byte for byte", got, want)
+			}
+		}
+	})
+
+	t.Run("landing over TLS: normal serving plus the exact HSTS promise", func(t *testing.T) {
+		shell := secure.On(t).Navigate("/")
+		if shell.StatusCode != http.StatusOK {
+			t.Fatalf("GET / over declared TLS = %d, want 200", shell.StatusCode)
+		}
+		if !bytes.Contains(shell.Body, []byte("data-static-fallback")) {
+			t.Error("served document lacks the static application fallback marker")
+		}
+		// The harness already requires the promise on every TLS-declared
+		// navigation; pinning it here keeps the story explicit.
+		if got := shell.Header.Get("Strict-Transport-Security"); got != testsupport.StrictTransportSecurityPolicy {
+			t.Errorf("Strict-Transport-Security = %q, want %q", got, testsupport.StrictTransportSecurityPolicy)
+		}
+	})
+
+	t.Run("port-forward operator sees the site with no promise", func(t *testing.T) {
+		direct := testsupport.NewDirectVisitor(t, base)
+		response := direct.On(t).Navigate("/")
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("direct GET / = %d, want 200 — the origin must stay reachable without the edge", response.StatusCode)
+		}
+		// HSTS absence on the edge-less leg is enforced by the harness
+		// baseline on the navigation above.
+	})
+
+	drainScenario(t, runResult)
+}
+
 // TestHostileVisitorStaysBlind probes the origin the way an attacker's
 // crawler would — traversal, encoded traversal, duplicate separators,
 // dotfiles, build placeholders, and development artifacts — and requires each

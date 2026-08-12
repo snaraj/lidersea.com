@@ -32,11 +32,14 @@ func gatedHandler(t *testing.T, cfg Config) http.Handler {
 	return siteHandler
 }
 
-// postJSON sends one POST with the given body and content type.
+// postJSON sends one POST with the given body and content type, edge-declared
+// TLS like every real submission, so carve-out responses must carry the full
+// baseline — the HSTS promise included (assertBaselineHeaders).
 func postJSON(t *testing.T, siteHandler http.Handler, path, contentType, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
 	request.Header.Set("Content-Type", contentType)
+	request.Header.Set("X-Forwarded-Proto", "https")
 	response := httptest.NewRecorder()
 	siteHandler.ServeHTTP(response, request)
 	return response
@@ -104,8 +107,12 @@ func TestReviewsWriteCarveOut(t *testing.T) {
 	}
 
 	for _, method := range []string{http.MethodPut, http.MethodPatch, http.MethodDelete} {
+		// Edge-declared like every real request, so the refused-method
+		// response must carry the full baseline, HSTS included.
+		request := httptest.NewRequest(method, surface.Reviews.Route, nil)
+		request.Header.Set("X-Forwarded-Proto", "https")
 		response := httptest.NewRecorder()
-		siteHandler.ServeHTTP(response, httptest.NewRequest(method, surface.Reviews.Route, nil))
+		siteHandler.ServeHTTP(response, request)
 		if response.Code != http.StatusMethodNotAllowed || response.Header().Get("Allow") != "GET, HEAD, POST" {
 			t.Errorf("%s = %d Allow=%q, want 405 GET, HEAD, POST", method, response.Code, response.Header().Get("Allow"))
 		}
@@ -233,8 +240,12 @@ func TestEstimatesCarveOut(t *testing.T) {
 	}
 
 	for _, method := range []string{http.MethodGet, http.MethodHead, http.MethodPut, http.MethodDelete} {
+		// Edge-declared like every real request, so the refused-method
+		// response must carry the full baseline, HSTS included.
+		request := httptest.NewRequest(method, surface.Estimates.Route, nil)
+		request.Header.Set("X-Forwarded-Proto", "https")
 		response := httptest.NewRecorder()
-		siteHandler.ServeHTTP(response, httptest.NewRequest(method, surface.Estimates.Route, nil))
+		siteHandler.ServeHTTP(response, request)
 		if response.Code != http.StatusMethodNotAllowed || response.Header().Get("Allow") != "POST" {
 			t.Errorf("%s preview = %d Allow=%q, want 405 POST", method, response.Code, response.Header().Get("Allow"))
 		}
@@ -345,8 +356,13 @@ func TestMediaPipelineWiredThroughNewSite(t *testing.T) {
 	siteHandler := gatedHandler(t, Config{Media: media.Config{Enabled: true, Root: root, MaxConcurrent: 4}})
 
 	video := fixtures[1]
+	// Edge-declared TLS like every real media viewer, so the security
+	// wrapper's full baseline — HSTS included — must answer through the
+	// wired pipeline.
+	videoRequest := httptest.NewRequest(http.MethodGet, video.URL(), nil)
+	videoRequest.Header.Set("X-Forwarded-Proto", "https")
 	response := httptest.NewRecorder()
-	siteHandler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, video.URL(), nil))
+	siteHandler.ServeHTTP(response, videoRequest)
 	if response.Code != http.StatusOK || response.Body.Len() != len(video.Bytes) {
 		t.Fatalf("wired media GET = %d with %d bytes, want the full fixture", response.Code, response.Body.Len())
 	}

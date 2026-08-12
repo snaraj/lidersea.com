@@ -157,7 +157,10 @@ func TestEachThemeHasItsOwnCacheIdentity(t *testing.T) {
 func TestOnlyTheShellDeclaresCookieVariance(t *testing.T) {
 	t.Parallel()
 	siteHandler := testHandler(t)
-	for _, path := range []string{"/assets/app-abc123.js", "/api/board", "/api/reviews", "/livez", "/readyz", "/missing"} {
+	for _, path := range []string{
+		"/assets/app-abc123.js", "/api/board", "/api/reviews", "/api/ratings",
+		"/livez", "/readyz", "/missing",
+	} {
 		response := httptest.NewRecorder()
 		siteHandler.ServeHTTP(response, themedRequest(http.MethodGet, path, "dark"))
 		if got := response.Header().Get("Vary"); got != "" {
@@ -173,7 +176,10 @@ func TestOnlyTheShellDeclaresCookieVariance(t *testing.T) {
 func TestOriginNeverSetsACookie(t *testing.T) {
 	t.Parallel()
 	siteHandler := testHandler(t)
-	for _, path := range []string{"/", "/assets/app-abc123.js", "/api/board", "/api/reviews", "/livez", "/readyz", "/missing"} {
+	for _, path := range []string{
+		"/", "/assets/app-abc123.js", "/api/board", "/api/reviews", "/api/ratings",
+		"/livez", "/readyz", "/missing",
+	} {
 		for _, cookie := range []string{"", "dark", "sepia"} {
 			response := httptest.NewRecorder()
 			siteHandler.ServeHTTP(response, themedRequest(http.MethodGet, path, cookie))

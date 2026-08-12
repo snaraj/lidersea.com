@@ -82,6 +82,15 @@ var (
 		Title: "Client reviews",
 		Route: "/api/reviews",
 	}
+	// Ratings is the third-party ratings strip served at the foot of the
+	// site; its domain lives in internal/ratings, with the optional gated
+	// producer in internal/ratings/collect.
+	Ratings = Descriptor{
+		ID:    "ratings",
+		Kind:  "ratings/v1",
+		Title: "Ratings across platforms",
+		Route: "/api/ratings",
+	}
 	// Estimates is the estimate preview surface (issue #21); its domain
 	// lives in internal/estimates (with rendering and delivery contracts in
 	// its subpackages). The route is compute-only (POST) and ships gated off
@@ -97,4 +106,4 @@ var (
 // Registry is the ordered catalog of every surface this site defines. The
 // server wires exactly these routes; tests pin the catalog's internal
 // consistency so a new surface is a conscious registration, never drift.
-var Registry = []Descriptor{Board, Reviews, Estimates}
+var Registry = []Descriptor{Board, Reviews, Ratings, Estimates}

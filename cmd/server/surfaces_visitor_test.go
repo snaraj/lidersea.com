@@ -346,12 +346,24 @@ func TestVisitorUsesOpenGates(t *testing.T) {
 func TestRunRejectsBadSurfaceConfiguration(t *testing.T) {
 	t.Parallel()
 	for name, env := range map[string]map[string]string{
-		"media enabled without root": {"MEDIA_ENABLED": "true", "MEDIA_MAX_CONCURRENT": "4"},
-		"media root without enabled": {"MEDIA_ROOT": "/srv/media"},
-		"media bad concurrency":      {"MEDIA_ENABLED": "true", "MEDIA_ROOT": "/srv/media", "MEDIA_MAX_CONCURRENT": "lots"},
-		"media missing root dir":     {"MEDIA_ENABLED": "true", "MEDIA_ROOT": "/nonexistent/lidersea-media", "MEDIA_MAX_CONCURRENT": "4"},
-		"reviews gate typo":          {"REVIEWS_WRITE_ENABLED": "on"},
-		"estimates gate typo":        {"ESTIMATES_ENABLED": "yes"},
+		"media enabled without root":          {"MEDIA_ENABLED": "true", "MEDIA_MAX_CONCURRENT": "4"},
+		"media root without enabled":          {"MEDIA_ROOT": "/srv/media"},
+		"media bad concurrency":               {"MEDIA_ENABLED": "true", "MEDIA_ROOT": "/srv/media", "MEDIA_MAX_CONCURRENT": "lots"},
+		"media missing root dir":              {"MEDIA_ENABLED": "true", "MEDIA_ROOT": "/nonexistent/lidersea-media", "MEDIA_MAX_CONCURRENT": "4"},
+		"reviews gate typo":                   {"REVIEWS_WRITE_ENABLED": "on"},
+		"estimates gate typo":                 {"ESTIMATES_ENABLED": "yes"},
+		"collector gate typo":                 {"RATINGS_COLLECTOR_ENABLED": "sure"},
+		"collector interval without the gate": {"RATINGS_COLLECTOR_INTERVAL": "6h"},
+		"collector enabled without an interval": {
+			"RATINGS_COLLECTOR_ENABLED": "true", "RATINGS_COLLECTOR_TIMEOUT": "10s",
+		},
+		"collector enabled without a timeout": {
+			"RATINGS_COLLECTOR_ENABLED": "true", "RATINGS_COLLECTOR_INTERVAL": "6h",
+		},
+		"collector interval below the floor": {
+			"RATINGS_COLLECTOR_ENABLED": "true", "RATINGS_COLLECTOR_INTERVAL": "5s",
+			"RATINGS_COLLECTOR_TIMEOUT": "10s",
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -360,4 +372,120 @@ func TestRunRejectsBadSurfaceConfiguration(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestVisitorReadsTheRatingsStrip is the footer reader's story: the strip
+// arrives as an enveloped surface whose status tells the truth about
+// whether any rating has been captured, every platform it lists is
+// renderable without a third party, and the route stays as read-only as
+// every other surface. The second chapter boots the SAME process with the
+// ratings collector gate open — the honest test of a gated capability is
+// that turning it on changes nothing a visitor can see when there is
+// nothing configured to fetch.
+func TestVisitorReadsTheRatingsStrip(t *testing.T) {
+	base, runResult := bootScenario(t)
+	session := testsupport.NewVisitor(t, base)
+
+	t.Run("the strip lists its platforms and says whether it has ratings", func(t *testing.T) {
+		visitor := session.On(t)
+		response := visitor.Navigate("/api/ratings")
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("GET /api/ratings = %d", response.StatusCode)
+		}
+		var envelope struct {
+			Schema string `json:"schema"`
+			Kind   string `json:"kind"`
+			Status string `json:"status"`
+			Data   struct {
+				Summary struct {
+					Published int      `json:"published"`
+					Pending   int      `json:"pending"`
+					Average   *float64 `json:"average"`
+					Scale     int      `json:"scale"`
+				} `json:"summary"`
+				Platforms []struct {
+					ID         string   `json:"id"`
+					Name       string   `json:"name"`
+					State      string   `json:"state"`
+					ProfileURL string   `json:"profileUrl"`
+					Rating     *float64 `json:"rating"`
+				} `json:"platforms"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(response.Body, &envelope); err != nil {
+			t.Fatalf("decode ratings envelope: %v", err)
+		}
+		if envelope.Schema != "surface/v1" || envelope.Kind != "ratings/v1" {
+			t.Fatalf("envelope identity = %s / %s", envelope.Schema, envelope.Kind)
+		}
+		if len(envelope.Data.Platforms) == 0 {
+			t.Fatal("the strip lists no platforms")
+		}
+		// The honesty contract, read from the wire: a strip with nothing
+		// captured reports "unavailable" and publishes no average, and no
+		// pending platform carries a number.
+		if envelope.Data.Summary.Published == 0 {
+			if envelope.Status != "unavailable" {
+				t.Errorf("status = %q with nothing published, want unavailable", envelope.Status)
+			}
+			if envelope.Data.Summary.Average != nil {
+				t.Errorf("an empty strip published an average of %v", *envelope.Data.Summary.Average)
+			}
+		} else if envelope.Status != "ok" && envelope.Status != "stale" {
+			t.Errorf("status = %q with ratings published", envelope.Status)
+		}
+		for _, platform := range envelope.Data.Platforms {
+			if platform.Name == "" {
+				t.Errorf("platform %q has no name to render", platform.ID)
+			}
+			if platform.State == "pending" && platform.Rating != nil {
+				t.Errorf("pending platform %q carries a rating of %v", platform.ID, *platform.Rating)
+			}
+			if platform.ProfileURL != "" && !strings.HasPrefix(platform.ProfileURL, "https://") {
+				t.Errorf("platform %q links out over %q", platform.ID, platform.ProfileURL)
+			}
+		}
+	})
+
+	t.Run("a repeat read revalidates to a cheap 304", func(t *testing.T) {
+		visitor := session.On(t)
+		repeat := visitor.Navigate("/api/ratings")
+		if repeat.StatusCode != http.StatusNotModified {
+			t.Fatalf("revalidating /api/ratings = %d, want %d", repeat.StatusCode, http.StatusNotModified)
+		}
+	})
+
+	t.Run("the strip never accepts a mutation", func(t *testing.T) {
+		response, _ := postSurface(t, base, "/api/ratings", "application/json", "{}")
+		if response.StatusCode != http.StatusMethodNotAllowed {
+			t.Fatalf("POST /api/ratings = %d, want 405", response.StatusCode)
+		}
+		if got := response.Header.Get("Allow"); got != "GET, HEAD" {
+			t.Errorf("POST /api/ratings Allow = %q, want %q", got, "GET, HEAD")
+		}
+	})
+
+	drainScenario(t, runResult)
+}
+
+// TestVisitorSeesNoChangeWhenTheCollectorGateOpens boots the process with
+// the ratings collector enabled. The shipped snapshot configures no feed
+// URLs, so an enabled collector has nothing to fetch: the strip a visitor
+// reads is byte-identical to the default build's, and the process still
+// starts and drains cleanly with a background worker attached.
+func TestVisitorSeesNoChangeWhenTheCollectorGateOpens(t *testing.T) {
+	base, runResult := bootScenarioEnv(t, map[string]string{
+		"RATINGS_COLLECTOR_ENABLED":  "true",
+		"RATINGS_COLLECTOR_INTERVAL": "24h",
+		"RATINGS_COLLECTOR_TIMEOUT":  "5s",
+	})
+	session := testsupport.NewVisitor(t, base)
+	response := session.On(t).Navigate("/api/ratings")
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("GET /api/ratings with the collector enabled = %d", response.StatusCode)
+	}
+	if !bytes.Contains(response.Body, []byte(`"kind":"ratings/v1"`)) {
+		t.Fatalf("the enabled collector changed the surface: %s", response.Body)
+	}
+	drainScenario(t, runResult)
 }

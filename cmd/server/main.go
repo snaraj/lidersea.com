@@ -14,6 +14,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/snaraj/lidersea.com/internal/ratings"
+	"github.com/snaraj/lidersea.com/internal/ratings/collect"
 	"github.com/snaraj/lidersea.com/internal/server"
 	website "github.com/snaraj/lidersea.com/internal/web"
 )
@@ -51,6 +53,16 @@ func run(ctx context.Context, lookupEnv func(string) string) error {
 		return err
 	}
 
+	// One validated ratings snapshot, shared by the surface that serves it
+	// and the gated producer that may refresh it. Building it here — rather
+	// than letting the handler load its own — is what lets those two see the
+	// same bytes.
+	snapshot, err := ratings.Snapshot()
+	if err != nil {
+		return err
+	}
+	cfg.Ratings = ratings.NewStore(snapshot)
+
 	assets, err := website.FileSystem()
 	if err != nil {
 		return err
@@ -59,6 +71,8 @@ func run(ctx context.Context, lookupEnv func(string) string) error {
 	if err != nil {
 		return err
 	}
+	stopCollector := startRatingsCollector(ctx, cfg.RatingsCollector, cfg.Ratings)
+	defer stopCollector()
 
 	httpServer := &http.Server{
 		// Explicit limits protect the Pi-hosted origin from slow or oversized
@@ -92,6 +106,29 @@ func run(ctx context.Context, lookupEnv func(string) string) error {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 	return httpServer.Shutdown(shutdownCtx)
+}
+
+// startRatingsCollector launches the gated ratings producer and returns the
+// function that stops it and waits for it to finish. With the gate off —
+// the default — it launches nothing and returns a no-op, so the ordinary
+// build runs no background worker at all. The worker's context is derived
+// from the lifecycle context so an early serving failure stops it just as
+// surely as a SIGTERM does, and the returned stopper blocks until the
+// worker has actually returned, so no collection outlives run().
+func startRatingsCollector(ctx context.Context, cfg collect.Config, store *ratings.Store) func() {
+	if !cfg.Enabled {
+		return func() {}
+	}
+	workerCtx, stop := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		collect.Run(workerCtx, cfg, store)
+	}()
+	return func() {
+		stop()
+		<-done
+	}
 }
 
 // listenPort validates the only runtime listener setting. The stable 8080

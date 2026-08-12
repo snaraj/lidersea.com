@@ -7,6 +7,58 @@ SemVer and match image/chart tags exactly.
 ## [Unreleased]
 
 ### Added
+- Ratings across platforms: a new `ratings/v1` surface under the site's
+  `surface/v1` envelope (`GET /api/ratings`) and a footer strip that
+  renders it. The strip lists the third-party platforms the business
+  publishes on — Google, Yelp, Facebook, Trustpilot, and the Better
+  Business Bureau — with each platform's captured rating, review count, and
+  an outbound link to its public profile. It is rendered entirely with this
+  site's own markup and CSS: no third-party script, widget, iframe, embed,
+  or image is involved anywhere, so the CSP is unchanged and the frontend
+  stays local-origin-only. Outbound links carry `rel="noopener noreferrer"`,
+  open in a new tab, and say so in their accessible name. Values are paired
+  with text and shape — the number, a length meter, the review count —
+  never colour alone.
+
+  The data is schema-first and owner-editable:
+  `internal/ratings/platforms.json` is embedded, decoded, and VALIDATED
+  during construction, so a malformed or half-filled file fails startup
+  rather than reaching a visitor. A platform is either published with a
+  rating, a review count, a capture instant, and a profile URL, or it is
+  pending with none of them — the partially-populated state is
+  unrepresentable, which is what stops an invented number from being
+  presented as a business fact. Ratings are authored and validated as
+  integer tenths and served as a derived one-decimal number; the summary is
+  server-computed, weighted by review count, and OMITS its average entirely
+  when nothing is published, because a zero there would read as a rating of
+  zero rather than as an absence. The envelope's status follows the same
+  honesty: `unavailable` when no rating has been captured, `stale` when the
+  newest capture is past the configured refresh window, `ok` otherwise. The
+  update procedure is documented in AGENTS.md and in the `internal/ratings`
+  package doc. The shipped snapshot lists every platform as pending with no
+  URLs: nothing about the business is invented.
+
+  An optional producer (`internal/ratings/collect`) can refresh the
+  snapshot from each platform's own feed, and it ships OFF behind
+  `RATINGS_COLLECTOR_ENABLED` (with a required interval and timeout, parsed
+  all-or-nothing and fail-closed). It is honest about what it can do today:
+  no supported rating platform offers a rating read without an account
+  credential, so the shipped snapshot declares no feed URLs and an enabled
+  collector on a stock build fetches nothing — the mechanism is a reviewed,
+  tested contract for a future authenticated ingest. Its safety properties
+  are fixed in code and reachable from no configuration and no data file:
+  https only, a per-platform host allowlist re-checked at call time,
+  redirects refused rather than followed, a 16 KiB body cap, a JSON
+  content-type requirement, a strict decode, bounded
+  connect/handshake/request timeouts, and a final pass of the whole result
+  through the same validation the shipped file must satisfy. Every pass is
+  snapshot-first and fail-soft: a platform that cannot be read keeps the
+  value it already had, so no failure mode can blank a published rating.
+
+  The GET/HEAD-only origin contract, the CSP, and the
+  `REVIEWS_WRITE_ENABLED` / `ESTIMATES_ENABLED` gates are untouched; the new
+  route is read-only with every gate open.
+
 - Reading themes: the site now serves a light theme, a dark theme, and a
   system theme that follows the visitor's own device, selected by the
   `lidersea_theme` cookie and delivered without a first-paint flash or a

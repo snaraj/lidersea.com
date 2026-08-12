@@ -17,8 +17,15 @@ const stylesCode = styles.replace(/\/\*[\s\S]*?\*\//g, '');
 // Source-size budgets. Perf budgets are tests here, so a shell that grows
 // past its cap is a red build rather than a discussion. The caps are the
 // current sizes rounded up with room to work in; they ratchet DOWN as the
-// shell is trimmed, never up to accommodate bloat.
-const sourceByteBudgets = { fallback: 1600, component: 2800, styles: 7400 };
+// shell is trimmed, never up to accommodate a regression on an unchanged
+// surface.
+//
+// These three were raised when the ratings strip landed, under the
+// new-surface carve-out in AGENTS.md: the caps measured a shell that no
+// longer exists. Old caps 1600 / 2800 / 7400; measured 1421 / 6945 / 9092;
+// new caps 1800 / 7600 / 9800 — 21% / 9% / 7% headroom. The raise is
+// disclosed in the PR body so the headroom can be checked as working room.
+const sourceByteBudgets = { fallback: 1800, component: 7600, styles: 9800 };
 
 // Every declaration block in the stylesheet, as { selector, body } pairs.
 // The parser is deliberately small: this stylesheet is hand-written, flat,
@@ -322,4 +329,63 @@ test('the static shell reserves the chrome the mounted shell fills', () => {
   assert.match(component, /<header class="chrome">/);
   assert.match(styles, /--chrome-block-size:/);
   assert.match(styles, /min-block-size:\s*var\(--chrome-block-size\)/);
+});
+
+// The ratings strip. Every byte of it is our own markup: no third-party
+// script, widget, iframe, or image is involved, which is precisely why the
+// site's CSP can stay as strict as it is. The values arrive as data from
+// this origin's own surface, so no remote origin appears in shell source
+// either — the remote-origin ban above covers that, and this test covers
+// the shapes that ban cannot see.
+test('the ratings strip is our own markup and links out safely', () => {
+  assert.match(component, /const ratingsSurface = '\/api\/ratings'/, 'the strip must read this origin');
+  assert.match(component, /fetch\(ratingsSurface/);
+  for (const embed of [/<iframe/i, /<script\s+src=/i, /<embed/i, /<object/i]) {
+    assert.doesNotMatch(component, embed, 'the strip must never embed a third party');
+  }
+  // Outbound links open away from this document and hand the destination
+  // no handle on it and no referrer.
+  assert.match(component, /target="_blank"/);
+  assert.match(component, /rel="noopener noreferrer"/);
+  assert.match(component, /aria-label=\{linkLabel\(/, 'each outbound link needs an accessible name');
+  assert.match(component, /Opens in a new tab/, 'the accessible name must say the link opens a new tab');
+
+  // Honest states, all three reachable from the source.
+  assert.match(component, /data-ratings-state=\{ratingsState\}/);
+  for (const state of ["'loading'", "'ready'", "'unavailable'"]) {
+    assert.ok(component.includes(state), `the strip cannot report the ${state} state`);
+  }
+  // A platform with no captured rating says so instead of showing a zero.
+  assert.match(component, /platform\.state === 'published'/);
+});
+
+// Dataviz floor: a value is never encoded by colour alone. The rating is
+// text, the meter repeats it as length, and the review count is text —
+// so the meter is decorative and hidden from assistive technology.
+test('the ratings strip pairs every value with text and shape', () => {
+  assert.match(component, /class="ratings__meter" aria-hidden="true"/);
+  assert.match(component, /\{platform\.rating\}/, 'the rating must render as text');
+  assert.match(component, /\{platform\.reviewCount\} reviews/, 'the count must render as text');
+  assert.match(component, /meterPercent\(platform, ratings\.summary\.scale\)/);
+});
+
+// Zero CLS again, for late data this time: the strip's band exists at its
+// final height in the static shell, so the fetched values fill reserved
+// space instead of pushing the page.
+test('the ratings strip reserves its band before any data arrives', () => {
+  assert.match(fallback, /<footer class="ratings" data-ratings-state="static"><\/footer>/);
+  assert.match(component, /<footer class="ratings"/);
+  assert.match(stylesCode, /--ratings-block-size:/);
+  assert.match(stylesCode, /min-block-size:\s*var\(--ratings-block-size\)/);
+  // The outbound links are the strip's touch targets and hold the floor.
+  const anchorBlock = declarationBlocks(styles).find(
+    (block) => block.selector === '.ratings__anchor',
+  );
+  assert.ok(anchorBlock, 'the ratings anchor rule is missing');
+  assert.ok(
+    declarations(anchorBlock.body).some(
+      ({ property, value }) => property === 'min-block-size' && value === 'var(--tap-target)',
+    ),
+    'ratings links must hold the touch-target floor',
+  );
 });

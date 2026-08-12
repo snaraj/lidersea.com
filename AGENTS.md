@@ -182,6 +182,21 @@ conscious edits, never fights:
   Any further scoping is a conscious edit in the PR that needs it, never a
   deletion — and any remote reference the site ever needs arrives as data
   from this origin's own API, never as a literal in shell source.
+- **Publishing a rating platform.** `internal/ratings/platforms.json` is the
+  owner's data file and the ONLY place platform names, profile URLs, and
+  captured values live. To publish one: read the rating and review count
+  from that platform's own public profile; set `profileUrl` to the public
+  profile (https, host on that platform's allowlist); set `ratingTenths` to
+  the rating times ten, `reviewCount`, and `capturedAt` (RFC 3339 UTC); set
+  `state` to `published`; bump the file's `publishedAt`; run the Go suite.
+  Every rule is enforced by `ratings.Snapshot`, which `NewSite` calls during
+  construction, so a malformed file fails startup instead of reaching a
+  visitor. A platform may carry a `profileUrl` while still `pending` — a
+  listed profile with no rating yet is a legitimate, honest state. Adding a
+  new platform is a CODE change, not a data change: its allowed hosts live
+  in `internal/ratings/types.go` so a data file can never introduce an
+  outbound destination nobody reviewed. The full procedure is in the
+  `internal/ratings` package doc.
 - Small UI assets, when they arrive, live under documented categories with
   size ceilings, mirroring naranjo.online. Heavy media (portfolio video,
   high-resolution photography, audio) never enters git, the bundle, the
@@ -429,7 +444,13 @@ included; it is the same battery CI enforces:
   `frontend/tests/experience.test.mjs` caps shell SOURCE size. Every
   surface the feature arcs add lands WITH its caps pinned the same way.
   Caps ratchet DOWN as payloads are trimmed; raising one to admit a
-  regression is the move the budget exists to prevent. The values are
+  regression on an UNCHANGED surface is the move the budget exists to
+  prevent and stays forbidden. The one sanctioned exception: a PR that
+  adds a new surface may raise that surface's cap to its newly measured
+  size plus working room, because the old cap measured a shell that no
+  longer exists. Such a raise is not silent — the PR body states the old
+  cap, the new cap, and the measured size, so a reviewer can check the
+  headroom is working room and not cover for a regression. The values are
   derived from this repository's own measurements and are never copied
   from elsewhere (requirement 5).
 - **Ratchet pairs.** When a stated requirement and shipped behavior
@@ -534,6 +555,16 @@ or changed frontend surface, retrofitted by the rendering-lanes arc
   test fails on any other declaration in those blocks. The static shell
   reserves the chrome the mounted switcher fills, so hydration adds a
   control without moving the page.
+- **Third-party ratings, first-party markup.** The footer ratings strip
+  renders platform ratings with THIS site's own markup and CSS. No
+  third-party script, widget, iframe, embed, or image is ever used —
+  which is exactly why the CSP can stay as strict as it is — and the
+  values arrive as data from this origin's own `ratings/v1` surface, so
+  no remote origin appears in shell source. Outbound profile links carry
+  `rel="noopener noreferrer"`, open in a new tab, and state that in their
+  accessible name. Every value is paired with text and shape (the numeric
+  rating, a length meter, the review count), never colour alone, and a
+  platform with no captured rating says so rather than showing a zero.
 - **Honest states.** Empty, loading, disabled, and unavailable states
   tell the truth: a missing backend renders an explicit unavailable
   state — an honest "storage not configured" answer, never fabricated
@@ -547,6 +578,21 @@ or changed frontend surface, retrofitted by the rendering-lanes arc
   405 and `Allow: GET, HEAD`, `TestNoRequestMethodCanEverMutate` sweeps
   the mutation methods across routes, and the CSP's `form-action
   'none'` closes the browser-side path.
+- **Gated outbound reads.** The ratings collector
+  (`internal/ratings/collect`) is the origin's only outbound capability and
+  ships OFF: the zero-value configuration collects nothing, the shipped
+  snapshot declares no feed URLs, and the cluster denies egress by default,
+  so enabling it is an explicit decision on three independent axes. Its
+  safety properties are fixed in code and reachable from no configuration
+  and no data file — https only, the per-platform host allowlist re-checked
+  at call time, redirects REFUSED rather than followed, a hard body cap, a
+  JSON content-type requirement, a strict decode, bounded
+  connect/handshake/request timeouts, and a final pass of the whole result
+  through the same validation the shipped data file must satisfy. Every
+  pass is snapshot-first and fail-soft: a platform that cannot be read
+  keeps the value it already had, so no failure mode can blank a published
+  rating. Widening the allowlist is a reviewed code change, never an
+  environment or data edit.
 - **Gated write carve-outs.** Any write path (the reviews and estimates
   surfaces) ships contract-DEFINED but DISABLED: the capability sits
   behind an explicit environment flag whose default is off, the default

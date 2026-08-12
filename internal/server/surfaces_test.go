@@ -24,6 +24,9 @@ import (
 const (
 	boardPageBudgetBytes   = 48 * 1024
 	reviewsPageBudgetBytes = 16 * 1024
+	// The ratings strip renders in the footer of every page view, so its
+	// ceiling is the tightest of the three.
+	ratingsStripBudgetBytes = 8 * 1024
 )
 
 // envelopeShape decodes the wire envelope for structural assertions.
@@ -255,6 +258,7 @@ func TestSurfaceRoutesStayReadOnlyByDefault(t *testing.T) {
 	routes := []string{
 		surface.Board.Route,
 		surface.Reviews.Route,
+		surface.Ratings.Route,
 		"/api/unknown",
 		"/media/immutable/" + strings.Repeat("b", 64) + "/clip.mp4",
 	}
@@ -269,7 +273,7 @@ func TestSurfaceRoutesStayReadOnlyByDefault(t *testing.T) {
 	}
 	// The registered read surfaces answer mutations with the sitewide 405
 	// shape, exactly like every other route behind allowReadMethod.
-	for _, route := range []string{surface.Board.Route, surface.Reviews.Route} {
+	for _, route := range []string{surface.Board.Route, surface.Reviews.Route, surface.Ratings.Route} {
 		response := httptest.NewRecorder()
 		siteHandler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, route, nil))
 		if response.Code != http.StatusMethodNotAllowed || response.Header().Get("Allow") != "GET, HEAD" {
@@ -283,7 +287,7 @@ func TestSurfaceRoutesStayReadOnlyByDefault(t *testing.T) {
 // failures alike: the API adds routes, never a second policy.
 func TestSurfaceResponsesCarryTheSecurityBaseline(t *testing.T) {
 	siteHandler := testHandler(t)
-	for _, path := range []string{surface.Board.Route, surface.Reviews.Route, "/api/unknown"} {
+	for _, path := range []string{surface.Board.Route, surface.Reviews.Route, surface.Ratings.Route, "/api/unknown"} {
 		response := getSurface(t, siteHandler, path)
 		if got := response.Header().Get("Content-Security-Policy"); got != testsupport.SiteContentSecurityPolicy {
 			t.Errorf("%s CSP = %q, want the documented site policy", path, got)
@@ -300,7 +304,7 @@ func TestSurfaceResponsesCarryTheSecurityBaseline(t *testing.T) {
 // identity headers, empty body.
 func TestSurfaceHeadMatchesGet(t *testing.T) {
 	siteHandler := testHandler(t)
-	for _, path := range []string{surface.Board.Route, surface.Reviews.Route} {
+	for _, path := range []string{surface.Board.Route, surface.Reviews.Route, surface.Ratings.Route} {
 		full := getSurface(t, siteHandler, path)
 		head := httptest.NewRecorder()
 		siteHandler.ServeHTTP(head, httptest.NewRequest(http.MethodHead, path, nil))

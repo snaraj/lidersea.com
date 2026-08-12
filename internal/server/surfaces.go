@@ -27,6 +27,7 @@ import (
 	"github.com/snaraj/lidersea.com/internal/board"
 	"github.com/snaraj/lidersea.com/internal/estimates"
 	"github.com/snaraj/lidersea.com/internal/estimates/render"
+	"github.com/snaraj/lidersea.com/internal/ratings"
 	"github.com/snaraj/lidersea.com/internal/reviews"
 	"github.com/snaraj/lidersea.com/internal/surface"
 )
@@ -40,6 +41,8 @@ func (a *apiHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		a.serveBoard(w, r)
 	case surface.Reviews.Route:
 		a.serveReviews(w, r)
+	case surface.Ratings.Route:
+		a.serveRatings(w, r)
 	case surface.Estimates.Route:
 		a.serveEstimatePreview(w, r)
 	default:
@@ -101,6 +104,41 @@ func (a *apiHandler) submitReview(w http.ResponseWriter, r *http.Request) {
 	env := surface.NewEnvelope(surface.Reviews, surface.StatusUnavailable, time.Now(),
 		reviewWriteUnavailable{Reason: reviewStorageUnavailableReason})
 	writeSurfaceJSON(w, http.StatusServiceUnavailable, env)
+}
+
+// serveRatings answers GET /api/ratings: the third-party ratings strip the
+// site renders at its foot. It is a pure read on every configuration — the
+// optional producer that can refresh the snapshot runs in the process
+// lifecycle, never on a request — and the envelope's status is the domain's
+// own freshness verdict, so a strip with no captured ratings answers
+// "unavailable" instead of dressing an empty result up as a success.
+func (a *apiHandler) serveRatings(w http.ResponseWriter, r *http.Request) {
+	if !allowReadMethod(w, r) {
+		return
+	}
+	snapshot := a.ratings.Load()
+	// The refresh window doubles as the age past which a collected snapshot
+	// is reported as aged. With the producer off there is no refresh
+	// contract, so a shipped snapshot is never "late" — it is the shipped
+	// truth.
+	freshness := snapshot.Freshness(time.Now(), a.cfg.RatingsCollector.Interval)
+	env := surface.NewEnvelope(surface.Ratings, ratingsStatus[freshness], ratingsPublishedAt(snapshot), snapshot)
+	serveSurfaceJSON(w, r, env)
+}
+
+// ratingsPublishedAt reads the snapshot's own provenance instant so the
+// envelope carries the data's timestamp rather than the moment it was
+// served, keeping response bytes — and therefore digest ETags — stable
+// between refreshes.
+func ratingsPublishedAt(snapshot ratings.Data) time.Time {
+	published, err := time.Parse(time.RFC3339, snapshot.PublishedAt)
+	if err != nil {
+		// Unreachable through the surface: the instant was validated when
+		// the snapshot was built. Falling back to the zero instant keeps the
+		// response deterministic rather than silently stamping "now".
+		return time.Time{}
+	}
+	return published
 }
 
 // serveEstimatePreview answers POST /api/estimates/preview when

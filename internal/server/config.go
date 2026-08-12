@@ -10,6 +10,7 @@ import (
 	"errors"
 
 	"github.com/snaraj/lidersea.com/internal/media"
+	"github.com/snaraj/lidersea.com/internal/ratings/collect"
 )
 
 // ConfigFromEnv assembles the complete surface configuration from the
@@ -28,10 +29,15 @@ func ConfigFromEnv(lookup func(string) string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	collector, err := collect.ConfigFromEnv(lookup)
+	if err != nil {
+		return Config{}, err
+	}
 	return Config{
 		Media:               mediaCfg,
 		ReviewsWriteEnabled: reviewsWrite,
 		EstimatesEnabled:    estimates,
+		RatingsCollector:    collector,
 	}, nil
 }
 

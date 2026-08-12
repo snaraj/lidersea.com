@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/snaraj/lidersea.com/internal/media"
+	"github.com/snaraj/lidersea.com/internal/ratings"
 	"github.com/snaraj/lidersea.com/internal/theme"
 )
 
@@ -44,11 +45,23 @@ func NewSite(assets fs.FS, cfg Config) (http.Handler, error) {
 	if err != nil {
 		return nil, fmt.Errorf("stamp themed shells: %w", err)
 	}
+	// The ratings snapshot is decoded and validated here, once: an
+	// owner-edited data file that breaks any rule fails startup rather than
+	// putting a half-filled entry in front of a visitor, and no request ever
+	// pays to parse it.
+	store := cfg.Ratings
+	if store == nil {
+		snapshot, err := ratings.Snapshot()
+		if err != nil {
+			return nil, fmt.Errorf("load ratings snapshot: %w", err)
+		}
+		store = ratings.NewStore(snapshot)
+	}
 	h := &handler{assets: assets, shells: shells}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/livez", health)
 	mux.HandleFunc("/readyz", health)
-	mux.Handle("/api/", &apiHandler{cfg: cfg})
+	mux.Handle("/api/", &apiHandler{cfg: cfg, ratings: store})
 	if cfg.Media.Enabled {
 		// Disabled (the default), the media URL class falls through to the
 		// static handler's opaque 404s: an absent pipeline is

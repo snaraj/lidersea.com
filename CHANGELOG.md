@@ -6,6 +6,15 @@ SemVer and match image/chart tags exactly.
 
 ## [Unreleased]
 
+### Added
+- Release publisher attaches the BuildKit SLSA v1 provenance as keyless
+  cosign attestations (`slsaprovenance1`) on the immutable image digest,
+  immediately after image signing — read back per platform from the
+  just-pushed index, with no new permissions, actions, or skip paths;
+  effective from the next tagged release. Completes this site's
+  precondition for the platform promotion ratchet
+  (website-infrastructure#58).
+
 ### Fixed
 - Media Range-matrix test determinism (post-merge advisory on #23, High):
   the matrix built one handler with `MaxConcurrent: 4` and then ran its

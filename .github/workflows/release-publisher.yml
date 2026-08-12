@@ -25,7 +25,6 @@ jobs:
       contents: write
       packages: write
       id-token: write
-      attestations: write
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -66,6 +65,8 @@ jobs:
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
+          # The attestation step asserts the index carries provenance for
+          # exactly this set; change the two together or the release fails.
           platforms: linux/amd64,linux/arm64
           push: true
           # Semantic version only: the commit SHA lives in labels, never as a
@@ -90,26 +91,85 @@ jobs:
       - name: Attach the BuildKit SLSA provenance as cosign attestations
         # Buildx (provenance: mode=max above) embeds one SLSA v1 provenance
         # statement per platform inside the pushed index. Read each predicate
-        # back from the immutable digest just signed and attach it as a
-        # keyless cosign attestation (slsaprovenance1) on that same digest,
-        # so verifiers that require cosign-attached attestations — the
-        # platform promotion ratchet, website-infrastructure#58 — can demand
-        # them from this release onward. Same identity, permissions, and
-        # no-skip discipline as the signing step: a missing or empty
-        # predicate fails the release.
+        # back from the immutable digest just signed, bind it to THIS release
+        # (builder run, vcs source, vcs revision), and attach it as a keyless
+        # cosign attestation (slsaprovenance1) on that same digest, so
+        # verifiers that require cosign-attached attestations — the platform
+        # promotion ratchet, website-infrastructure#58 — can demand them from
+        # this release onward. Same identity and no-skip discipline as the
+        # signing step; keyless signing needs only id-token + packages.
+        #
+        # The attestation is a LOSSY, SUBJECT-REBOUND copy of the embedded
+        # provenance, and is not a replacement for it:
+        #   - cosign v3.1.3 normalizes the predicate as it attaches, dropping
+        #     runDetails.metadata.buildkit_metadata (including vcs source and
+        #     revision), buildkit_completeness, and sibling BuildKit extension
+        #     subtrees, and emits the statement as in-toto v0.1 with a bare
+        #     image-name subject;
+        #   - each per-platform predicate is re-asserted about the INDEX
+        #     digest (what the promotion ratchet checks), not about the
+        #     per-platform manifest it describes.
+        # The index-embedded provenance therefore remains the authoritative
+        # content evidence: the downstream promote verification must never be
+        # "simplified" to read the attestation instead of it. The binding
+        # asserted below is checked HERE, against the embedded source, before
+        # anything is attached. cosign v3.1.3 `attest` has no annotation flag
+        # (`-a` and `--annotations` are both rejected), so the two same-subject
+        # statements are distinguishable only by predicate content.
+        #
+        # Added failure surface, accepted deliberately: this step inserts GHCR
+        # reads plus Fulcio and Rekor between image signing and chart
+        # publishing, and any failure here burns the version tag (tags are
+        # immutable and never reassigned — requirement 10). The closing
+        # verify-attestation is why that trade is worth taking: GHCR serves no
+        # Referrers API, so discovery rides cosign's `sha256-<hex>` fallback
+        # tag — the same tag that already holds the signature bundle and that
+        # `cosign attest` read-modify-writes — and this check settles, per
+        # release and inside the run that created them, that the attestations
+        # are discoverable and verifiable, instead of finding out days later
+        # at promotion.
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
         run: |
           set -euo pipefail
-          digest="${{ steps.build.outputs.digest }}"
-          for platform in linux/amd64 linux/arm64; do
+          src="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
+          # The build step's platforms:, sorted. Update both together.
+          expected_platforms='linux/amd64 linux/arm64'
+          mapfile -t platforms < <(
+            docker buildx imagetools inspect "${IMAGE}@${DIGEST}" \
+              --format '{{ json .Provenance }}' | jq -r 'keys[]'
+          )
+          if [ "${platforms[*]}" != "${expected_platforms}" ]; then
+            printf 'index provenance covers [%s]; the build publishes [%s]\n' \
+              "${platforms[*]}" "${expected_platforms}" >&2
+            exit 1
+          fi
+          predicates=()
+          for platform in "${platforms[@]}"; do
             predicate="${RUNNER_TEMP}/slsa-${platform//\//-}.json"
-            docker buildx imagetools inspect "${IMAGE}@${digest}" \
+            docker buildx imagetools inspect "${IMAGE}@${DIGEST}" \
               --format "{{ json (index .Provenance \"${platform}\").SLSA }}" \
               > "${predicate}"
-            test -s "${predicate}"
-            grep -q '"buildDefinition"' "${predicate}"
-            cosign attest --yes --type slsaprovenance1 \
-              --predicate "${predicate}" "${IMAGE}@${digest}"
+            jq -e --arg src "${src}" --arg rev "${GITHUB_SHA}" '
+              (.buildDefinition | type == "object") and
+              (.runDetails.builder.id | startswith($src + "/actions/runs/")) and
+              (.runDetails.metadata.buildkit_metadata.vcs.source == $src) and
+              (.runDetails.metadata.buildkit_metadata.vcs.revision == $rev)
+            ' "${predicate}" >/dev/null
+            predicates+=("${predicate}")
           done
+          if cmp -s "${predicates[0]}" "${predicates[1]}"; then
+            printf 'per-platform predicates are byte-identical; refusing to attach one build twice\n' >&2
+            exit 1
+          fi
+          for predicate in "${predicates[@]}"; do
+            cosign attest --yes --type slsaprovenance1 \
+              --predicate "${predicate}" "${IMAGE}@${DIGEST}"
+          done
+          cosign verify-attestation --type slsaprovenance1 \
+            --certificate-identity "${src}/.github/workflows/release-publisher.yml@${GITHUB_REF}" \
+            --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+            "${IMAGE}@${DIGEST}" >/dev/null
       - name: Refuse to reuse an existing chart version, then publish and sign the chart
         run: |
           set -euo pipefail
@@ -138,7 +198,7 @@ jobs:
             printf '| Artifact | Reference |\n| --- | --- |\n'
             printf "| Image | \`%s@%s\` |\n" "${IMAGE}" "${{ steps.build.outputs.digest }}"
             printf "| Chart | \`%s@%s\` |\n" "${CHART}" "${CHART_DIGEST}"
-            printf '\nSigned with keyless Cosign by this workflow identity; SBOM and SLSA provenance attached to the image, and the SLSA provenance is additionally attached as keyless cosign attestations (slsaprovenance1) on the image digest. See CHANGELOG.md for human-readable changes.\n'
+            printf '\nSigned with keyless Cosign by this workflow identity; SBOM and SLSA provenance are embedded in the image index, and one keyless cosign attestation (slsaprovenance1) per build platform is attached to the index digest and verified by this run. Those attestations are a lossy normalized copy — cosign v3.1.3 drops the BuildKit metadata subtrees, including vcs source and revision, and rebinds each per-platform predicate to the index digest — so the index-embedded provenance stays the authoritative content evidence. See CHANGELOG.md for human-readable changes.\n'
           } > "${RUNNER_TEMP}/release-notes.md"
           gh release create "${tag}" --verify-tag \
             --title "lidersea.com ${tag}" \

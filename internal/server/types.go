@@ -9,6 +9,7 @@ import (
 	"io/fs"
 
 	"github.com/snaraj/lidersea.com/internal/media"
+	"github.com/snaraj/lidersea.com/internal/theme"
 )
 
 // Request body caps for the gated write routes, far below the transport's
@@ -75,9 +76,12 @@ type Config struct {
 type handler struct {
 	// assets is the read-only, build-generated frontend filesystem.
 	assets fs.FS
-	// index is loaded during construction so a broken image fails before the
-	// process becomes ready rather than failing on the first visitor request.
-	index []byte
+	// shells holds one precomputed document per catalog theme, each already
+	// carrying its data-theme attribute. The entrypoint is read and stamped
+	// during construction so a broken image fails before the process becomes
+	// ready rather than on the first visitor request, and so serving a themed
+	// document is a map lookup rather than request-path work.
+	shells map[theme.Theme][]byte
 }
 
 // apiHandler serves the surface catalog under /api/: the registry's explicit

@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 	"regexp"
+	"sort"
+	"strings"
 	"testing"
 	"time"
 )
@@ -85,6 +87,11 @@ type Visitor struct {
 	// cache maps a visited path to the ETag a 200 response carried, exactly
 	// the validator a browser would replay on its next navigation.
 	cache map[string]string
+	// jar holds the cookies this session sends on every navigation, exactly
+	// as a browser replays a preference a page stored earlier. Nothing on
+	// this origin ever writes one, so the jar is only ever filled by a
+	// scenario stating what the visitor already chose.
+	jar map[string]string
 }
 
 // NewVisitor opens a fresh browsing session — an empty cache — against base,
@@ -125,6 +132,7 @@ func newSession(t *testing.T, base, proto string) *Visitor {
 		base:  base,
 		proto: proto,
 		cache: make(map[string]string),
+		jar:   make(map[string]string),
 	}
 }
 
@@ -135,7 +143,16 @@ func newSession(t *testing.T, base, proto string) *Visitor {
 // navigated, never the parent's.
 func (v *Visitor) On(t *testing.T) *Visitor {
 	t.Helper()
-	return &Visitor{t: t, client: v.client, base: v.base, proto: v.proto, cache: v.cache}
+	return &Visitor{t: t, client: v.client, base: v.base, proto: v.proto, cache: v.cache, jar: v.jar}
+}
+
+// Prefers records a cookie the session sends on every later navigation, the
+// way a browser replays a preference the visitor set on an earlier visit.
+// The value is written raw so a scenario can state exactly what reaches the
+// origin, hostile bytes included.
+func (v *Visitor) Prefers(name, value string) {
+	v.t.Helper()
+	v.jar[name] = value
 }
 
 // Navigate performs a browser-like GET of path: a validator remembered from a
@@ -171,6 +188,14 @@ func (v *Visitor) do(path string, request *http.Request) VisitorResponse {
 	v.t.Helper()
 	if v.proto != "" {
 		request.Header.Set(forwardedProtoHeader, v.proto)
+	}
+	if len(v.jar) > 0 {
+		pairs := make([]string, 0, len(v.jar))
+		for name, value := range v.jar {
+			pairs = append(pairs, name+"="+value)
+		}
+		sort.Strings(pairs)
+		request.Header.Set("Cookie", strings.Join(pairs, "; "))
 	}
 	response, err := v.client.Do(request)
 	if err != nil {

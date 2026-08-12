@@ -7,6 +7,37 @@ SemVer and match image/chart tags exactly.
 ## [Unreleased]
 
 ### Added
+- Reading themes: the site now serves a light theme, a dark theme, and a
+  system theme that follows the visitor's own device, selected by the
+  `lidersea_theme` cookie and delivered without a first-paint flash or a
+  layout shift. The origin precomputes one shell per catalog theme during
+  construction — each already carrying its `data-theme` attribute — so a
+  navigation is answered by choosing precomputed bytes and never by
+  editing a document on the request path; the browser therefore parses a
+  document that already declares its theme and there is no scripted
+  correction to flash. The origin never SETS a cookie: the switcher writes
+  the preference client-side (`SameSite=Lax`, `Secure` on TLS, a display
+  value with no identifier and no security meaning) and the origin only
+  reads it, so the read-only posture is unchanged. Absent, unknown,
+  oversized, and hostile cookie values all resolve to the default theme
+  and never reach a document. The shell — and only the shell — answers
+  `Vary: Cookie`, so each variant keeps its own digest ETag and its own
+  cache entry, and a bundle whose document cannot be stamped fails
+  construction instead of serving every visitor an unthemed page.
+  `styles.css` becomes the token layer the frontend floors called for:
+  colour literals exist only in the palette block, both palettes are
+  validated against WCAG 2.2 contrast floors by the frontend suite rather
+  than asserted, and every theme rule may declare custom properties ONLY —
+  the mechanical form of the zero-layout-shift promise, since a theme can
+  then change colour and nothing that occupies space. Rendering-lane
+  stage-1 floors land with it: `viewport-fit=cover` plus safe-area insets,
+  44px touch targets, 1rem control text, `100svh` with a percentage floor
+  (never `100vh`), an `@supports` guard, `prefers-reduced-motion`, and no
+  fixed size that could scroll a 320px viewport sideways. Payload budgets
+  ship as tests over the real built artifact (every themed shell variant,
+  each content-addressed asset, the whole bundle) and over shell source
+  size.
+
 - Release publisher attaches the BuildKit SLSA v1 provenance as keyless
   cosign attestations (`slsaprovenance1`) on the immutable image digest,
   immediately after image signing — read back per platform from the

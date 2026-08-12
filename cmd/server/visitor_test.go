@@ -219,3 +219,79 @@ func TestHostileVisitorStaysBlind(t *testing.T) {
 
 	drainScenario(t, runResult)
 }
+
+// TestVisitorChoosesAReadingTheme is the reading-comfort story over real
+// transport: a first-time visitor is answered with the shell that follows
+// their own device, a visitor whose browser holds a stored preference is
+// answered with THAT shell as a separate cached resource, and a visitor
+// whose cookie says something the site never issued is answered with the
+// default shell that never repeats what they sent. Every marker here is
+// written as an independent literal — never imported from the packages
+// under test — so a rename in the origin cannot quietly satisfy the
+// assertion.
+func TestVisitorChoosesAReadingTheme(t *testing.T) {
+	base, runResult := bootScenario(t)
+	session := testsupport.NewVisitor(t, base)
+	const themeCookie = "lidersea_theme"
+	var systemETag string
+
+	t.Run("first visit follows the visitor's own device", func(t *testing.T) {
+		visitor := session.On(t)
+		shell := visitor.Navigate("/")
+		if shell.StatusCode != http.StatusOK {
+			t.Fatalf("GET / = %d", shell.StatusCode)
+		}
+		if !bytes.Contains(shell.Body, []byte(`data-theme="system"`)) {
+			t.Fatalf("the first shell does not defer to the device: %s", shell.Body)
+		}
+		if got := shell.Header.Get("Vary"); got != "Cookie" {
+			t.Errorf("Vary = %q, want Cookie so a shared cache never crosses the variants", got)
+		}
+		systemETag = shell.Header.Get("ETag")
+		if systemETag == "" {
+			t.Fatal("the shell carries no ETag")
+		}
+		if len(shell.Header.Values("Set-Cookie")) != 0 {
+			t.Errorf("the origin wrote %v; it must never set a cookie", shell.Header.Values("Set-Cookie"))
+		}
+	})
+
+	t.Run("a stored preference is answered with its own shell", func(t *testing.T) {
+		visitor := session.On(t)
+		visitor.Prefers(themeCookie, "dark")
+		shell := visitor.Navigate("/")
+		// The browser replays the validator it cached for this URL, so a
+		// 200 here IS the proof that the themed shell is a different
+		// resource rather than the same bytes served twice.
+		if shell.StatusCode != http.StatusOK {
+			t.Fatalf("GET / with a stored theme = %d, want a fresh document", shell.StatusCode)
+		}
+		if !bytes.Contains(shell.Body, []byte(`data-theme="dark"`)) {
+			t.Fatalf("the stored preference was not honoured: %s", shell.Body)
+		}
+		if got := shell.Header.Get("ETag"); got == systemETag {
+			t.Errorf("the dark shell shares the default shell's ETag %s", got)
+		}
+	})
+
+	t.Run("a cookie the site never issued changes nothing", func(t *testing.T) {
+		visitor := session.On(t)
+		const forged = "sepia-or-anything-else"
+		visitor.Prefers(themeCookie, forged)
+		shell := visitor.Navigate("/")
+		if shell.StatusCode != http.StatusOK {
+			t.Fatalf("GET / with a forged theme = %d", shell.StatusCode)
+		}
+		if !bytes.Contains(shell.Body, []byte(`data-theme="system"`)) {
+			t.Fatalf("a forged theme was not rejected to the default: %s", shell.Body)
+		}
+		if bytes.Contains(shell.Body, []byte(forged)) {
+			t.Fatalf("the shell repeats the forged cookie value: %s", shell.Body)
+		}
+		if got := shell.Header.Get("ETag"); got != systemETag {
+			t.Errorf("the forged-theme shell ETag = %s, want the default shell's %s", got, systemETag)
+		}
+	})
+
+	drainScenario(t, runResult)
+}

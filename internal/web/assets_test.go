@@ -203,3 +203,74 @@ func TestBuiltFrontendIsEmbeddedAndServed(t *testing.T) {
 		}
 	}
 }
+
+// Payload budgets, in bytes. Perf budgets are tests in this repository, so a
+// bundle that outgrows its cap is a red build rather than a discussion. The
+// caps are set above the current build with working room and RATCHET DOWN as
+// the bundle is trimmed — raising one to admit a regression is the move the
+// budget exists to prevent.
+const (
+	// shellBudget caps the document a navigation downloads, themed variant
+	// included. It is the first byte a visitor waits on.
+	shellBudget = 2 * 1024
+	// assetBudget caps any single content-addressed asset.
+	assetBudget = 48 * 1024
+	// bundleBudget caps the whole embedded bundle.
+	bundleBudget = 64 * 1024
+)
+
+// TestBundleStaysInsideItsPerformanceBudget measures the real, built
+// artifact — the same bytes the production image serves — against the caps
+// above. Every themed variant of the shell is measured, because the origin
+// serves whichever one a visitor's preference selects.
+func TestBundleStaysInsideItsPerformanceBudget(t *testing.T) {
+	assets, err := website.FileSystem()
+	if err != nil {
+		t.Fatalf("FileSystem() error = %v", err)
+	}
+	siteHandler, err := server.New(assets)
+	if err != nil {
+		t.Fatalf("server.New() error = %v; run the pinned frontend build before Go tests", err)
+	}
+
+	for _, preference := range []string{"", "system", "light", "dark"} {
+		request := edgeRequest(http.MethodGet, "/")
+		if preference != "" {
+			request.Header.Set("Cookie", "lidersea_theme="+preference)
+		}
+		response := httptest.NewRecorder()
+		siteHandler.ServeHTTP(response, request)
+		if response.Code != http.StatusOK {
+			t.Fatalf("shell (preference %q) status = %d", preference, response.Code)
+		}
+		if size := response.Body.Len(); size > shellBudget {
+			t.Errorf("shell (preference %q) is %d bytes, over its %d-byte budget", preference, size, shellBudget)
+		}
+	}
+
+	total := 0
+	if err := fs.WalkDir(assets, ".", func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		info, statErr := entry.Info()
+		if statErr != nil {
+			return statErr
+		}
+		size := int(info.Size())
+		total += size
+		if strings.HasPrefix(path, "assets/") && size > assetBudget {
+			t.Errorf("asset %s is %d bytes, over its %d-byte budget", path, size, assetBudget)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("walk embedded frontend: %v", err)
+	}
+	if total > bundleBudget {
+		t.Errorf("embedded bundle is %d bytes, over its %d-byte budget", total, bundleBudget)
+	}
+	t.Logf("embedded bundle: %d bytes against a %d-byte budget", total, bundleBudget)
+}

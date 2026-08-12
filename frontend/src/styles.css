@@ -1,9 +1,116 @@
+/*
+ * lidersea.com token layer.
+ *
+ * Three rules govern this file and are pinned by frontend tests:
+ *
+ * 1. Palette literals appear exactly once, in the palette block below.
+ *    Everything else consumes a token.
+ * 2. Every theme rule — the [data-theme] blocks and the
+ *    prefers-color-scheme mapping — declares CUSTOM PROPERTIES ONLY. A
+ *    theme can therefore change colour and nothing else, which is what
+ *    makes a theme switch incapable of moving a box.
+ * 3. Layout uses logical properties and fluid sizes, so nothing has a
+ *    fixed width that could push the page wider than a 320px viewport.
+ */
+
 :root {
-  color: #f4f7f5;
-  background: #0b2430;
-  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  /* Palette source of truth. Both themes are always defined, so switching
+     is a remapping of tokens rather than a redefinition of colours. */
+  --palette-dark-canvas: #08202b;
+  --palette-dark-raised: #0e2f3d;
+  --palette-dark-ink: #f4f7f5;
+  --palette-dark-ink-muted: #a8d8d0;
+  --palette-dark-edge: #3d8098;
+  --palette-dark-accent: #7fd4c6;
+  --palette-dark-accent-ink: #04161e;
+
+  --palette-light-canvas: #f3f7f5;
+  --palette-light-raised: #ffffff;
+  --palette-light-ink: #0d2630;
+  --palette-light-ink-muted: #2f6a64;
+  --palette-light-edge: #5e8b86;
+  --palette-light-accent: #0f5f57;
+  --palette-light-accent-ink: #ffffff;
+
+  /* Scale tokens: theme-independent by construction, because a theme rule
+     may only declare custom properties that carry colour. */
+  --space-2xs: 0.25rem;
+  --space-xs: 0.5rem;
+  --space-sm: 0.75rem;
+  --space-md: 1.25rem;
+  --space-lg: 2rem;
+  --radius-sm: 0.5rem;
+  --radius-md: 0.875rem;
+  --border-hairline: 1px;
+
+  /* The rendering-lane floors, expressed as tokens so a control cannot
+     drift below them without editing a named value: 44px is the minimum
+     comfortable touch target, and 1rem keeps iOS Safari from zooming a
+     focused control. */
+  --tap-target: 44px;
+  --font-size-control: 1rem;
+  --chrome-block-size: 3.5rem;
+
+  --font-ui: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --motion-fast: 120ms;
+
+  /* Default theme mapping. It is the mapping the "system" theme uses: no
+     [data-theme] rule matches it, so these declarations and the
+     prefers-color-scheme override below decide the palette, exactly as the
+     visitor's own device asked. */
+  --ui-scheme: dark;
+  --canvas: var(--palette-dark-canvas);
+  --raised: var(--palette-dark-raised);
+  --ink: var(--palette-dark-ink);
+  --ink-muted: var(--palette-dark-ink-muted);
+  --edge: var(--palette-dark-edge);
+  --accent: var(--palette-dark-accent);
+  --accent-ink: var(--palette-dark-accent-ink);
+
+  color-scheme: var(--ui-scheme);
+  color: var(--ink);
+  background: var(--canvas);
+  font-family: var(--font-ui);
   font-synthesis: none;
   text-rendering: optimizeLegibility;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --ui-scheme: light;
+    --canvas: var(--palette-light-canvas);
+    --raised: var(--palette-light-raised);
+    --ink: var(--palette-light-ink);
+    --ink-muted: var(--palette-light-ink-muted);
+    --edge: var(--palette-light-edge);
+    --accent: var(--palette-light-accent);
+    --accent-ink: var(--palette-light-accent-ink);
+  }
+}
+
+/* Explicit themes. The origin stamps the attribute onto the document it
+   serves, so the correct palette resolves on the first style pass — there
+   is nothing for a script to correct and therefore nothing to flash. */
+:root[data-theme='light'] {
+  --ui-scheme: light;
+  --canvas: var(--palette-light-canvas);
+  --raised: var(--palette-light-raised);
+  --ink: var(--palette-light-ink);
+  --ink-muted: var(--palette-light-ink-muted);
+  --edge: var(--palette-light-edge);
+  --accent: var(--palette-light-accent);
+  --accent-ink: var(--palette-light-accent-ink);
+}
+
+:root[data-theme='dark'] {
+  --ui-scheme: dark;
+  --canvas: var(--palette-dark-canvas);
+  --raised: var(--palette-dark-raised);
+  --ink: var(--palette-dark-ink);
+  --ink-muted: var(--palette-dark-ink-muted);
+  --edge: var(--palette-dark-edge);
+  --accent: var(--palette-dark-accent);
+  --accent-ink: var(--palette-dark-accent-ink);
 }
 
 * {
@@ -17,26 +124,92 @@ body,
   margin: 0;
 }
 
-body {
-  min-height: 100vh;
+/* No 100vh anywhere: iOS Safari's collapsing URL bar makes it taller than
+   the visible viewport. 100% of the chain above is the universally
+   supported floor, and browsers that understand the small-viewport unit
+   get the exact answer. */
+.shell {
+  display: grid;
+  grid-template-rows: auto 1fr;
+  min-block-size: 100%;
+  padding-inline-start: max(var(--space-md), env(safe-area-inset-left));
+  padding-inline-end: max(var(--space-md), env(safe-area-inset-right));
+  padding-block-start: max(var(--space-xs), env(safe-area-inset-top));
+  padding-block-end: max(var(--space-md), env(safe-area-inset-bottom));
+}
+
+@supports (min-block-size: 100svh) {
+  .shell {
+    min-block-size: 100svh;
+  }
+}
+
+/* The chrome reserves its own height in the static shell as well as the
+   mounted one, so the switcher appearing at hydration shifts nothing. */
+.chrome {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  min-block-size: var(--chrome-block-size);
+  gap: var(--space-sm);
+}
+
+.theme-switch {
+  display: flex;
+  align-items: stretch;
+  gap: var(--space-2xs);
+  padding: var(--space-2xs);
+  border: var(--border-hairline) solid var(--edge);
+  border-radius: var(--radius-md);
+  background: var(--raised);
+  max-inline-size: 100%;
+}
+
+.theme-switch__option {
+  min-block-size: var(--tap-target);
+  min-inline-size: var(--tap-target);
+  padding-inline: var(--space-sm);
+  border: var(--border-hairline) solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--ink-muted);
+  font-family: inherit;
+  font-size: var(--font-size-control);
+  /* Weight never changes with selection: a bolder label is a wider label,
+     and a wider label is a layout shift. */
+  font-weight: 500;
+  line-height: 1;
+  cursor: pointer;
+  transition: background-color var(--motion-fast) ease, color var(--motion-fast) ease;
+}
+
+.theme-switch__option[aria-pressed='true'] {
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+
+.theme-switch__option:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 main {
   display: grid;
-  min-height: 100vh;
   place-items: center;
-  padding: 2rem;
+  padding-block: var(--space-lg);
   text-align: center;
 }
 
 .message {
   display: grid;
-  gap: 1.25rem;
+  gap: var(--space-md);
+  max-inline-size: 100%;
 }
 
 h1,
 p {
   margin: 0;
+  overflow-wrap: anywhere;
 }
 
 h1 {
@@ -47,18 +220,18 @@ h1 {
 }
 
 p {
-  color: #a8d8d0;
+  color: var(--ink-muted);
   font-size: clamp(1rem, 3vw, 1.5rem);
   letter-spacing: 0.04em;
 }
 
-@media (prefers-color-scheme: light) {
-  :root {
-    color: #102a35;
-    background: #f3f7f5;
-  }
-
-  p {
-    color: #326b65;
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 }

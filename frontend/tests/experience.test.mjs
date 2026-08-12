@@ -121,12 +121,18 @@ test('static and hydrated shells preserve the same accessible identity', () => {
 // ban is unchanged in force and no longer collateral. Any remote reference
 // the site ever needs arrives as data from this origin's own API, never as
 // a literal in shell source.
+//
+// The string-opening class must name EVERY quote this source can use. It
+// once omitted the backtick, which let a protocol-relative origin hide in a
+// JavaScript template literal — a shape the old blanket ban did catch. The
+// regression that shape represents is pinned by the mutation this test's
+// PR records.
 test('initial source remains local and viewport-responsive', () => {
   for (const [name, source] of Object.entries(sources)) {
     assert.doesNotMatch(source, /https?:\/\//i, `${name} introduces an absolute remote origin`);
     assert.doesNotMatch(
       source,
-      /(?:["'(=]|url\()\s*\/\/[a-z0-9-]/i,
+      /(?:["'`(=]|url\()\s*\/\/[a-z0-9-]/i,
       `${name} introduces a protocol-relative remote origin`,
     );
   }
@@ -291,16 +297,21 @@ test('the theme switcher is accessible and origin-led', () => {
   assert.match(component, /SameSite=Lax/);
   assert.match(component, /'Secure'/);
   // A selected option must not change weight: a bolder label is a wider
-  // label, and a wider label is a layout shift inside the switcher.
-  const pressedBlock = declarationBlocks(styles).find((block) =>
+  // label, and a wider label is a layout shift inside the switcher. EVERY
+  // rule that styles the pressed state is inspected, not just the first
+  // one found: a later, more specific rule wins the cascade, so checking
+  // one and stopping would let the winning declaration go unexamined.
+  const pressedBlocks = declarationBlocks(styles).filter((block) =>
     block.selector.includes("[aria-pressed='true']"),
   );
-  assert.ok(pressedBlock, 'the pressed-state rule is missing');
-  for (const { property } of declarations(pressedBlock.body)) {
-    assert.ok(
-      ['background', 'background-color', 'color', 'border-color'].includes(property),
-      `the pressed state declares "${property}", which can change the control's size`,
-    );
+  assert.ok(pressedBlocks.length >= 1, 'the pressed-state rule is missing');
+  for (const block of pressedBlocks) {
+    for (const { property } of declarations(block.body)) {
+      assert.ok(
+        ['background', 'background-color', 'color', 'border-color'].includes(property),
+        `the pressed-state rule "${block.selector}" declares "${property}", which can change the control's size`,
+      );
+    }
   }
 });
 

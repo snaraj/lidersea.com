@@ -190,15 +190,23 @@ func securityHeaders(next http.Handler) http.Handler {
 // The host comes from the request's Host header (the edge binds it to the
 // site hostname) and RequestURI carries the escaped path and query byte for
 // byte. Only the exact lowercase declaration bounces (see
-// forwardedProtoHTTP); http.Redirect keeps HEAD bodiless and gives GET the
-// standard hyperlink stub. Running inside securityHeaders and ahead of all
-// routing, the bounce carries the baseline policy — minus the HSTS promise
-// the plain leg has not earned — and covers every path, probes and opaque
-// 404s included, before any content or method decision is made.
+// forwardedProtoHTTP); http.Redirect keeps HEAD and POST bodiless and gives
+// GET the standard hyperlink stub. Running inside securityHeaders and ahead
+// of all routing, the bounce carries the baseline policy — minus the HSTS
+// promise the plain leg has not earned — and covers every path, probes and
+// opaque 404s included, before any content or method decision is made.
 func redirectForwardedHTTP(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get(forwardedProtoHeader) == forwardedProtoHTTP {
-			http.Redirect(w, r, "https://"+r.Host+r.URL.RequestURI(), http.StatusMovedPermanently)
+			// 308, not 301: a permanent redirect that preserves the method and
+			// body. This origin is not GET/HEAD-only — the gated reviews and
+			// estimates carve-outs accept POST — and the bounce runs ahead of
+			// routing, so a POST arriving over the plain leg is redirected here;
+			// a 301 would rewrite it to GET and silently drop the body, while
+			// 308 replays the POST to the TLS URL intact. The edge's own
+			// Always-Use-HTTPS stays the primary redirect; this is the origin
+			// backstop.
+			http.Redirect(w, r, "https://"+r.Host+r.URL.RequestURI(), http.StatusPermanentRedirect)
 			return
 		}
 		next.ServeHTTP(w, r)

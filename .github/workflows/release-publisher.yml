@@ -122,18 +122,22 @@ jobs:
         # publishing, and any failure here burns the version tag (tags are
         # immutable and never reassigned — requirement 10). The two closing
         # checks are why that trade is worth taking. GHCR serves no Referrers
-        # API, so discovery rides cosign's `sha256-<hex>` fallback tag — the
+        # API, so discovery rides cosign's `sha256-<hex>` fallback tag (this
+        # cosign writes the suffixless tag; no `.sig`/`.att` siblings) — the
         # same tag that already holds the signature bundle and that each
         # `cosign attest` read-modify-writes — so the risk is not only that
         # nothing is discoverable, but that the second attestation replaces
         # the first while the step still exits 0 and the release notes promise
         # one per architecture. `verify-attestation` settles discoverability
         # and verifiability through the same `--type` path the promotion
-        # ratchet uses; the download-and-count settles that BOTH survived,
-        # reading the predicate type out of the signed statement rather than
-        # trusting the OCI annotation cosign's own filters match on (an
-        # attestation attached by an older cosign filters to zero on both
-        # `download --predicate-type` and `verify-attestation --type`).
+        # ratchet uses; the download-and-count settles that BOTH survived.
+        # The count decodes the predicate type out of the SIGNED STATEMENT,
+        # which is producer-independent and less spoofable than cosign's own
+        # `--predicate-type` / `--type` filtering: that path reads the signed
+        # statement for modern bundles too, but falls back to layer metadata
+        # for legacy forms, where an attestation attached by an older cosign
+        # filters to zero on both `download --predicate-type` and
+        # `verify-attestation --type`.
         # Both run inside the run that created the attestations, instead of
         # the failure surfacing days later at promotion.
         #
@@ -176,7 +180,7 @@ jobs:
             predicates+=("${predicate}")
           done
           # Set-based, so a third platform cannot slip past a pairwise check.
-          distinct="$(sha256sum "${predicates[@]}" | awk '{print $1}' | sort -u | wc -l)"
+          distinct="$(sha256sum "${predicates[@]}" | awk '{print $1}' | sort -u | wc -l | tr -d ' ')"
           if [ "${distinct}" -ne "${#predicates[@]}" ]; then
             printf 'per-platform predicates are not distinct (%s unique of %s); refusing to attach one build twice\n' \
               "${distinct}" "${#predicates[@]}" >&2
@@ -190,10 +194,21 @@ jobs:
             --certificate-identity "${src}/.github/workflows/release-publisher.yml@${GITHUB_REF}" \
             --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
             "${IMAGE}@${DIGEST}" >/dev/null
+          # cosign v3.1.3 attests with --new-bundle-format, so download emits
+          # newline-delimited Sigstore bundles whose statement sits at
+          # .dsseEnvelope.payload, and the set includes the image SIGNATURE
+          # bundle (the download filters on an empty artifactType) — three
+          # lines here, not two. A digest carrying NO attestations still
+          # returns that one signature bundle and exits 0, so a successful
+          # download proves nothing by itself; only this count does. Older
+          # cosign wrote the statement at .payload, so both shapes are read;
+          # anything else (messageSignature-only bundles, an unrecognised
+          # envelope shape, an empty payload, no output at all) contributes
+          # nothing and the comparison below fails closed.
           attached="$(
             cosign download attestation "${IMAGE}@${DIGEST}" \
               | jq -s --arg type 'https://slsa.dev/provenance/v1' \
-                  '[.[] | select((.payload | @base64d | fromjson).predicateType == $type)] | length'
+                  '[.[] | ((.dsseEnvelope.payload // .payload // empty) | @base64d | fromjson?) | select(.predicateType == $type)] | length'
           )"
           if [ "${attached}" -ne "${#predicates[@]}" ]; then
             printf 'the digest carries %s slsaprovenance1 attestations; %s were attached\n' \

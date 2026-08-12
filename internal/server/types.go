@@ -27,6 +27,29 @@ const (
 // accept the submission.
 const reviewStorageUnavailableReason = "review storage is not configured; submissions are not persisted yet"
 
+// The edge's scheme declaration and the two exact tokens the origin acts on.
+// This is the origin's only use of forwarded metadata, and it is fail-closed
+// by exact matching: the TLS-terminating edge sends lowercase tokens, so a
+// case variant, an unknown proto, or an absent header (cluster probes,
+// port-forward validation, local dev) is not our edge speaking and serves
+// normally — no redirect issued, no HSTS promise minted.
+const (
+	// forwardedProtoHeader names the edge's declaration of the scheme the
+	// visitor used on the public leg. The origin reads it for exactly one
+	// decision — the scheme policy in securityHeaders and
+	// redirectForwardedHTTP — and must never trust it for anything else:
+	// on any connection that did not cross the edge these are
+	// client-controlled bytes.
+	forwardedProtoHeader = "X-Forwarded-Proto"
+	// forwardedProtoHTTP is the only declaration answered with the
+	// permanent redirect to TLS.
+	forwardedProtoHTTP = "http"
+	// forwardedProtoHTTPS is the only declaration that earns the HSTS
+	// policy: no spoofed or malformed value can mint a transport promise
+	// for a leg the edge never declared secure.
+	forwardedProtoHTTPS = "https"
+)
+
 // Config selects which optional capabilities the handler serves. The zero
 // value is the production default and the strictest state: every gate off,
 // media disabled, the origin purely read-only. Each field only ever ADDS a

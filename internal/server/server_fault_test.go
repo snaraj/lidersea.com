@@ -76,8 +76,12 @@ func TestReadFailureAfterStatIsFailClosed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
+	// Edge-declared TLS like a real visitor hitting the broken asset: even
+	// the fail-closed 500 must carry the full baseline, HSTS included.
+	faultRequest := httptest.NewRequest(http.MethodGet, "/assets/app-abc123.js", nil)
+	faultRequest.Header.Set("X-Forwarded-Proto", "https")
 	response := httptest.NewRecorder()
-	siteHandler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/assets/app-abc123.js", nil))
+	siteHandler.ServeHTTP(response, faultRequest)
 	if response.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want %d", response.Code, http.StatusInternalServerError)
 	}

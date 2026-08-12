@@ -37,11 +37,15 @@ type envelopeShape struct {
 	Data        json.RawMessage `json:"data"`
 }
 
-// getSurface fetches one surface path from the default handler.
+// getSurface fetches one surface path from the default handler, arriving the
+// way every real surface reader does: forwarded by the TLS-terminating edge,
+// whose declaration the full security baseline — HSTS included — answers.
 func getSurface(t *testing.T, siteHandler http.Handler, path string) *httptest.ResponseRecorder {
 	t.Helper()
+	request := httptest.NewRequest(http.MethodGet, path, nil)
+	request.Header.Set("X-Forwarded-Proto", "https")
 	response := httptest.NewRecorder()
-	siteHandler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
+	siteHandler.ServeHTTP(response, request)
 	return response
 }
 

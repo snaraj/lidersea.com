@@ -495,9 +495,9 @@ included; it is the same battery CI enforces:
   `dependency-review` (PRs only; fails on high severity), `application`
   (toolchain pinned AND verified — Node 24.19.0, npm 11.17.0,
   Go 1.26.5; frontend check/test/build; gofmt/vet/tests/race; the
-  coverage floor), `chart` (helm lint + render at
-  `--kube-version v1.36.0`; the ingress peer-identity pin,
-  `scripts/ci/chart-ingress-pin.sh`; the VERSION ↔ chart `version` ↔
+  coverage floor), `chart` (the ingress peer-identity pin,
+  `scripts/ci/chart-ingress-pin.sh`; helm lint + render at
+  `--kube-version v1.36.0`; the VERSION ↔ chart `version` ↔
   `appVersion` three-way lock), `container` (both production
   architectures built, never published).
 - **coverage-badges** — `main` pushes only: recomputes the Go coverage

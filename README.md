@@ -52,18 +52,30 @@ CI is authoritative.
 
 ## Releases
 
-Pushing `vX.Y.Z` (matching `VERSION` and the chart version — CI enforces
-the three-way lock) publishes everything at once:
+Every protected-main merge publishes exactly one patch release after the
+merged SHA's PR gate succeeds. The merged source carries numeric `X.Y.Z` in
+`VERSION`, chart `version`, `appVersion`, and the dated changelog heading, and
+exact plain `vX.Y.Z` in the image tag. Automation creates that plain tag at the
+exact SHA and explicitly dispatches the tag-bound publisher, which builds or
+verifies:
 
 - `ghcr.io/snaraj/lidersea-com:vX.Y.Z` — multi-arch image, keyless-signed
   (Cosign), with SBOM and SLSA provenance; deployment consumes the digest.
-- `ghcr.io/snaraj/charts/lidersea-com` — the Helm chart as a signed OCI
-  artifact at the same version.
+- `ghcr.io/snaraj/charts/lidersea-com:X.Y.Z` — the Helm chart as a signed OCI
+  artifact. This is the one narrow tag exception: Helm requires the registry
+  tag to equal valid chart SemVer, and `vX.Y.Z` is not SemVerV2.
 - A GitHub Release recording the immutable digests.
 
-Version tags are immutable and never reused — the publisher refuses, with
-no override. History lives in [CHANGELOG.md](CHANGELOG.md); the security
-posture in [SECURITY.md](SECURITY.md).
+Version tags are immutable and never reassigned. A retry reuses only exact,
+complete, correctly signed source state; partial or conflicting immutable
+state is reported as burned and requires a new patch. Release publication is
+separate from deployment or promotion. History lives in
+[CHANGELOG.md](CHANGELOG.md); the security posture in
+[SECURITY.md](SECURITY.md).
+
+An OCI reference such as `image:vX.Y.Z@sha256:<digest>` or
+`chart:X.Y.Z@sha256:<digest>` contains a tag plus immutable digest; the complete
+string is a reference, never a tag.
 
 ## Media
 

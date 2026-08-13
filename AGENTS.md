@@ -48,8 +48,10 @@ Numbered for citation, repo-scoped, none negotiable in code:
    and free CI. No paid API, SaaS, tracker, CDN, or third-party runtime
    dependency may be introduced — the frontend stays local-origin-only.
 2. **Owner-only merges; protected history.** Work lands through PRs into
-   `main`; the owner merges. Never push `main`, never force-push, never
-   create tags outside the release flow.
+   `main`; Samuel alone merges. An agent must NEVER merge, auto-merge, squash,
+   rebase into, or push `main`; must never force-push or delete refs; and must
+   stop and question even a later request to do so. Tags exist only through
+   the release workflow.
 3. **Commit-metadata privacy and attribution.** Commits are authored AND
    committed as the owner's GitHub noreply identity (both fields). No
    co-author trailers. Agent-authored commit messages and PR bodies are
@@ -78,9 +80,15 @@ Numbered for citation, repo-scoped, none negotiable in code:
    yes.
 9. **Dependency-free Go.** The Go module stays standard-library only.
    Adding a dependency is an owner decision, not a convenience.
-10. **Digest deploys, immutable releases.** Images deploy by digest.
-    Version tags are immutable and never reassigned. The release workflow
-    has no skip flag, no force path, no manual dispatch — never add one.
+10. **Every merge releases; deploy remains separate.** Every PR, including
+    docs and Dependabot, advances exactly one patch from its current protected
+    base: numeric `VERSION`, chart `version`, `appVersion`, and changelog
+    `X.Y.Z`, plus plain `vX.Y.Z` image tag. Successful main CI publishes that exact SHA as one
+    immutable plain `vX.Y.Z` release. The machine-only workflow dispatch is
+    the explicit handoff required after a token-created tag; it is not an
+    operator bypass. There is no skip or force path. Images deploy by digest;
+    `vX.Y.Z@sha256:<digest>` is a reference, never a tag, and publication is
+    never deployment or promotion.
 11. **No secrets, no personal data.** No credential, token, private host
     fact, or personal data ever enters this repository — including in
     tests, fixtures, and docs.
@@ -167,14 +175,19 @@ Build and test, in this order (the same gate CI enforces):
    defaults to older capabilities).
 4. `docker build .` when the Dockerfile or build inputs change.
 
-Releases: `VERSION`, `chart/Chart.yaml` (`version` + `appVersion`), the
-chart's `image.tag`, and the git tag all move together (CI enforces the
-four-way lock). SemVer per the platform's ADR 0014: releases are strict bumps;
-history is append-only. Update `CHANGELOG.md` in the same PR as the change it
-describes; release dates in the changelog are owner-local dates. Pushing
-`vX.Y.Z` publishes the signed multi-arch image, the signed OCI chart, and a
-GitHub Release; deployment RESOLVES digests, never tags. The rendered reference
-carries both — `repository:vX.Y.Z@sha256:<hex>` — so a Pod states which release
+Releases: every PR advances numeric `VERSION`, chart `version`, `appVersion`,
+and changelog `X.Y.Z`, plus plain `vX.Y.Z` `image.tag`, by exactly one patch
+from its current protected base. Successful main CI creates the plain git tag at the
+exact merged SHA and explicitly dispatches the tag-bound publisher; a
+token-created tag is never assumed to trigger another push workflow. The
+publisher emits the signed multi-arch image, signed OCI chart, and GitHub
+Release. Histories and tags are append-only; stale concurrent PRs must resync
+and take the new next patch. Deployment RESOLVES digests, never tags. The
+Helm chart/OCI tag is the documented numeric `X.Y.Z` exception because Helm
+requires its registry tag to equal valid chart SemVer; Git/image/Release tags
+remain plain `vX.Y.Z`.
+The rendered image reference carries both —
+`repository:vX.Y.Z@sha256:<hex>` — so a Pod states which release
 it is, while only the digest selects the bytes and only the digest is signed,
 attested, and verified at admission (requirement 10).
 
@@ -243,6 +256,15 @@ different lane is better. The reviewer works in a disposable worktree at
 the PR head, stays read-only toward the author's workspace, reverts every
 experiment, and removes the worktree afterward.
 
+**Exact-head receipt.** Review identity is textual because agents share the
+owner's GitHub account; it is not a claim of separate GitHub principals. The
+reviewer posts one normal PR comment containing a line exactly
+`HEAD: <40-lowercase-hex>` and a verdict exactly `APPROVE` or
+`REQUEST-CHANGES`, ending with `- <Agent> (adversarial reviewer)`. Any head
+change invalidates the receipt. The author replies with reproduction and repair
+evidence; a fresh independent context re-reviews the new exact head. If the
+owner merges first, record a post-merge audit and classify—not erase—the gap.
+
 **The review must:**
 
 1. Audit every claim in the PR body and commit messages against the
@@ -269,8 +291,8 @@ experiment, and removes the worktree afterward.
    simulated evidence of both directions in the PR and treat the first
    post-merge run as part of the change under review.
 
-**Verdict format** — posted as a PR comment, so every vendor and the
-owner see the identical record: APPROVE or REQUEST-CHANGES; numbered
+**Verdict format** — posted as a normal PR comment, so every vendor and the
+owner see the identical record: exact head, APPROVE or REQUEST-CHANGES; numbered
 findings with severity and file:line; the mutation kill matrix; flake
 results; a claim-audit table (SUPPORTED / OVERSTATED per claim); explicit
 "no finding — checked X, Y, Z" statements so silence is never ambiguous;
@@ -290,7 +312,8 @@ authority: the owner alone merges.
 ## GitHub conventions
 
 - **Issues first.** Substantive work is tracked as a labeled issue before or
-  alongside its PR; PRs declare `Closes #N` so merges close the record.
+  alongside its PR; PRs use an exact standalone `Closes #N` line for an issue
+  in the same repository so GitHub closes it only when the owner merges.
   Feature intake lands as a `features`-labeled issue with the architectural
   constraints stated, even when implementation waits.
 - **Labels.** One taxonomy, identical names/colors/meanings across all
@@ -339,6 +362,16 @@ authority: the owner alone merges.
   and never rewritten.
 - **Commits.** Detailed bodies to the review protocol's evidence standard —
   problem, mechanism, enumerated changes, evidence — signed per lane.
+- **Dependabot.** Dependency PRs obey the same issue/milestone/assignee,
+  next-patch, changelog, exact-head review, CI, and base-freshness controls.
+  Infrastructure/tool outages are reported as infrastructure failures; they do
+  not waive a real product failure or justify lowering this repository's
+  coverage floor.
+- **Merge readiness.** Draft remains Draft until every check is successful at
+  the exact head, the base equals current protected `main`, all discussions and
+  findings are resolved, a fresh exact-head APPROVE receipt exists, the next
+  patch still follows that base, and the automatic release consequence is
+  proven. Only the coordinator flips Ready. The author and reviewer never do.
 
 ## Working a change end to end
 
@@ -351,7 +384,10 @@ The complete delivery loop, each step gated by the sections around it:
    final; until it carries that label, the issue is still being drafted.
 2. **Branch from `origin/main`** after `git fetch origin`; branch names
    are lane-prefixed (`fable5/<topic>`). One writer per branch, always —
-   a branch that is not yours is a branch you never push to.
+   a branch that is not yours is a branch you never push to. Reserve the exact
+   next patch from that base; if another PR lands, create a fresh branch from
+   current main, carry the still-valid diff without rewriting published
+   history, take the new next patch, and close/supersede the stale PR.
 3. **Build the change** inside the requirements and doctrine above.
    Docs-only diffs still run the gates.
 4. **Run the full local gate** ("Quality gates" below), then both secret
@@ -387,11 +423,9 @@ committer, on every outgoing commit — is exactly:
       GIT_COMMITTER_EMAIL='39077795+snaraj@users.noreply.github.com' \
       git commit ...
 
-- EVERY history-writing command runs under the same pinned environment —
-  `commit`, `commit --amend`, `rebase`, `cherry-pick`. A rebase rewrites
-  the COMMITTER of every replayed commit, and the privacy gate checks
-  the committer field, so an unpinned rebase silently reintroduces the
-  machine identity into otherwise-clean commits.
+- EVERY authorized commit runs under the same pinned environment. Agents do
+  not amend, rebase, cherry-pick onto a published branch, or rewrite history;
+  use additive commits or a fresh branch from current main.
 - No `Co-Authored-By` trailers, ever. Agent-authored commit bodies, PR
   bodies, and issue bodies end with the acting agent's signature (this
   lane: `- Fable5`), matching its agent label.
@@ -407,27 +441,15 @@ promptly, reply IN-THREAD per comment describing the resolution, then
 notify the owner the PR is ready to re-check; never mark a PR ready
 with unaddressed owner comments.
 
-## Stacked pull requests
+## Dependent pull requests
 
-Stacking is sanctioned for dependent work; these rules exist because a
-squash-merge repository punishes careless stacks:
-
-- The stacked PR's base is THE BRANCH IT STACKS ON, so its diff shows
-  only the increment.
-- A stacked PR STAYS DRAFT UNTIL ITS BASE MERGES. Squashing a stacked
-  PR before its base would duplicate the base's entire content into
-  `main`.
-- When the base merges: `git fetch --prune`; rebase the stacked branch
-  onto `main` under the pinned identity environment (the committer
-  rewrite above); re-run the full gate on the rebased head; then
-  `git push --force-with-lease` to YOUR OWN single-writer branch — the
-  sole force-push an agent ever performs (CI's force-update of the
-  generated `badges` branch is machinery's own documented exception).
-  GitHub retargets the PR to `main` automatically; verify the retarget
-  and the residual diff yourself.
-- One writer per branch, always, and remote truth is checked directly —
-  `gh pr view`, `git ls-remote` — never assumed from another agent's
-  report.
+Dependent work may be described as a merge order, but every eventual PR to
+protected main must independently carry its next patch release. Keep a
+dependent PR Draft until its predecessor lands. Then fetch current main, create
+a fresh branch without force/rebase, port only the residual diff, allocate the
+new exact patch, rerun every gate, open a replacement Draft PR, and obtain a
+fresh exact-head review. Never retarget or merge a dependency stack in a way
+that duplicates predecessor content.
 
 ## Quality gates — exact commands and patterns
 
@@ -500,8 +522,8 @@ included; it is the same battery CI enforces:
   Go 1.26.5; frontend check/test/build; gofmt/vet/tests/race; the
   coverage floor), `chart` (the ingress peer-identity pin,
   `scripts/ci/chart-ingress-pin.sh`; helm lint + render at
-  `--kube-version v1.36.0`; the VERSION ↔ chart `version` ↔
-  `appVersion` ↔ chart `image.tag` four-way lock, plus a render
+  `--kube-version v1.36.0`; the numeric VERSION ↔ numeric chart `version` ↔
+  numeric `appVersion` ↔ plain-v chart `image.tag` four-way lock, plus a render
   assertion that the emitted reference still carries a full digest),
   `container` (both production
   architectures built, never published).
@@ -512,8 +534,21 @@ included; it is the same battery CI enforces:
   CI-computed, never hand-edited; the badge publishes the identical
   number the gate enforced.
 - **codeql.yml** — pull requests, `main` pushes, weekly cron.
-- **release-publisher.yml** — version tags only; no manual dispatch, no
-  skip flag, no force path (requirement 10).
+- **release-after-main.yml** — success-only exact-SHA main-CI completion;
+  creates or verifies the annotated tag and explicitly dispatches the
+  publisher on that tag. Distinct main SHAs share no cancellation group.
+- **release-publisher.yml** — machine-dispatch on an immutable version-tag
+  ref only; exact source/tag/lock checks, no operator bypass, skip flag, or
+  force path (requirement 10).
+- **GitHub event basis.** GitHub documents that `GITHUB_TOKEN`-created refs
+  suppress recursive workflow events except explicit dispatch, that
+  `workflow_run` fires regardless of conclusion and uses default-branch
+  context, and that concurrency ordering is not a release ledger. Therefore
+  the success check, payload `head_sha`, tag-ref dispatch, and independent
+  per-SHA paths are load-bearing. See
+  <https://docs.github.com/en/actions/concepts/security/github_token>,
+  <https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#workflow_run>,
+  and <https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency>.
 - **Zero-spend guardrails.** Workflows declare top-level
   `permissions: {}` with narrow per-job read grants;
   `persist-credentials: false` on every checkout; GitHub-hosted
@@ -623,10 +658,10 @@ or changed frontend surface, retrofitted by the rendering-lanes arc
 
 ## Docs and attribution conventions
 
-- **CHANGELOG discipline.** Keep a Changelog format; SemVer matching
-  image/chart tags exactly; the entry lands under `[Unreleased]` in the
-  SAME PR as the change it describes, and the release PR moves it under
-  the version heading. Release dates are owner-local dates.
+- **CHANGELOG discipline.** Keep a Changelog format; every PR immediately
+  follows an empty `[Unreleased]` heading with its exact next-version and ISO
+  date, matching every source lock. There is no later release PR; dates are
+  owner-local dates.
 - **Truthful README.** Badges and claims report only what CI actually
   measured or the repository can demonstrate — the badges publish the
   gate's own numbers, and prose never advertises a capability or

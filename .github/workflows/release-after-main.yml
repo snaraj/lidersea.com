@@ -1,0 +1,102 @@
+name: Release after main CI
+
+# GitHub does not recursively trigger a push workflow for a tag created with
+# GITHUB_TOKEN.  This success-only workflow_run verifies the completed main
+# SHA, creates its immutable annotated tag, and explicitly dispatches the
+# publisher ON that tag.  Distinct main SHAs share no concurrency group: every
+# merge has an independent release path and a rapid later merge cannot replace
+# an earlier pending run.
+on:
+  workflow_run:
+    workflows: [PR gate]
+    types: [completed]
+
+permissions: {}
+
+jobs:
+  release:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main'
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: write
+      contents: write
+    steps:
+      - name: Check out the exact completed main SHA
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
+          fetch-depth: 2
+      - name: Bind event, source, and exact next patch
+        id: release
+        env:
+          COMPLETED_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          event_sha="$(python3 -I -B scripts/ci/release_contract.py workflow-run \
+            --event "${GITHUB_EVENT_PATH}" --repository "${GITHUB_REPOSITORY}")"
+          test "${event_sha}" = "${COMPLETED_SHA}"
+          test "$(git rev-parse HEAD)" = "${COMPLETED_SHA}"
+          base_sha="$(git rev-parse HEAD^1)"
+          intent="$(python3 -I -B scripts/ci/release_contract.py transition \
+            --repository . --base "${base_sha}" --head "${COMPLETED_SHA}" \
+            --first-parent)"
+          source_sha="$(jq -er '.source_sha' <<<"${intent}")"
+          version="$(jq -er '.version' <<<"${intent}")"
+          tag="$(jq -er '.tag' <<<"${intent}")"
+          test "${source_sha}" = "${COMPLETED_SHA}"
+          test "${tag}" = "v${version}"
+          printf 'source_sha=%s\nversion=%s\ntag=%s\n' \
+            "${source_sha}" "${version}" "${tag}" >> "${GITHUB_OUTPUT}"
+      - name: Create or verify the exact immutable annotated tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SOURCE_SHA: ${{ steps.release.outputs.source_sha }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          ref_json="${RUNNER_TEMP}/release-ref.json"
+          tag_json="${RUNNER_TEMP}/release-tag.json"
+
+          verify_tag() {
+            gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" > "${ref_json}"
+            jq -e --arg tag "${TAG}" '.ref == ("refs/tags/" + $tag) and .object.type == "tag"' \
+              "${ref_json}" >/dev/null
+            tag_object="$(jq -er '.object.sha' "${ref_json}")"
+            gh api "repos/${GITHUB_REPOSITORY}/git/tags/${tag_object}" > "${tag_json}"
+            jq -e --arg tag "${TAG}" --arg source "${SOURCE_SHA}" \
+              '.tag == $tag and .object.type == "commit" and .object.sha == $source' \
+              "${tag_json}" >/dev/null
+          }
+
+          if verify_tag 2>/dev/null; then
+            printf 'verified existing %s at %s\n' "${TAG}" "${SOURCE_SHA}"
+            exit 0
+          fi
+
+          tag_object="$(gh api --method POST "repos/${GITHUB_REPOSITORY}/git/tags" \
+            -f tag="${TAG}" \
+            -f message="Release ${TAG} from ${SOURCE_SHA}" \
+            -f object="${SOURCE_SHA}" \
+            -f type=commit --jq '.sha')"
+          if ! gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" \
+            -f ref="refs/tags/${TAG}" -f sha="${tag_object}" >/dev/null; then
+            # A same-SHA rerun may race us.  Only exact state is idempotent;
+            # a lightweight, moved, or foreign-target tag stays fatal.
+            verify_tag
+          fi
+          verify_tag
+      - name: Dispatch the tag-bound publisher explicitly
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SOURCE_SHA: ${{ steps.release.outputs.source_sha }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh workflow run release-publisher.yml \
+            --repo "${GITHUB_REPOSITORY}" \
+            --ref "${TAG}" \
+            -f source_sha="${SOURCE_SHA}"

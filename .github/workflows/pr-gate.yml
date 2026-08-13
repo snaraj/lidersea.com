@@ -9,7 +9,10 @@ on:
 permissions: {}
 
 concurrency:
-  group: pr-gate-${{ github.event.pull_request.number || github.ref }}
+  # PR synchronizations may cancel an older run for the same PR.  Every main
+  # push instead uses its unique run id, so a later merge can never erase the
+  # successful-CI event that publishes an earlier merge.
+  group: pr-gate-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: true
 
 jobs:
@@ -23,6 +26,33 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
+      - name: Test hostile release event and state transitions
+        run: python3 -I -B -m unittest discover -s scripts/ci -p 'test_release_contract.py' -v
+      - name: Enforce one exact patch from the protected base
+        if: github.event_name != 'workflow_dispatch'
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BASE_SHA: ${{ github.event.before }}
+          PUSH_HEAD_SHA: ${{ github.event.after }}
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_EVENT_NAME}" = pull_request ]; then
+            base_sha="${PR_BASE_SHA}"
+            head_sha="${PR_HEAD_SHA}"
+            first_parent=()
+          elif [ "${GITHUB_EVENT_NAME}" = push ] && [ "${GITHUB_REF}" = refs/heads/main ]; then
+            base_sha="${PUSH_BASE_SHA}"
+            head_sha="${PUSH_HEAD_SHA}"
+            test "${head_sha}" = "${GITHUB_SHA}"
+            first_parent=(--first-parent)
+          else
+            printf 'unsupported release-gate event %s on %s\n' "${GITHUB_EVENT_NAME}" "${GITHUB_REF}" >&2
+            exit 1
+          fi
+          python3 -I -B scripts/ci/release_contract.py transition \
+            --repository . --base "${base_sha}" --head "${head_sha}" \
+            "${first_parent[@]}"
       - name: Install checksum-verified tools
         run: ./scripts/ci/install-tools.sh
       - name: Validate workflows

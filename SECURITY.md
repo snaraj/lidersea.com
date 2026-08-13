@@ -17,9 +17,11 @@ Releases are immutable; fixes ship as new versions, never as re-tags.
 - The service is a single static Go binary in a shell-less distroless
   image, running as a non-root user, serving embedded static content on
   port 8080 with no runtime dependencies and no outbound calls.
-- Images and charts are published only by the tag-triggered release
-  workflow: multi-arch, keyless-signed (Cosign), with SBOM and SLSA
-  provenance. Deployment consumes immutable digests.
+- Images and charts are published only after successful main CI by an
+  exact-SHA orchestrator that creates the immutable version tag and explicitly
+  dispatches the publisher on that tag. The publisher remains multi-arch,
+  keyless-signed (Cosign), with SBOM and SLSA provenance. Deployment consumes
+  immutable digests.
 - CI is secretless on pull requests; all third-party actions are pinned to
   full commit SHAs; scanners are checksum-pinned; secret scanning covers
   full history on every PR.

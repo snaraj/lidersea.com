@@ -1,12 +1,27 @@
 # Changelog
 
 All notable changes to lidersea.com. The format follows
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
-SemVer and match image/chart tags exactly.
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/). `VERSION`, chart
+metadata, these headings, and Helm's strict OCI chart tag use numeric SemVer.
+Git, image, and GitHub Release tags use the exact plain `vX.Y.Z` form.
 
 ## [Unreleased]
 
+## [0.1.10] - 2026-08-13
+
 ### Added
+
+- Every protected-main merge now carries and publishes its own immutable
+  semantic patch release. Pull requests (including docs and dependency
+  updates) must advance the four committed source locks by exactly one patch
+  from their protected base. Successful main CI is bound to its exact source
+  SHA, creates the plain version tag, and explicitly dispatches the tag-ref
+  publisher without relying on recursive tag-push events. Rapid merges have
+  independent release paths; exact complete artifact state is retryable, while
+  partial, foreign, or conflicting immutable state fails closed as burned.
+  Git/image/Release tags use one plain `vX.Y.Z`. Helm's documented exception
+  stays numeric `X.Y.Z` because its OCI tag must equal valid chart SemVer.
+  `tag@sha256:digest` is a deploy reference, never a tag.
 - A deployed Pod now states which release it is. The shared labels helper
   emits `app.kubernetes.io/version` on every rendered object, taken from the
   chart's own `appVersion` rather than from values, and the container image

@@ -36,19 +36,25 @@ import (
 // chartSource reads one file from the chart, relative to this package.
 func chartSource(t *testing.T, parts ...string) string {
 	t.Helper()
-	path := filepath.Join(append([]string{"..", "..", "chart"}, parts...)...)
+	chartRoot := filepath.Join("..", "..", "chart")
+	// The skip condition is the ABSENCE OF THE WHOLE CHART, never the absence
+	// of one file inside it. Reduced build contexts do not contain the chart at
+	// all: the image's test stage copies the module sources and the built
+	// frontend assets and nothing else, so `go test ./...` inside the container
+	// has no chart/ to read. That is a context capability, NOT a pass — the
+	// full-checkout gate runs this file on every pull request and enforces
+	// every assertion below.
+	//
+	// Keying the skip on the directory rather than on the individual read is
+	// the difference between a stated capability and a hiding place: with a
+	// chart present, a DELETED template or values file must fail loudly here
+	// rather than quietly reporting SKIP.
+	if _, statErr := os.Stat(chartRoot); os.IsNotExist(statErr) {
+		t.Skipf("chart absent from this build context; the full-checkout gate enforces this pin")
+	}
+	path := filepath.Join(append([]string{chartRoot}, parts...)...)
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		// Reduced build contexts do not contain the chart: the image's test
-		// stage copies only the module sources and the built frontend assets,
-		// so `go test ./...` inside the container has no chart/ to read.
-		// Absence is a context capability, NOT a pass — the full-checkout gate
-		// runs this file on every pull request and enforces every assertion
-		// below. Skipping here and passing here are different outcomes, and
-		// only one of them is honest.
-		if os.IsNotExist(err) {
-			t.Skipf("%s absent from this build context; the full-checkout gate enforces this pin", path)
-		}
 		t.Fatalf("read %s: %v", path, err)
 	}
 	return string(raw)

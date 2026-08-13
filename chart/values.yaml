@@ -23,11 +23,18 @@ service:
 # provider name in this repository (a pin test enforces that). The origin
 # speaks standard HTTP only; which edge stack may reach it is injected here,
 # so a provider swap is a values override, never a template or code edit.
-# Defaults bind the current Cloudflare Tunnel deployment (namespace and pod
-# app label of the connector allowed through the NetworkPolicy).
+# Defaults bind the current Cloudflare Tunnel deployment: the namespace, the
+# pod app label, and the pod instance label of the ONE connector the
+# NetworkPolicy admits. The instance is not decoration — the connector
+# namespace is shared, several connectors in it publish the same app label,
+# and the instance label is the only fact that separates them, so a
+# namespace + app selector would admit all of them. The schema requires the
+# instance non-empty: an unpinned peer must fail to render rather than render
+# wide.
 ingress:
   peerNamespace: cloudflare-public
   peerAppName: cloudflare-public
+  peerInstance: lidersea-com-tunnel
 
 resources:
   requests:

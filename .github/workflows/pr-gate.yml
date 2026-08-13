@@ -161,6 +161,8 @@ jobs:
           # The chart requires the platform's Kubernetes target (>=1.36);
           # helm template defaults to older capabilities without this flag.
           helm template smoke chart --kube-version v1.36.0 >/dev/null
+      - name: The ingress policy must pin one peer by its full identity
+        run: ./scripts/ci/chart-ingress-pin.sh
       - name: Chart version must match VERSION
         run: |
           IFS= read -r version < VERSION

@@ -90,15 +90,26 @@ Numbered for citation, repo-scoped, none negotiable in code:
 The origin speaks standard HTTP (RFC 9110/9111) only. Ingress, DNS, edge,
 and access are injected deployment concerns and never appear in application
 code, frontend source, or chart templates. Provider names live exclusively
-in the chart's values defaults — `ingress.peerNamespace` and
-`ingress.peerAppName` in `chart/values.yaml`, the single binding point the
-NetworkPolicy consumes — so a provider swap is a values override, never a
-template or code edit. The pin test
+in the chart's values defaults — `ingress.peerNamespace`,
+`ingress.peerAppName`, and `ingress.peerInstance` in `chart/values.yaml`,
+the single binding point the NetworkPolicy consumes — so a provider swap is
+a values override, never a template or code edit. The pin test
 (`internal/doctrine/provider_neutrality_test.go`) enforces this, failing
 closed on any provider name under `cmd/`, `internal/`, `frontend/src/`, or
 `chart/templates/`; in reduced build contexts an absent tree is a stated
 capability skip, never a pass, and the full-checkout gate enforces every
 tree on every PR.
+
+It takes all three facts to name one peer, and the instance is the
+load-bearing one: the peer namespace is shared by several per-site
+connectors that publish the same app name and are separated only by
+`app.kubernetes.io/instance`, so a namespace + app selector admits every
+connector deployed there. `values.schema.json` requires the instance
+non-empty — blank or absent fails validation rather than rendering a wide
+policy — and `scripts/ci/chart-ingress-pin.sh` renders the chart and proves
+the pin holds: the default render, the refusal of an unpinned instance, and
+the demonstration that the instance is what separates one connector from
+another.
 
 ## Testing doctrine
 
@@ -150,9 +161,10 @@ Build and test, in this order (the same gate CI enforces):
    `CGO_ENABLED=0 go test ./...`; `go test -race ./...`. CI additionally
    enforces the coverage floor (requirement 7) on the
    scaffolding-filtered profile.
-3. `helm lint chart && helm template smoke chart --kube-version v1.36.0`
-   for chart changes (the chart requires the platform's Kubernetes
-   target; plain `helm template` defaults to older capabilities).
+3. `helm lint chart && helm template smoke chart --kube-version v1.36.0`,
+   then `./scripts/ci/chart-ingress-pin.sh`, for chart changes (the chart
+   requires the platform's Kubernetes target; plain `helm template`
+   defaults to older capabilities).
 4. `docker build .` when the Dockerfile or build inputs change.
 
 Releases: `VERSION`, `chart/Chart.yaml` (`version` + `appVersion`), the
@@ -430,6 +442,7 @@ included; it is the same battery CI enforces:
     go test -race ./...
     helm lint chart && helm template smoke chart \
       --kube-version v1.36.0                    # chart changes
+    ./scripts/ci/chart-ingress-pin.sh           # chart changes
     docker build .                              # Dockerfile/build-input changes
     gitleaks git --no-banner --redact --max-target-megabytes=2 .
     gitleaks dir --no-banner --redact .
@@ -485,7 +498,8 @@ included; it is the same battery CI enforces:
   `dependency-review` (PRs only; fails on high severity), `application`
   (toolchain pinned AND verified — Node 24.19.0, npm 11.17.0,
   Go 1.26.5; frontend check/test/build; gofmt/vet/tests/race; the
-  coverage floor), `chart` (helm lint + render at
+  coverage floor), `chart` (the ingress peer-identity pin,
+  `scripts/ci/chart-ingress-pin.sh`; helm lint + render at
   `--kube-version v1.36.0`; the VERSION ↔ chart `version` ↔
   `appVersion` ↔ chart `image.tag` four-way lock, plus a render
   assertion that the emitted reference still carries a full digest),

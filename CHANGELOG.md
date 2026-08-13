@@ -144,6 +144,27 @@ SemVer and match image/chart tags exactly.
   requirement 7's enforced 95.0 (measured 97.6).
 
 ### Security
+- The chart's ingress NetworkPolicy can now name its peer **completely**
+  (#40). It admitted a peer by namespace and `app.kubernetes.io/name` —
+  the only peer facts the values exposed — but the peer namespace is
+  shared by several per-site connectors that publish the same app name
+  and are separated only by `app.kubernetes.io/instance`. The rendered
+  selector therefore admitted every connector in that namespace rather
+  than the one that fronts this site. The deployed policy was
+  hand-tightened with the instance pin (dated observation, 2026-08-11;
+  revalidate read-only before relying on it), so a chart-driven apply
+  would have WIDENED the running policy — a security regression
+  delivered by a routine release rather than by a bad edit. `ingress`
+  now carries `peerInstance`, defaulted to this site's own connector so
+  the pinned policy is what renders with no flags at all, and
+  `values.schema.json` requires it non-empty: a blank or absent value
+  fails validation instead of rendering an unpinned policy.
+  `scripts/ci/chart-ingress-pin.sh` runs in the PR gate and proves all
+  three properties — the default render pins namespace + app name +
+  instance byte for byte against the values, blank and absent are both
+  refused, and overriding the instance moves the pin while the app name
+  stays identical, which is exactly why the app name alone cannot tell
+  two connectors apart.
 - Origin-side HTTPS enforcement (#29): every request the edge declares
   as plain HTTP (`X-Forwarded-Proto: http`) is answered with a `308`
   permanent redirect to the identical URL over TLS — host from the

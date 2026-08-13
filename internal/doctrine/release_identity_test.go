@@ -39,6 +39,16 @@ func chartSource(t *testing.T, parts ...string) string {
 	path := filepath.Join(append([]string{"..", "..", "chart"}, parts...)...)
 	raw, err := os.ReadFile(path)
 	if err != nil {
+		// Reduced build contexts do not contain the chart: the image's test
+		// stage copies only the module sources and the built frontend assets,
+		// so `go test ./...` inside the container has no chart/ to read.
+		// Absence is a context capability, NOT a pass — the full-checkout gate
+		// runs this file on every pull request and enforces every assertion
+		// below. Skipping here and passing here are different outcomes, and
+		// only one of them is honest.
+		if os.IsNotExist(err) {
+			t.Skipf("%s absent from this build context; the full-checkout gate enforces this pin", path)
+		}
 		t.Fatalf("read %s: %v", path, err)
 	}
 	return string(raw)

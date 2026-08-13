@@ -28,9 +28,14 @@
     "image": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["repository", "digest", "pullPolicy"],
+      "required": ["repository", "tag", "digest", "pullPolicy"],
       "properties": {
         "repository": {"type": "string", "const": "ghcr.io/snaraj/lidersea-com"},
+        "tag": {
+          "type": "string",
+          "description": "Published release tag rendered in front of the digest so the workload reference is human-legible. Legibility only: the digest is what Kubernetes resolves and what cosign and admission verify, and it is required alongside this.",
+          "pattern": "^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"
+        },
         "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
         "pullPolicy": {"type": "string", "enum": ["IfNotPresent", "Never"]}
       }

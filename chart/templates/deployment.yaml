@@ -38,7 +38,11 @@ spec:
         - name: lidersea-com
           # Only a full index digest is accepted by the schema; the initial zero
           # digest is intentionally non-runnable until promotion updates it.
-          image: "{{ .Values.image.repository }}@{{ .Values.image.digest }}"
+          {{- /* repository:tag@digest. The digest is what Kubernetes resolves and
+          what cosign and admission verify; the tag is legibility only and is
+          never a substitute for it. Both are required by the values schema, so
+          a chart that dropped the digest cannot render. */}}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}@{{ .Values.image.digest }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           env:
             - name: PORT

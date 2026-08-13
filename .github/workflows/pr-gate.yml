@@ -168,6 +168,20 @@ jobs:
           app_version="$(awk '/^appVersion:/{gsub(/"/,"",$2); print $2; exit}' chart/Chart.yaml)"
           test "${chart_version}" = "${version}"
           test "${app_version}" = "${version}"
+          # Fourth leg of the same lock. The workload reference renders
+          # repository:tag@digest, so the tag is what an operator reads in
+          # `kubectl describe pod`. A chart claiming appVersion X while
+          # defaulting the image tag to release Y would make that reading
+          # confidently wrong, which is worse than the digest-only reference
+          # it replaced. ADR 0014 publishes the `v` prefix, so the tag is
+          # exactly "v${version}".
+          image_tag="$(awk '/^  tag:/{print $2; exit}' chart/values.yaml)"
+          test "${image_tag}" = "v${version}"
+          # The digest is not optional and never becomes optional: a rendered
+          # reference must still carry it, or the tag has replaced the thing
+          # it was only ever allowed to accompany.
+          helm template smoke chart --kube-version v1.36.0 \
+            | grep -Eq '^ +image: "ghcr\.io/snaraj/[a-z-]+:v[0-9]+\.[0-9]+\.[0-9]+@sha256:[0-9a-f]{64}"$'
 
   container:
     runs-on: ubuntu-24.04

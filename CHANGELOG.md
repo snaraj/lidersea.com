@@ -7,6 +7,22 @@ SemVer and match image/chart tags exactly.
 ## [Unreleased]
 
 ### Added
+- A deployed Pod now states which release it is. The shared labels helper
+  emits `app.kubernetes.io/version` on every rendered object, taken from the
+  chart's own `appVersion` rather than from values, and the container image
+  renders as `ghcr.io/snaraj/lidersea-com:vMAJOR.MINOR.PATCH@sha256:<hex>`
+  instead of the digest alone — so `kubectl describe pod` and
+  `kubectl get po -L app.kubernetes.io/version` both answer the question
+  without anyone resolving a digest by hand.
+
+  Nothing about the digest changed. It stays mandatory in `values.schema.json`,
+  stays what Kubernetes actually resolves, and stays what cosign and the
+  platform's admission policies verify (requirement 10). The tag accompanies
+  it; it never replaces it. The PR gate's version lock now has four legs
+  instead of three — VERSION, chart `version`, `appVersion`, and the image tag
+  — and additionally asserts the rendered reference still carries a full
+  digest. `internal/doctrine/release_identity_test.go` pins the whole contract,
+  including that the version label never becomes a selector key.
 - Ratings across platforms: a new `ratings/v1` surface under the site's
   `surface/v1` envelope (`GET /api/ratings`) and a footer strip that
   renders it. The strip lists the third-party platforms the business

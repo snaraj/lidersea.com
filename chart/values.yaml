@@ -10,9 +10,9 @@ image:
   # reference reads repository:tag@digest. Kubernetes resolves the digest and
   # ignores the tag; the tag is what a human reads in `kubectl describe pod`.
   # It is locked to this chart's appVersion by the release gate's four-way
-  # lock (VERSION <-> chart version <-> appVersion <-> image tag), so a chart
+  # lock (numeric VERSION/chart version/appVersion <-> plain-v image tag), so a chart
   # claiming one release can never ship the tag of another.
-  tag: v0.1.9
+  tag: v0.1.10
   digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
   pullPolicy: IfNotPresent
 

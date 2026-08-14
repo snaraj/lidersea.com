@@ -1,0 +1,226 @@
+name: Release integrity audit
+
+# Recheck the latest immutable Release on a schedule. The Release's sole
+# canonical manifest binds the source SHA and immutable image/chart digests.
+# Registry version tags are mutable aliases, so this audit never describes
+# them as immutable: it verifies that each alias still resolves to the digest
+# recorded in the immutable manifest.
+on:
+  schedule:
+    - cron: '23 9 * * *'
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: release-integrity-audit-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Check out protected audit authority
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Install checksum-verified tools
+        run: ./scripts/ci/install-tools.sh
+      - name: Set up Buildx for registry evidence inspection
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.1.3
+      - name: Resolve and validate the latest immutable manifest
+        id: release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          release_json="${RUNNER_TEMP}/latest-release.json"
+          manifest="${RUNNER_TEMP}/release-manifest.json"
+          gh api --method GET \
+            --header 'Accept: application/vnd.github+json' \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/${GITHUB_REPOSITORY}/releases/latest" > "${release_json}"
+          asset_id="$(python3 -I -B scripts/ci/release_contract.py release-asset-id \
+            --release-json "${release_json}")"
+          curl --fail-with-body --silent --show-error --location \
+            --proto '=https' --tlsv1.2 --output "${manifest}" \
+            --header 'Accept: application/octet-stream' \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}"
+          chmod 0600 "${manifest}"
+          python3 -I -B scripts/ci/release_contract.py manifest-record \
+            --manifest "${manifest}" --repository "${GITHUB_REPOSITORY}" \
+            --github-output "${GITHUB_OUTPUT}"
+          python3 -I -B scripts/ci/release_contract.py release-state \
+            --http-status 200 --require exact --release-json "${release_json}" \
+            --manifest "${manifest}" --asset-content "${manifest}" \
+            --repository "${GITHUB_REPOSITORY}" >/dev/null
+      - name: Rebind the annotated tag to the manifest source SHA
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SOURCE_SHA: ${{ steps.release.outputs.source_sha }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          ref_json="${RUNNER_TEMP}/audit-tag-ref.json"
+          tag_json="${RUNNER_TEMP}/audit-tag-object.json"
+          api="${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}"
+          status="$(curl --silent --show-error --location \
+            --proto '=https' --tlsv1.2 --output "${ref_json}" --write-out '%{http_code}' \
+            --header 'Accept: application/vnd.github+json' \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            "${api}/git/ref/tags/${TAG}")"
+          test "${status}" = 200
+          tag_object="$(python3 -I -B scripts/ci/release_contract.py tag-ref-object \
+            --ref-json "${ref_json}" --tag "${TAG}")"
+          status="$(curl --silent --show-error --location \
+            --proto '=https' --tlsv1.2 --output "${tag_json}" --write-out '%{http_code}' \
+            --header 'Accept: application/vnd.github+json' \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            "${api}/git/tags/${tag_object}")"
+          test "${status}" = 200
+          python3 -I -B scripts/ci/release_contract.py tag-record \
+            --ref-json "${ref_json}" --tag-json "${tag_json}" \
+            --tag "${TAG}" --source-sha "${SOURCE_SHA}" \
+            --message "Release ${TAG} from ${SOURCE_SHA}" \
+            --tagger-name 'github-actions[bot]' \
+            --tagger-email '41898282+github-actions[bot]@users.noreply.github.com' \
+            --tagger-date "$(git show -s --format=%cI "${SOURCE_SHA}")" >/dev/null
+      - name: Audit mutable registry aliases against immutable manifest digests
+        env:
+          GHCR_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE_ALIAS: ${{ steps.release.outputs.image_alias }}
+          IMAGE_DIGEST: ${{ steps.release.outputs.image_digest }}
+          CHART_ALIAS: ${{ steps.release.outputs.chart_alias }}
+          CHART_DIGEST: ${{ steps.release.outputs.chart_digest }}
+        run: |
+          set -euo pipefail
+          audit_alias() {
+            local alias="$1" expected="$2" accept="$3" label="$4"
+            local reference repository version credentials token_file token body headers status observed
+            reference="${alias#ghcr.io/}"
+            test "${reference}" != "${alias}"
+            repository="${reference%:*}"
+            version="${reference##*:}"
+            test -n "${repository}" && test -n "${version}" && test "${repository}" != "${reference}"
+            credentials="${RUNNER_TEMP}/${label}.netrc"
+            token_file="${RUNNER_TEMP}/${label}-token.json"
+            body="${RUNNER_TEMP}/${label}-manifest.json"
+            headers="${RUNNER_TEMP}/${label}-headers.txt"
+            umask 077
+            printf 'machine ghcr.io\nlogin %s\npassword %s\n' \
+              "${GITHUB_ACTOR}" "${GHCR_PASSWORD}" > "${credentials}"
+            curl --fail-with-body --silent --show-error --location \
+              --proto '=https' --tlsv1.2 --netrc-file "${credentials}" \
+              --get --data-urlencode "scope=repository:${repository}:pull" \
+              'https://ghcr.io/token' > "${token_file}"
+            token="$(python3 -I -B scripts/ci/release_contract.py registry-token \
+              --token-json "${token_file}")"
+            rm -f -- "${credentials}" "${token_file}"
+            status="$(curl --silent --show-error --location \
+              --proto '=https' --tlsv1.2 --output "${body}" \
+              --dump-header "${headers}" --write-out '%{http_code}' \
+              --header "Authorization: Bearer ${token}" \
+              --header "Accept: ${accept}" \
+              "https://ghcr.io/v2/${repository}/manifests/${version}")"
+            test "$(python3 -I -B scripts/ci/release_contract.py registry-state \
+              --http-status "${status}")" = present
+            observed="$(python3 -I -B scripts/ci/release_contract.py registry-manifest \
+              --http-status "${status}" --body "${body}" --headers "${headers}" \
+              --expected-digest "${expected}")"
+            test "${observed}" = "${expected}"
+          }
+          audit_alias "${IMAGE_ALIAS}" "${IMAGE_DIGEST}" \
+            'application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json' image
+          audit_alias "${CHART_ALIAS}" "${CHART_DIGEST}" \
+            'application/vnd.oci.image.manifest.v1+json' chart
+      - name: Verify signatures, SBOM set, and exact provenance attestations
+        env:
+          IMAGE_ALIAS: ${{ steps.release.outputs.image_alias }}
+          IMAGE_DIGEST: ${{ steps.release.outputs.image_digest }}
+          CHART_ALIAS: ${{ steps.release.outputs.chart_alias }}
+          CHART_DIGEST: ${{ steps.release.outputs.chart_digest }}
+          SOURCE_SHA: ${{ steps.release.outputs.source_sha }}
+          WORKFLOW_IDENTITY: ${{ steps.release.outputs.workflow_identity }}
+        run: |
+          set -euo pipefail
+          issuer='https://token.actions.githubusercontent.com'
+          image="${IMAGE_ALIAS%:*}"
+          chart="${CHART_ALIAS%:*}"
+          cosign verify --certificate-identity "${WORKFLOW_IDENTITY}" \
+            --certificate-oidc-issuer "${issuer}" "${image}@${IMAGE_DIGEST}" >/dev/null
+          cosign verify --certificate-identity "${WORKFLOW_IDENTITY}" \
+            --certificate-oidc-issuer "${issuer}" "${chart}@${CHART_DIGEST}" >/dev/null
+
+          required_platforms=(linux/amd64 linux/arm64)
+          expected_platforms="${required_platforms[*]}"
+          provenance="${RUNNER_TEMP}/audit-provenance.json"
+          sbom="${RUNNER_TEMP}/audit-sbom.json"
+          provenance_keys="${RUNNER_TEMP}/audit-provenance.keys"
+          sbom_keys="${RUNNER_TEMP}/audit-sbom.keys"
+          docker buildx imagetools inspect "${image}@${IMAGE_DIGEST}" \
+            --format '{{ json .Provenance }}' > "${provenance}"
+          docker buildx imagetools inspect "${image}@${IMAGE_DIGEST}" \
+            --format '{{ json .SBOM }}' > "${sbom}"
+          python3 -I -B scripts/ci/release_contract.py json-keys \
+            --json "${provenance}" > "${provenance_keys}"
+          python3 -I -B scripts/ci/release_contract.py sbom-platforms \
+            --json "${sbom}" > "${sbom_keys}"
+          test "$(paste -sd ' ' "${provenance_keys}")" = "${expected_platforms}"
+          test "$(paste -sd ' ' "${sbom_keys}")" = "${expected_platforms}"
+
+          source="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
+          expected_attestations=()
+          expected_sboms=()
+          for platform in "${required_platforms[@]}"; do
+            predicate="${RUNNER_TEMP}/audit-${platform//\//-}.json"
+            statement="${RUNNER_TEMP}/audit-${platform//\//-}.statement.json"
+            spdx="${RUNNER_TEMP}/audit-${platform//\//-}.spdx.json"
+            sbom_statement="${RUNNER_TEMP}/audit-${platform//\//-}.sbom.statement.json"
+            docker buildx imagetools inspect "${image}@${IMAGE_DIGEST}" \
+              --format "{{ json (index .Provenance \"${platform}\").SLSA }}" > "${predicate}"
+            python3 -I -B scripts/ci/release_contract.py attestation-statement \
+              --predicate "${predicate}" --output "${statement}" \
+              --image "${image}" --digest "${IMAGE_DIGEST}" --source "${source}" \
+              --revision "${SOURCE_SHA}" --platform "${platform}"
+            expected_attestations+=(--expected "${platform}=${statement}")
+            docker buildx imagetools inspect "${image}@${IMAGE_DIGEST}" \
+              --format "{{ json (index .SBOM \"${platform}\").SPDX }}" > "${spdx}"
+            python3 -I -B scripts/ci/release_contract.py sbom-statement \
+              --spdx "${spdx}" --output "${sbom_statement}" \
+              --image "${image}" --digest "${IMAGE_DIGEST}" --platform "${platform}"
+            expected_sboms+=(--expected "${platform}=${sbom_statement}")
+          done
+          verified="${RUNNER_TEMP}/audit-verified-attestations.json"
+          cosign verify-attestation --type slsaprovenance1 --output json \
+            --certificate-identity "${WORKFLOW_IDENTITY}" \
+            --certificate-oidc-issuer "${issuer}" \
+            "${image}@${IMAGE_DIGEST}" > "${verified}"
+          test "$(python3 -I -B scripts/ci/release_contract.py attestation-set \
+            --verified "${verified}" "${expected_attestations[@]}")" = 2
+          verified_sboms="${RUNNER_TEMP}/audit-verified-sboms.json"
+          cosign verify-attestation --type spdxjson --output json \
+            --certificate-identity "${WORKFLOW_IDENTITY}" \
+            --certificate-oidc-issuer "${issuer}" \
+            "${image}@${IMAGE_DIGEST}" > "${verified_sboms}"
+          test "$(python3 -I -B scripts/ci/release_contract.py sbom-set \
+            --verified "${verified_sboms}" "${expected_sboms[@]}")" = 2
+      - name: Rescan the immutable image digest at HIGH and CRITICAL
+        env:
+          IMAGE_ALIAS: ${{ steps.release.outputs.image_alias }}
+          IMAGE_DIGEST: ${{ steps.release.outputs.image_digest }}
+        run: >-
+          trivy image --scanners vuln --severity HIGH,CRITICAL --exit-code 1
+          "${IMAGE_ALIAS%:*}@${IMAGE_DIGEST}"

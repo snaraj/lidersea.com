@@ -17,13 +17,56 @@ on:
 
 permissions: {}
 
+concurrency:
+  group: release-after-main-${{ github.event.workflow_run.head_sha }}
+  cancel-in-progress: false
+
 jobs:
-  release:
+  immutable_settings:
     if: >-
       github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.event == 'push' &&
       github.event.workflow_run.head_branch == 'main'
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: platform-release
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the exact completed main SHA
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
+      - name: Mint the isolated Admin-read settings token
+        id: immutable_settings
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ vars.PLATFORM_RELEASE_APP_ID }}
+          private-key: ${{ secrets.PLATFORM_RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-administration: read
+          skip-token-revoke: false
+      - name: Recheck authoritative immutable publication settings
+        env:
+          IMMUTABLE_SETTINGS_TOKEN: ${{ steps.immutable_settings.outputs.token }}
+        run: |
+          set -euo pipefail
+          test -n "${IMMUTABLE_SETTINGS_TOKEN}"
+          GH_TOKEN="${IMMUTABLE_SETTINGS_TOKEN}" \
+            python3 -I -B scripts/ci/release_contract.py settings-preflight \
+              --repository "${GITHUB_REPOSITORY}" >/dev/null
+
+  release:
+    needs: immutable_settings
+    if: >-
+      needs.immutable_settings.result == 'success' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
     permissions:
       actions: write
       contents: write
@@ -75,8 +118,9 @@ jobs:
             curl --silent --show-error --location \
               --proto '=https' --tlsv1.2 \
               --output "${output}" --write-out '%{http_code}' \
-              --header 'Accept: application/vnd.github+json' \
-              --header "Authorization: Bearer ${GH_TOKEN}" \
+               --header 'Accept: application/vnd.github+json' \
+               --header 'X-GitHub-Api-Version: 2026-03-10' \
+               --header "Authorization: Bearer ${GH_TOKEN}" \
               "${url}"
           }
 
@@ -85,7 +129,8 @@ jobs:
             local -a record_args=()
             status="$(get_json "${api}/git/ref/tags/${TAG}" "${ref_json}")"
             if [ "${status}" = 200 ]; then
-              tag_object="$(jq -er '.object.sha' "${ref_json}")"
+              tag_object="$(python3 -I -B scripts/ci/release_contract.py tag-ref-object \
+                --ref-json "${ref_json}" --tag "${TAG}")"
               object_status="$(get_json "${api}/git/tags/${tag_object}" "${tag_json}")"
               test "${object_status}" = 200
               record_args=(--ref-json "${ref_json}" --tag-json "${tag_json}")
@@ -103,7 +148,8 @@ jobs:
           fi
           classify_tag absent >/dev/null
 
-          tag_object="$(gh api --method POST "repos/${GITHUB_REPOSITORY}/git/tags" \
+          created_tag="${RUNNER_TEMP}/created-release-tag.json"
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/git/tags" \
             -f tag="${TAG}" \
             -f message="${message}" \
             -f object="${SOURCE_SHA}" \
@@ -111,7 +157,12 @@ jobs:
             -f "tagger[name]=${tagger_name}" \
             -f "tagger[email]=${tagger_email}" \
             -f "tagger[date]=${tagger_date}" \
-            --jq '.sha')"
+            > "${created_tag}"
+          tag_object="$(python3 -I -B scripts/ci/release_contract.py tag-created-object \
+            --tag-json "${created_tag}" --tag "${TAG}" \
+            --source-sha "${SOURCE_SHA}" --message "${message}" \
+            --tagger-name "${tagger_name}" --tagger-email "${tagger_email}" \
+            --tagger-date "${tagger_date}")"
           if ! gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" \
             -f ref="refs/tags/${TAG}" -f sha="${tag_object}" >/dev/null; then
             # A same-SHA rerun may race us.  Only exact state is idempotent;

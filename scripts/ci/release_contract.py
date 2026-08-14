@@ -13,7 +13,9 @@ import base64
 import binascii
 import copy
 import datetime as dt
+import hashlib
 import json
+import os
 import re
 import subprocess
 import sys
@@ -42,10 +44,43 @@ REQUIRED_STATUS_CHECKS = (
     "dependency-review",
     "security",
 )
+RELEASE_MANIFEST_SCHEMA = "lidersea.release-manifest/v1"
+RELEASE_MANIFEST_NAME = "release-manifest.json"
+COSIGN_ISSUER = "https://token.actions.githubusercontent.com"
+RELEASE_PLATFORMS = ("linux/amd64", "linux/arm64")
+MAIN_WORKER_SCOPE = (
+    "architecture,merge-order,authority,settings,base-freshness,required-checks"
+)
 
 
 class ContractError(ValueError):
     """A release input cannot satisfy the immutable publication contract."""
+
+
+def _reject_duplicate_members(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    """Reject duplicate object members recursively at every JSON boundary."""
+    value: dict[str, object] = {}
+    for key, member in pairs:
+        if key in value:
+            raise ContractError(f"duplicate JSON member {key!r}")
+        value[key] = member
+    return value
+
+
+def _reject_nonfinite_constant(raw: str) -> object:
+    raise ContractError(f"non-finite JSON constant {raw!r} is forbidden")
+
+
+def parse_json(text: str, field: str) -> object:
+    """Decode one strict JSON value with recursive duplicate-member denial."""
+    try:
+        return json.loads(
+            text,
+            object_pairs_hook=_reject_duplicate_members,
+            parse_constant=_reject_nonfinite_constant,
+        )
+    except json.JSONDecodeError as exc:
+        raise ContractError(f"{field} is malformed JSON") from exc
 
 
 @dataclass(frozen=True, order=True)
@@ -181,6 +216,20 @@ def _git_file(repository: Path, revision: str, path: str) -> str:
     return completed.stdout
 
 
+def _optional_git_file(repository: Path, revision: str, path: str) -> str | None:
+    completed = subprocess.run(
+        ["git", "-C", str(repository), "show", f"{revision}:{path}"],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+    )
+    if completed.returncode != 0:
+        return None
+    return completed.stdout
+
+
 def _linear_commits(repository: Path, base_sha: str, head_sha: str) -> list[str]:
     """Return every commit in one contiguous, merge-free base..head range."""
     _git(repository, "merge-base", "--is-ancestor", base_sha, head_sha)
@@ -197,6 +246,37 @@ def _linear_commits(repository: Path, base_sha: str, head_sha: str) -> list[str]
     return commits
 
 
+def validate_version_states(
+    states: list[tuple[str, Version]], *, exact_boundaries: int | None
+) -> list[str]:
+    """Validate a retain-or-one-patch machine and return its boundary commits."""
+    if not states:
+        raise ContractError("VERSION state machine has no states")
+    boundaries: list[str] = []
+    previous = states[0][1]
+    for commit, current in states[1:]:
+        if current == previous:
+            continue
+        expected = Version(previous.major, previous.minor, previous.patch + 1)
+        if current < previous:
+            raise ContractError(
+                f"VERSION reversion at {commit}: {previous} -> {current}"
+            )
+        if current != expected:
+            raise ContractError(
+                f"VERSION skip or future value at {commit}: "
+                f"{previous} -> {current}; expected {expected}"
+            )
+        boundaries.append(commit)
+        previous = current
+    if exact_boundaries is not None and len(boundaries) != exact_boundaries:
+        raise ContractError(
+            f"VERSION range must contain exactly {exact_boundaries} one-patch "
+            f"boundary; found {len(boundaries)}"
+        )
+    return boundaries
+
+
 def validate_transition(repository: Path, base_sha: str, head_sha: str, *, first_parent: bool) -> ReleaseIntent:
     base_sha = require_sha(base_sha, "base SHA")
     head_sha = require_sha(head_sha, "head SHA")
@@ -204,38 +284,52 @@ def validate_transition(repository: Path, base_sha: str, head_sha: str, *, first
         raise ContractError("base SHA did not resolve exactly")
     if _git(repository, "rev-parse", f"{head_sha}^{{commit}}") != head_sha:
         raise ContractError("head SHA did not resolve exactly")
-    _linear_commits(repository, base_sha, head_sha)
+    commits = _linear_commits(repository, base_sha, head_sha)
     base_version = Version.parse(_git_file(repository, base_sha, "VERSION"))
+    states = [(base_sha, base_version)]
+    states.extend(
+        (commit, Version.parse(_git_file(repository, commit, "VERSION")))
+        for commit in commits
+    )
+    validate_version_states(states, exact_boundaries=1)
     head_files = {
         path: _git_file(repository, head_sha, path)
         for path in ("VERSION", "chart/Chart.yaml", "chart/values.yaml", "CHANGELOG.md")
     }
     head = validate_snapshot(head_files)
-    # A squash merge is a one-commit range; GitHub's enabled rebase merge can
-    # install several commits atomically. The source identity is the complete
-    # final tree, while the exact base -> head patch step remains one release
-    # intent regardless of how many linear commits carried that tree there.
+    # The endpoint check remains a useful independent assertion, while the
+    # shared state machine above also examines every intermediate commit.
     require_next_patch(base_version, head.version)
     return ReleaseIntent(source_sha=head_sha, version=head.version)
 
 
 def discover_transition_window(repository: Path, head_sha: str) -> TransitionWindow:
-    """Recover the exact main-push range whose first commit advanced VERSION."""
+    """Recover the latest release boundary only after validating full history."""
     head_sha = require_sha(head_sha, "head SHA")
     if _git(repository, "rev-parse", f"{head_sha}^{{commit}}") != head_sha:
         raise ContractError("head SHA did not resolve exactly")
-    head_version = Version.parse(_git_file(repository, head_sha, "VERSION"))
-    cursor = head_sha
-    while True:
-        fields = _git(repository, "rev-list", "--parents", "-n", "1", cursor).split()
-        if len(fields) != 2 or fields[0] != cursor:
-            raise ContractError("could not recover one linear release boundary")
-        parent = fields[1]
-        parent_version = Version.parse(_git_file(repository, parent, "VERSION"))
-        if parent_version != head_version:
-            intent = validate_transition(repository, parent, head_sha, first_parent=True)
-            return TransitionWindow(base_sha=parent, intent=intent)
-        cursor = parent
+    raw_history = _git(repository, "rev-list", "--first-parent", "--reverse", head_sha)
+    history = raw_history.splitlines() if raw_history else []
+    states: list[tuple[str, Version]] = []
+    version_seen = False
+    for commit in history:
+        raw_version = _optional_git_file(repository, commit, "VERSION")
+        if raw_version is None:
+            if version_seen:
+                raise ContractError(f"VERSION disappeared after initialization at {commit}")
+            continue
+        version_seen = True
+        states.append((commit, Version.parse(raw_version)))
+    boundaries = validate_version_states(states, exact_boundaries=None)
+    if not boundaries:
+        raise ContractError("no recoverable one-patch VERSION boundary exists")
+    boundary = boundaries[-1]
+    fields = _git(repository, "rev-list", "--parents", "-n", "1", boundary).split()
+    if len(fields) < 2 or fields[0] != boundary:
+        raise ContractError("latest VERSION boundary has no first-parent base")
+    base_sha = fields[1]
+    intent = validate_transition(repository, base_sha, head_sha, first_parent=True)
+    return TransitionWindow(base_sha=base_sha, intent=intent)
 
 
 def plan_workflow_run(event: Mapping[str, object], expected_repository: str) -> str:
@@ -262,6 +356,47 @@ def plan_workflow_run(event: Mapping[str, object], expected_repository: str) -> 
     if not isinstance(head_repository, Mapping) or head_repository.get("full_name") != expected_repository:
         raise ContractError("workflow_run head repository identity mismatch")
     return require_sha(run.get("head_sha"), "workflow_run head SHA")
+
+
+def validate_review_receipt(text: str, *, expected_head: str, role: str) -> str:
+    """Validate exact-head textual receipts without inventing GitHub principals."""
+    expected_head = require_sha(expected_head, "receipt head SHA")
+    lines = text.splitlines()
+    if role == "adversarial":
+        if len(lines) < 3 or lines[0] != f"HEAD: {expected_head}":
+            raise ContractError("adversarial receipt HEAD is absent or stale")
+        if lines[1] not in {"VERDICT: APPROVE", "VERDICT: REQUEST-CHANGES"}:
+            raise ContractError("adversarial receipt VERDICT syntax is not canonical")
+        if sum(line.startswith("HEAD:") for line in lines) != 1 or sum(
+            line.startswith("VERDICT:") for line in lines
+        ) != 1:
+            raise ContractError("adversarial receipt headers must occur exactly once")
+        signature = re.fullmatch(
+            r"- ([A-Za-z0-9][A-Za-z0-9 ._-]{0,63}) \(adversarial reviewer\)",
+            lines[-1],
+        )
+        if signature is None or signature.group(1) in {"Agent", "distinct context"}:
+            raise ContractError("adversarial receipt signature is not distinct or bounded")
+        return lines[1][len("VERDICT: ") :]
+    if role == "main-worker":
+        if len(lines) != 5 or any(not line for line in lines):
+            raise ContractError("Main Worker receipt must contain exactly five nonblank lines")
+        if (
+            lines[0] != f"HEAD: {expected_head}"
+            or lines[1] != "ROLE: MAIN-WORKER"
+            or lines[3] != f"SCOPE: {MAIN_WORKER_SCOPE}"
+        ):
+            raise ContractError("Main Worker HEAD, ROLE, or SCOPE is not exact")
+        if lines[2] not in {"VERDICT: PASS", "VERDICT: BLOCK"}:
+            raise ContractError("Main Worker VERDICT syntax is not canonical")
+        signature = re.fullmatch(
+            r"- ([A-Za-z0-9][A-Za-z0-9 ._-]{0,63}) \(Main Worker\)",
+            lines[4],
+        )
+        if signature is None or signature.group(1) in {"Agent", "distinct context"}:
+            raise ContractError("Main Worker signature is not distinct or bounded")
+        return lines[2][len("VERDICT: ") :]
+    raise ContractError("receipt role must be adversarial or main-worker")
 
 
 def validate_main_run_record(
@@ -372,17 +507,36 @@ def _status_check_set(value: object) -> set[tuple[str, int]]:
 def validate_settings_receipt(receipt: Mapping[str, object], repository: str) -> None:
     """Validate the closed, value-only release-readiness receipt."""
     fields = {
+        "actions_allowed",
+        "actions_enabled",
+        "actions_sha_pinning",
         "allow_deletions",
         "allow_force_pushes",
         "branch",
         "bypass_actors",
+        "can_approve_pull_request_reviews",
+        "code_coverage_max_drop",
+        "code_coverage_minimum",
+        "code_quality_severity",
+        "code_scanning_tools",
+        "default_workflow_permissions",
+        "dismiss_stale_reviews_on_push",
         "immutable_releases",
         "merge_methods",
+        "private_vulnerability_reporting",
         "repository",
         "require_linear_history",
+        "require_code_owner_review",
+        "require_last_push_approval",
         "require_pull_request",
+        "require_signatures",
         "required_status_checks",
+        "required_approving_review_count",
+        "required_review_thread_resolution",
+        "required_reviewers",
         "restrict_updates",
+        "secret_scanning",
+        "secret_scanning_push_protection",
         "strict_status_checks",
     }
     if set(receipt) != fields:
@@ -396,19 +550,55 @@ def validate_settings_receipt(receipt: Mapping[str, object], repository: str) ->
     }
     if _status_check_set(receipt.get("required_status_checks")) != expected_checks:
         raise ContractError("required GitHub Actions checks are missing, foreign, or unbound")
+    if receipt.get("actions_allowed") != "all":
+        raise ContractError("Actions allow policy must remain exactly all")
+    if receipt.get("default_workflow_permissions") != "read":
+        raise ContractError("default workflow token permissions must be read-only")
     for field, expected in (
+        ("actions_enabled", True),
+        ("actions_sha_pinning", True),
+        ("can_approve_pull_request_reviews", False),
+        ("dismiss_stale_reviews_on_push", False),
         ("immutable_releases", True),
+        ("private_vulnerability_reporting", True),
         ("strict_status_checks", True),
         ("require_pull_request", True),
         ("require_linear_history", True),
+        ("require_code_owner_review", False),
+        ("require_last_push_approval", False),
+        ("require_signatures", True),
+        ("required_review_thread_resolution", True),
         ("allow_force_pushes", False),
         ("allow_deletions", False),
         ("restrict_updates", False),
+        ("secret_scanning", True),
+        ("secret_scanning_push_protection", True),
     ):
         if receipt.get(field) is not expected:
             raise ContractError(f"settings receipt {field} must be {expected}")
     if receipt.get("bypass_actors") != []:
         raise ContractError("protected-main rules must have no bypass actors")
+    if receipt.get("required_approving_review_count") != 0 or isinstance(
+        receipt.get("required_approving_review_count"), bool
+    ):
+        raise ContractError("formal approving-review count must remain exactly zero")
+    if receipt.get("required_reviewers") != []:
+        raise ContractError("team required-reviewer rules must remain absent")
+    if receipt.get("code_scanning_tools") != [
+        {
+            "alerts_threshold": "errors",
+            "security_alerts_threshold": "high_or_higher",
+            "tool": "CodeQL",
+        }
+    ]:
+        raise ContractError("CodeQL scanning thresholds are not exact")
+    if receipt.get("code_quality_severity") != "errors":
+        raise ContractError("code-quality threshold must remain errors")
+    coverage_minimum = receipt.get("code_coverage_minimum")
+    if isinstance(coverage_minimum, bool) or coverage_minimum != 80:
+        raise ContractError("repository code-coverage threshold must remain 80")
+    if receipt.get("code_coverage_max_drop") is not None:
+        raise ContractError("repository code-coverage max drop must remain null")
 
 
 def _select_main_ruleset_id(summaries: object, repository: str) -> int:
@@ -434,6 +624,9 @@ def build_settings_receipt(
     repository: str,
     repository_record: Mapping[str, object],
     immutable_record: Mapping[str, object],
+    actions_record: Mapping[str, object],
+    workflow_permissions_record: Mapping[str, object],
+    private_reporting_record: Mapping[str, object],
     ruleset_id: int,
     ruleset_record: Mapping[str, object],
 ) -> dict[str, object]:
@@ -455,6 +648,32 @@ def build_settings_receipt(
         immutable_record.get("enforced_by_owner"), bool
     ):
         raise ContractError("immutable-release settings response is malformed")
+    if (
+        not isinstance(actions_record.get("enabled"), bool)
+        or actions_record.get("allowed_actions") not in {"all", "local_only", "selected"}
+        or not isinstance(actions_record.get("sha_pinning_required"), bool)
+    ):
+        raise ContractError("Actions policy response is malformed")
+    if (
+        workflow_permissions_record.get("default_workflow_permissions")
+        not in {"read", "write"}
+        or not isinstance(
+            workflow_permissions_record.get("can_approve_pull_request_reviews"), bool
+        )
+    ):
+        raise ContractError("workflow-token permissions response is malformed")
+    if not isinstance(private_reporting_record.get("enabled"), bool):
+        raise ContractError("private vulnerability reporting response is malformed")
+    security = _object(
+        repository_record.get("security_and_analysis"),
+        "repository security_and_analysis",
+    )
+
+    def security_enabled(name: str) -> bool:
+        record = _object(security.get(name), f"security setting {name}")
+        if record.get("status") not in {"enabled", "disabled"}:
+            raise ContractError(f"security setting {name} status is malformed")
+        return record.get("status") == "enabled"
 
     if (
         ruleset_record.get("id") != ruleset_id
@@ -482,21 +701,94 @@ def build_settings_receipt(
         if not isinstance(rule_type, str) or not rule_type or rule_type in rules_by_type:
             raise ContractError("Protect-Main rule types must be non-empty and unique")
         rules_by_type[rule_type] = rule
+    expected_rule_types = {
+        "creation",
+        "code_coverage",
+        "code_quality",
+        "code_scanning",
+        "deletion",
+        "non_fast_forward",
+        "pull_request",
+        "required_linear_history",
+        "required_signatures",
+        "required_status_checks",
+    }
+    if set(rules_by_type) != expected_rule_types:
+        raise ContractError("Protect-Main rule types are missing or foreign")
 
     pull_request = rules_by_type.get("pull_request")
     if pull_request is None:
         raise ContractError("Protect-Main must require pull requests")
     pull_parameters = _object(pull_request.get("parameters"), "pull-request rule parameters")
+    expected_pull_fields = {
+        "allowed_merge_methods",
+        "dismiss_stale_reviews_on_push",
+        "require_code_owner_review",
+        "require_last_push_approval",
+        "required_approving_review_count",
+        "required_review_thread_resolution",
+        "required_reviewers",
+    }
+    if set(pull_parameters) != expected_pull_fields:
+        raise ContractError("pull-request rule parameter fields are missing or foreign")
     allowed_merge_methods = _string_set(
         pull_parameters.get("allowed_merge_methods"), "ruleset merge methods"
     )
     if allowed_merge_methods != set(merge_methods):
         raise ContractError("repository and ruleset merge methods do not match")
+    for field, expected in (
+        ("dismiss_stale_reviews_on_push", False),
+        ("require_code_owner_review", False),
+        ("require_last_push_approval", False),
+        ("required_review_thread_resolution", True),
+    ):
+        if pull_parameters.get(field) is not expected:
+            raise ContractError(f"pull-request rule {field} must be {expected}")
+    approving_count = pull_parameters.get("required_approving_review_count")
+    if isinstance(approving_count, bool) or approving_count != 0:
+        raise ContractError("pull-request rule formal approval count must be zero")
+    if pull_parameters.get("required_reviewers") != []:
+        raise ContractError("pull-request rule required reviewers must be empty")
+
+    code_scanning = _object(
+        rules_by_type["code_scanning"].get("parameters"),
+        "code-scanning rule parameters",
+    )
+    if set(code_scanning) != {"code_scanning_tools"}:
+        raise ContractError("code-scanning rule parameters are missing or foreign")
+    tools = _array(code_scanning.get("code_scanning_tools"), "code-scanning tools")
+    expected_tools = [
+        {
+            "alerts_threshold": "errors",
+            "security_alerts_threshold": "high_or_higher",
+            "tool": "CodeQL",
+        }
+    ]
+    if tools != expected_tools:
+        raise ContractError("code-scanning tool and thresholds are not exact")
+    code_quality = _object(
+        rules_by_type["code_quality"].get("parameters"),
+        "code-quality rule parameters",
+    )
+    if code_quality != {"severity": "errors"}:
+        raise ContractError("code-quality rule parameters are not exact")
+    code_coverage = _object(
+        rules_by_type["code_coverage"].get("parameters"),
+        "code-coverage rule parameters",
+    )
+    if code_coverage != {"minimum_coverage": 80, "max_coverage_drop": None}:
+        raise ContractError("code-coverage rule parameters are not exact")
 
     status_rule = rules_by_type.get("required_status_checks")
     if status_rule is None:
         raise ContractError("Protect-Main must require exact status checks")
     status_parameters = _object(status_rule.get("parameters"), "status-check rule parameters")
+    if set(status_parameters) != {
+        "do_not_enforce_on_create",
+        "required_status_checks",
+        "strict_required_status_checks_policy",
+    }:
+        raise ContractError("required-status-check parameter fields are missing or foreign")
     if status_parameters.get("do_not_enforce_on_create") is not False:
         raise ContractError("required checks must also apply when the ref is created")
     status_checks = _status_check_set(status_parameters.get("required_status_checks"))
@@ -504,6 +796,22 @@ def build_settings_receipt(
     receipt: dict[str, object] = {
         "repository": repository,
         "branch": "main",
+        "actions_enabled": actions_record.get("enabled"),
+        "actions_allowed": actions_record.get("allowed_actions"),
+        "actions_sha_pinning": actions_record.get("sha_pinning_required"),
+        "default_workflow_permissions": workflow_permissions_record.get(
+            "default_workflow_permissions"
+        ),
+        "can_approve_pull_request_reviews": workflow_permissions_record.get(
+            "can_approve_pull_request_reviews"
+        ),
+        "code_coverage_max_drop": code_coverage.get("max_coverage_drop"),
+        "code_coverage_minimum": code_coverage.get("minimum_coverage"),
+        "code_quality_severity": code_quality.get("severity"),
+        "code_scanning_tools": expected_tools,
+        "dismiss_stale_reviews_on_push": pull_parameters.get(
+            "dismiss_stale_reviews_on_push"
+        ),
         "merge_methods": sorted(merge_methods),
         "required_status_checks": [
             {"context": context, "integration_id": integration_id}
@@ -512,6 +820,14 @@ def build_settings_receipt(
         "strict_status_checks": status_parameters.get("strict_required_status_checks_policy"),
         "require_pull_request": True,
         "require_linear_history": "required_linear_history" in rules_by_type,
+        "require_code_owner_review": pull_parameters.get("require_code_owner_review"),
+        "require_last_push_approval": pull_parameters.get("require_last_push_approval"),
+        "require_signatures": "required_signatures" in rules_by_type,
+        "required_approving_review_count": approving_count,
+        "required_review_thread_resolution": pull_parameters.get(
+            "required_review_thread_resolution"
+        ),
+        "required_reviewers": pull_parameters.get("required_reviewers"),
         "allow_force_pushes": "non_fast_forward" not in rules_by_type,
         "allow_deletions": "deletion" not in rules_by_type,
         "restrict_updates": "update" in rules_by_type,
@@ -519,6 +835,11 @@ def build_settings_receipt(
         # safety fact, and the only acceptable value is the empty set.
         "bypass_actors": [] if not bypass else ["present"],
         "immutable_releases": immutable_record.get("enabled"),
+        "private_vulnerability_reporting": private_reporting_record.get("enabled"),
+        "secret_scanning": security_enabled("secret_scanning"),
+        "secret_scanning_push_protection": security_enabled(
+            "secret_scanning_push_protection"
+        ),
     }
     validate_settings_receipt(receipt, repository)
     return receipt
@@ -548,10 +869,7 @@ def _github_api_get(endpoint: str, *, paginate: bool = False) -> object:
     )
     if completed.returncode != 0:
         raise ContractError("read-only GitHub settings query failed")
-    try:
-        value = json.loads(completed.stdout)
-    except json.JSONDecodeError as exc:
-        raise ContractError("read-only GitHub settings query returned malformed JSON") from exc
+    value = parse_json(completed.stdout, "read-only GitHub settings response")
     if not paginate:
         return value
     flattened: list[object] = []
@@ -569,6 +887,18 @@ def observe_live_settings(repository: str) -> dict[str, object]:
         _github_api_get(f"repos/{repository}/immutable-releases"),
         "immutable-release settings",
     )
+    actions_record = _object(
+        _github_api_get(f"repos/{repository}/actions/permissions"),
+        "Actions policy",
+    )
+    workflow_permissions_record = _object(
+        _github_api_get(f"repos/{repository}/actions/permissions/workflow"),
+        "workflow-token permissions",
+    )
+    private_reporting_record = _object(
+        _github_api_get(f"repos/{repository}/private-vulnerability-reporting"),
+        "private vulnerability reporting",
+    )
     summaries = _github_api_get(f"repos/{repository}/rulesets", paginate=True)
     ruleset_id = _select_main_ruleset_id(summaries, repository)
     ruleset_record = _object(
@@ -579,6 +909,9 @@ def observe_live_settings(repository: str) -> dict[str, object]:
         repository,
         repository_record,
         immutable_record,
+        actions_record,
+        workflow_permissions_record,
+        private_reporting_record,
         ruleset_id,
         ruleset_record,
     )
@@ -626,21 +959,252 @@ def validate_tag_record(
     _same_instant(tagger.get("date"), tagger_date, "annotated tagger date")
 
 
+def tag_ref_object_sha(ref_record: Mapping[str, object], tag: str) -> str:
+    ref_object = _object(ref_record.get("object"), "tag ref object")
+    if ref_record.get("ref") != f"refs/tags/{tag}" or ref_object.get("type") != "tag":
+        raise ContractError("tag ref is not the exact annotated tag object")
+    return require_sha(ref_object.get("sha"), "annotated tag object SHA")
+
+
+def tag_created_object_sha(
+    tag_record: Mapping[str, object], **expected: str
+) -> str:
+    tag_object_sha = require_sha(tag_record.get("sha"), "created tag object SHA")
+    ref_record = {
+        "ref": f"refs/tags/{expected['tag']}",
+        "object": {"type": "tag", "sha": tag_object_sha},
+    }
+    validate_tag_record(ref_record, tag_record, **expected)
+    return tag_object_sha
+
+
+def require_digest(raw: object, field: str) -> str:
+    if not isinstance(raw, str) or not DIGEST_RE.fullmatch(raw):
+        raise ContractError(f"{field} must be sha256:<64 lowercase hex>")
+    return raw
+
+
+def canonical_json_bytes(value: object) -> bytes:
+    return (
+        json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+        + "\n"
+    ).encode("utf-8")
+
+
+def build_release_manifest(
+    *,
+    repository: str,
+    source_sha: str,
+    version: Version,
+    image: str,
+    image_digest: str,
+    chart: str,
+    chart_digest: str,
+) -> dict[str, object]:
+    """Build the sole canonical machine identity for external release artifacts."""
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
+        raise ContractError("manifest repository must be an exact owner/name pair")
+    source_sha = require_sha(source_sha, "manifest source SHA")
+    image_digest = require_digest(image_digest, "manifest image digest")
+    chart_digest = require_digest(chart_digest, "manifest chart digest")
+    registry = re.compile(r"^ghcr\.io/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+$")
+    if not registry.fullmatch(image) or not registry.fullmatch(chart):
+        raise ContractError("manifest registry identity is malformed")
+    identity = (
+        f"https://github.com/{repository}/.github/workflows/"
+        "release-publisher.yml@refs/heads/main"
+    )
+    signature = {
+        "certificate_identity": identity,
+        "oidc_issuer": COSIGN_ISSUER,
+        "required": True,
+    }
+    return {
+        "artifacts": {
+            "chart": {
+                "alias": f"{chart}:{version}",
+                "digest": chart_digest,
+                "digest_reference": f"{chart}@{chart_digest}",
+                "display_reference": f"{chart}:{version}@{chart_digest}",
+                "provenance": {
+                    "platforms": [],
+                    "predicate_type": "",
+                    "required": False,
+                },
+                "registry": chart,
+                "sbom": {"platforms": [], "required": False},
+                "signature": signature,
+            },
+            "image": {
+                "alias": f"{image}:{version.tag}",
+                "digest": image_digest,
+                "digest_reference": f"{image}@{image_digest}",
+                "display_reference": f"{image}:{version.tag}@{image_digest}",
+                "provenance": {
+                    "platforms": list(RELEASE_PLATFORMS),
+                    "predicate_type": SLSA_PREDICATE_TYPE,
+                    "required": True,
+                },
+                "registry": image,
+                "sbom": {
+                    "platforms": list(RELEASE_PLATFORMS),
+                    "required": True,
+                },
+                "signature": signature,
+            },
+        },
+        "repository": repository,
+        "schema": RELEASE_MANIFEST_SCHEMA,
+        "source_sha": source_sha,
+        "tag": version.tag,
+        "version": str(version),
+        "workflow_identity": identity,
+    }
+
+
+def validate_release_manifest(
+    value: Mapping[str, object], *, expected_repository: str | None = None
+) -> dict[str, object]:
+    """Validate the closed manifest schema by reconstructing its exact value."""
+    if set(value) != {
+        "artifacts",
+        "repository",
+        "schema",
+        "source_sha",
+        "tag",
+        "version",
+        "workflow_identity",
+    }:
+        raise ContractError("release manifest fields are missing or foreign")
+    if value.get("schema") != RELEASE_MANIFEST_SCHEMA:
+        raise ContractError("release manifest schema is not supported")
+    repository = value.get("repository")
+    if not isinstance(repository, str):
+        raise ContractError("release manifest repository is absent")
+    if expected_repository is not None and repository != expected_repository:
+        raise ContractError("release manifest repository is foreign")
+    version_raw = value.get("version")
+    if not isinstance(version_raw, str):
+        raise ContractError("release manifest version is absent")
+    version = Version.parse(version_raw)
+    if value.get("tag") != version.tag:
+        raise ContractError("release manifest tag does not equal v<VERSION>")
+    artifacts = _object(value.get("artifacts"), "release manifest artifacts")
+    if set(artifacts) != {"chart", "image"}:
+        raise ContractError("release manifest artifact set must be exactly image and chart")
+    image = _object(artifacts.get("image"), "release manifest image")
+    chart = _object(artifacts.get("chart"), "release manifest chart")
+    expected = build_release_manifest(
+        repository=repository,
+        source_sha=require_sha(value.get("source_sha"), "manifest source SHA"),
+        version=version,
+        image=str(image.get("registry", "")),
+        image_digest=require_digest(image.get("digest"), "manifest image digest"),
+        chart=str(chart.get("registry", "")),
+        chart_digest=require_digest(chart.get("digest"), "manifest chart digest"),
+    )
+    if value != expected:
+        raise ContractError("release manifest content is missing, foreign, or reordered")
+    return expected
+
+
+def read_release_manifest(
+    path: Path, *, expected_repository: str | None = None, require_mode: bool = True
+) -> tuple[dict[str, object], bytes]:
+    raw = path.read_bytes()
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ContractError("release manifest is not UTF-8") from exc
+    value = _object(parse_json(text, "release manifest"), "release manifest")
+    manifest = validate_release_manifest(value, expected_repository=expected_repository)
+    if raw != canonical_json_bytes(manifest):
+        raise ContractError("release manifest bytes are not canonical")
+    # Windows does not expose POSIX owner/group/other mode bits. Every release
+    # job runs on Linux, where this is a strict 0600 assertion; Windows hosts
+    # still validate the same canonical bytes and schema for local tests.
+    if require_mode and os.name != "nt" and (path.stat().st_mode & 0o777) != 0o600:
+        raise ContractError("release manifest mode must be exactly 0600")
+    return manifest, raw
+
+
+def write_release_manifest(path: Path, manifest: Mapping[str, object]) -> None:
+    raw = canonical_json_bytes(validate_release_manifest(manifest))
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_BINARY", 0)
+    descriptor = os.open(path, flags, 0o600)
+    try:
+        if hasattr(os, "fchmod"):
+            os.fchmod(descriptor, 0o600)
+        os.write(descriptor, raw)
+    finally:
+        os.close(descriptor)
+
+
+def _release_asset(release_record: Mapping[str, object]) -> Mapping[str, object]:
+    assets = _array(release_record.get("assets"), "GitHub Release assets")
+    if len(assets) != 1:
+        raise ContractError("GitHub Release must contain exactly one manifest asset")
+    asset = _object(assets[0], "GitHub Release manifest asset")
+    asset_id = asset.get("id")
+    if isinstance(asset_id, bool) or not isinstance(asset_id, int) or asset_id <= 0:
+        raise ContractError("GitHub Release manifest asset ID is not positive")
+    if asset.get("name") != RELEASE_MANIFEST_NAME:
+        raise ContractError("GitHub Release manifest asset name is not exact")
+    if asset.get("state") != "uploaded":
+        raise ContractError("GitHub Release manifest asset is not fully uploaded")
+    if asset.get("content_type") != "application/json":
+        raise ContractError("GitHub Release manifest asset content type is not exact")
+    size = asset.get("size")
+    if isinstance(size, bool) or not isinstance(size, int) or size <= 0:
+        raise ContractError("GitHub Release manifest asset size is not positive")
+    require_digest(asset.get("digest"), "GitHub Release manifest asset digest")
+    return asset
+
+
+def release_asset_id(release_record: Mapping[str, object]) -> int:
+    return int(_release_asset(release_record)["id"])
+
+
 def validate_release_record(
-    release_record: Mapping[str, object], *, tag: str, title: str, body: str
-) -> None:
-    """Verify exact immutable GitHub Release metadata and a closed empty asset set."""
-    if release_record.get("tag_name") != tag or release_record.get("name") != title:
-        raise ContractError("GitHub Release tag or title is not exact")
-    actual_body = release_record.get("body")
-    if not isinstance(actual_body, str) or actual_body.rstrip("\r\n") != body.rstrip("\r\n"):
-        raise ContractError("GitHub Release notes are not exact")
-    if release_record.get("draft") is not False or release_record.get("prerelease") is not False:
-        raise ContractError("GitHub Release must be published and non-prerelease")
-    if release_record.get("immutable") is not True:
-        raise ContractError("GitHub Release must report authoritative immutable state")
-    if release_record.get("assets") != []:
-        raise ContractError("GitHub Release asset inventory must be exactly empty")
+    release_record: Mapping[str, object],
+    *,
+    manifest: Mapping[str, object],
+    manifest_bytes: bytes,
+    asset_bytes: bytes | None,
+) -> str:
+    """Classify an exact draft/immutable Release around one manifest asset."""
+    expected = validate_release_manifest(manifest)
+    if release_record.get("tag_name") != expected["tag"]:
+        raise ContractError("GitHub Release tag is not exact")
+    author = _object(release_record.get("author"), "GitHub Release author")
+    if author.get("login") != "github-actions[bot]":
+        raise ContractError("GitHub Release author is not the workflow bot")
+    if release_record.get("prerelease") is not False:
+        raise ContractError("GitHub Release must be non-prerelease")
+    draft = release_record.get("draft")
+    immutable = release_record.get("immutable")
+    if not isinstance(draft, bool) or not isinstance(immutable, bool):
+        raise ContractError("GitHub Release draft/immutable state is malformed")
+    assets = _array(release_record.get("assets"), "GitHub Release assets")
+    if not assets:
+        if draft is True and immutable is False and asset_bytes is None:
+            return "draft-empty"
+        raise ContractError("published GitHub Release is missing its manifest asset")
+    asset = _release_asset(release_record)
+    if asset_bytes is None:
+        raise ContractError("GitHub Release manifest asset content was not verified")
+    expected_digest = "sha256:" + hashlib.sha256(manifest_bytes).hexdigest()
+    if asset.get("size") != len(manifest_bytes):
+        raise ContractError("GitHub Release manifest asset size is not exact")
+    if asset.get("digest") != expected_digest:
+        raise ContractError("GitHub Release manifest asset digest is not exact")
+    if asset_bytes != manifest_bytes:
+        raise ContractError("GitHub Release manifest asset content is not exact")
+    if draft is True and immutable is False:
+        return "draft-ready"
+    if draft is False and immutable is True:
+        return "exact"
+    raise ContractError("GitHub Release is neither resumable draft nor immutable published state")
 
 
 def classify_tag_state(
@@ -666,9 +1230,9 @@ def classify_release_state(
     http_status: int,
     release_record: Mapping[str, object] | None,
     *,
-    tag: str,
-    title: str,
-    body: str,
+    manifest: Mapping[str, object],
+    manifest_bytes: bytes,
+    asset_bytes: bytes | None,
 ) -> str:
     """Classify authoritative REST Release state for create/retry transactions."""
     if http_status == 404:
@@ -679,13 +1243,17 @@ def classify_release_state(
         raise ContractError(f"GitHub Release probe returned unexpected HTTP {http_status}")
     if release_record is None:
         raise ContractError("present GitHub Release state requires its REST record")
-    validate_release_record(release_record, tag=tag, title=title, body=body)
-    return "exact"
+    return validate_release_record(
+        release_record,
+        manifest=manifest,
+        manifest_bytes=manifest_bytes,
+        asset_bytes=asset_bytes,
+    )
 
 
 def require_publication_state(actual: str, required: str) -> str:
     """Turn an API classification into a shell-safe exact-state assertion."""
-    if required not in {"absent", "exact"} or actual != required:
+    if required not in {"absent", "draft-empty", "draft-ready", "exact"} or actual != required:
         raise ContractError(f"publication state {actual!r} does not equal required {required!r}")
     return actual
 
@@ -742,7 +1310,10 @@ def build_attestation_statement(
 
 
 def _verified_statements(text: str) -> list[Mapping[str, object]]:
-    decoder = json.JSONDecoder()
+    decoder = json.JSONDecoder(
+        object_pairs_hook=_reject_duplicate_members,
+        parse_constant=_reject_nonfinite_constant,
+    )
     values: list[object] = []
     position = 0
     while position < len(text):
@@ -762,7 +1333,7 @@ def _verified_statements(text: str) -> list[Mapping[str, object]]:
             raise ContractError("verified cosign record has no signed payload")
         try:
             decoded = base64.b64decode(payload, validate=True).decode("utf-8")
-            statement = json.loads(decoded)
+            statement = parse_json(decoded, "verified cosign payload")
         except (binascii.Error, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise ContractError("verified cosign payload is not canonical JSON evidence") from exc
         statements.append(_object(statement, "verified in-toto statement"))
@@ -822,7 +1393,7 @@ def _emit(intent: ReleaseIntent) -> None:
 
 
 def _read_object(path: Path) -> Mapping[str, object]:
-    return _object(json.loads(path.read_text(encoding="utf-8")), str(path))
+    return _object(parse_json(path.read_text(encoding="utf-8"), str(path)), str(path))
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -866,6 +1437,17 @@ def _parser() -> argparse.ArgumentParser:
     tag_record.add_argument("--tagger-name", required=True)
     tag_record.add_argument("--tagger-email", required=True)
     tag_record.add_argument("--tagger-date", required=True)
+    tag_ref_object = commands.add_parser("tag-ref-object")
+    tag_ref_object.add_argument("--ref-json", type=Path, required=True)
+    tag_ref_object.add_argument("--tag", required=True)
+    tag_created = commands.add_parser("tag-created-object")
+    tag_created.add_argument("--tag-json", type=Path, required=True)
+    tag_created.add_argument("--tag", required=True)
+    tag_created.add_argument("--source-sha", required=True)
+    tag_created.add_argument("--message", required=True)
+    tag_created.add_argument("--tagger-name", required=True)
+    tag_created.add_argument("--tagger-email", required=True)
+    tag_created.add_argument("--tagger-date", required=True)
     tag_state = commands.add_parser("tag-state")
     tag_state.add_argument("--http-status", type=int, required=True)
     tag_state.add_argument("--require", choices=("absent", "exact"))
@@ -879,16 +1461,37 @@ def _parser() -> argparse.ArgumentParser:
     tag_state.add_argument("--tagger-date", required=True)
     release_record = commands.add_parser("release-record")
     release_record.add_argument("--release-json", type=Path, required=True)
-    release_record.add_argument("--tag", required=True)
-    release_record.add_argument("--title", required=True)
-    release_record.add_argument("--body", type=Path, required=True)
+    release_record.add_argument("--manifest", type=Path, required=True)
+    release_record.add_argument("--asset-content", type=Path)
+    release_record.add_argument("--repository", required=True)
     release_state = commands.add_parser("release-state")
     release_state.add_argument("--http-status", type=int, required=True)
-    release_state.add_argument("--require", choices=("absent", "exact"))
+    release_state.add_argument(
+        "--require", choices=("absent", "draft-empty", "draft-ready", "exact")
+    )
     release_state.add_argument("--release-json", type=Path)
-    release_state.add_argument("--tag", required=True)
-    release_state.add_argument("--title", required=True)
-    release_state.add_argument("--body", type=Path, required=True)
+    release_state.add_argument("--manifest", type=Path, required=True)
+    release_state.add_argument("--asset-content", type=Path)
+    release_state.add_argument("--repository", required=True)
+    release_asset = commands.add_parser("release-asset-id")
+    release_asset.add_argument("--release-json", type=Path, required=True)
+    manifest = commands.add_parser("release-manifest")
+    manifest.add_argument("--output", type=Path, required=True)
+    manifest.add_argument("--repository", required=True)
+    manifest.add_argument("--source-sha", required=True)
+    manifest.add_argument("--version", required=True)
+    manifest.add_argument("--image", required=True)
+    manifest.add_argument("--image-digest", required=True)
+    manifest.add_argument("--chart", required=True)
+    manifest.add_argument("--chart-digest", required=True)
+    manifest_record = commands.add_parser("manifest-record")
+    manifest_record.add_argument("--manifest", type=Path, required=True)
+    manifest_record.add_argument("--repository", required=True)
+    manifest_record.add_argument("--github-output", type=Path)
+    registry_token = commands.add_parser("registry-token")
+    registry_token.add_argument("--token-json", type=Path, required=True)
+    json_keys = commands.add_parser("json-keys")
+    json_keys.add_argument("--json", type=Path, required=True)
     statement = commands.add_parser("attestation-statement")
     statement.add_argument("--predicate", type=Path, required=True)
     statement.add_argument("--output", type=Path, required=True)
@@ -930,7 +1533,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
             )
         elif args.command == "workflow-run":
-            event = json.loads(args.event.read_text(encoding="utf-8"))
+            event = _read_object(args.event)
             print(plan_workflow_run(event, args.repository))
         elif args.command == "main-run-record":
             print(
@@ -970,6 +1573,20 @@ def main(argv: list[str] | None = None) -> int:
                 tagger_date=args.tagger_date,
             )
             print("exact")
+        elif args.command == "tag-ref-object":
+            print(tag_ref_object_sha(_read_object(args.ref_json), args.tag))
+        elif args.command == "tag-created-object":
+            print(
+                tag_created_object_sha(
+                    _read_object(args.tag_json),
+                    tag=args.tag,
+                    source_sha=args.source_sha,
+                    message=args.message,
+                    tagger_name=args.tagger_name,
+                    tagger_email=args.tagger_email,
+                    tagger_date=args.tagger_date,
+                )
+            )
         elif args.command == "tag-state":
             state = classify_tag_state(
                 args.http_status,
@@ -984,22 +1601,91 @@ def main(argv: list[str] | None = None) -> int:
             )
             print(require_publication_state(state, args.require) if args.require else state)
         elif args.command == "release-record":
-            validate_release_record(
-                _read_object(args.release_json),
-                tag=args.tag,
-                title=args.title,
-                body=args.body.read_text(encoding="utf-8"),
+            manifest, manifest_bytes = read_release_manifest(
+                args.manifest, expected_repository=args.repository
             )
-            print("exact")
+            print(
+                validate_release_record(
+                    _read_object(args.release_json),
+                    manifest=manifest,
+                    manifest_bytes=manifest_bytes,
+                    asset_bytes=args.asset_content.read_bytes()
+                    if args.asset_content
+                    else None,
+                )
+            )
         elif args.command == "release-state":
+            manifest, manifest_bytes = read_release_manifest(
+                args.manifest, expected_repository=args.repository
+            )
             state = classify_release_state(
                 args.http_status,
                 _read_object(args.release_json) if args.release_json else None,
-                tag=args.tag,
-                title=args.title,
-                body=args.body.read_text(encoding="utf-8"),
+                manifest=manifest,
+                manifest_bytes=manifest_bytes,
+                asset_bytes=args.asset_content.read_bytes()
+                if args.asset_content
+                else None,
             )
             print(require_publication_state(state, args.require) if args.require else state)
+        elif args.command == "release-asset-id":
+            print(release_asset_id(_read_object(args.release_json)))
+        elif args.command == "release-manifest":
+            write_release_manifest(
+                args.output,
+                build_release_manifest(
+                    repository=args.repository,
+                    source_sha=args.source_sha,
+                    version=Version.parse(args.version),
+                    image=args.image,
+                    image_digest=args.image_digest,
+                    chart=args.chart,
+                    chart_digest=args.chart_digest,
+                ),
+            )
+            print(RELEASE_MANIFEST_NAME)
+        elif args.command == "manifest-record":
+            manifest, raw = read_release_manifest(
+                args.manifest, expected_repository=args.repository
+            )
+            artifacts = _object(manifest["artifacts"], "release manifest artifacts")
+            image = _object(artifacts["image"], "release manifest image")
+            chart = _object(artifacts["chart"], "release manifest chart")
+            record = {
+                "asset_digest": "sha256:" + hashlib.sha256(raw).hexdigest(),
+                "asset_name": RELEASE_MANIFEST_NAME,
+                "asset_size": len(raw),
+                "chart_alias": chart["alias"],
+                "chart_digest": chart["digest"],
+                "image_alias": image["alias"],
+                "image_digest": image["digest"],
+                "source_sha": manifest["source_sha"],
+                "tag": manifest["tag"],
+                "version": manifest["version"],
+                "workflow_identity": manifest["workflow_identity"],
+            }
+            if args.github_output:
+                with args.github_output.open("a", encoding="utf-8", newline="\n") as output:
+                    for key, value in sorted(record.items()):
+                        output.write(f"{key}={value}\n")
+            else:
+                print(json.dumps(record, sort_keys=True))
+        elif args.command == "registry-token":
+            record = _read_object(args.token_json)
+            candidates = [
+                value
+                for key in ("token", "access_token")
+                if isinstance((value := record.get(key)), str) and value
+            ]
+            if len(candidates) != 1:
+                raise ContractError("registry token response must carry exactly one token")
+            print(candidates[0])
+        elif args.command == "json-keys":
+            # Security evidence emitted by Buildx is still untrusted input.
+            # _read_object applies the same recursive duplicate-member and
+            # non-finite-value rejection used for every REST/event boundary.
+            keys = sorted(_read_object(args.json))
+            sys.stdout.buffer.write("".join(f"{key}\n" for key in keys).encode("utf-8"))
         elif args.command == "attestation-statement":
             statement = build_attestation_statement(
                 _read_object(args.predicate),

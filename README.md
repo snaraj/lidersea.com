@@ -59,23 +59,37 @@ exact plain `vX.Y.Z` in the image tag. Automation creates that plain tag at the
 exact SHA and explicitly dispatches the publisher definition from protected
 `main` with the authoritative successful-run ID. A separate read-only job
 validates that exact PR-gate push run before the write/packages/OIDC job can
-start; a manual dispatch for an unmerged branch fails before publication.
+start; a manual dispatch for an unmerged branch fails before publication. A
+second isolated job mints a repository-scoped, Administration-read-only App
+token and rechecks the immutable-release, Actions, ruleset, signing, and
+security controls before any tag or artifact side effect. The ordinary
+`GITHUB_TOKEN` remains the sole mutation credential.
 Both enabled merge modes are covered: a squash is one linear commit, while a
-rebase may install several commits in one push; either produces one release for
-the exact final source tree. The publisher builds or verifies:
+rebase may install several commits in one push. Every intermediate `VERSION`
+state must retain the current version or advance exactly one patch; skips,
+reversions, transient future values, and multiple release boundaries in one
+integration are denied. The publisher builds or verifies:
 
 - `ghcr.io/snaraj/lidersea-com:vX.Y.Z` — multi-arch image, keyless-signed
   (Cosign), with SBOM and SLSA provenance; deployment consumes the digest.
 - `ghcr.io/snaraj/charts/lidersea-com:X.Y.Z` — the Helm chart as a signed OCI
   artifact. This is the one narrow tag exception: Helm requires the registry
   tag to equal valid chart SemVer, and `vX.Y.Z` is not SemVerV2.
-- A GitHub Release recording the immutable digests.
+- A GitHub Release whose sole machine-identity asset is canonical
+  `release-manifest.json`, binding the exact source, image digest, chart digest,
+  signature identity, SBOM set, and provenance set. Human-readable Release
+  title and notes are informational.
 
-Version tags are immutable and never reassigned. A retry reuses only exact,
-complete, correctly signed source state; partial or conflicting immutable
-state is reported as burned and requires a new patch. Before this automatic
-path may leave Draft, the owner's GET-only receipt must prove immutable GitHub
-Releases, strict current-base required checks, and no protection bypass; see
+The annotated Git tag is never reassigned, and the GitHub Release is accepted
+only when REST reports it immutable. Image and chart version tags are mutable
+registry aliases; the manifest's `sha256:` digests are the immutable artifact
+identities. A retry reuses only exact, complete, correctly signed digest-bound
+state; partial or conflicting state is reported as burned and requires a new
+patch. The manifest is created mode `0600`, uploaded while the Release is
+Draft, and verified byte-for-byte before publication. The publisher then ends
+with an unconditional REST rebind of both the annotated tag ref and object.
+Before this automatic path may leave Draft, the repository owner's GET-only
+receipt must prove the full server contract; see
 [release governance](docs/release-governance.md). Release publication is
 separate from deployment or promotion. History lives in
 [CHANGELOG.md](CHANGELOG.md); the security posture in
@@ -83,7 +97,11 @@ separate from deployment or promotion. History lives in
 
 An OCI reference such as `image:vX.Y.Z@sha256:<digest>` or
 `chart:X.Y.Z@sha256:<digest>` contains a tag plus immutable digest; the complete
-string is a reference, never a tag.
+string is a reference, never a tag. Publication scans the final image digest for
+HIGH/CRITICAL vulnerabilities before signing. A scheduled read-only audit
+rescans that digest and rechecks registry-alias bindings, signatures, exact
+two-platform SBOM/provenance attestations, the chart digest, the manifest, and
+the annotated Git tag.
 
 ## Media
 

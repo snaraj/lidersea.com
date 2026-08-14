@@ -48,7 +48,7 @@ Numbered for citation, repo-scoped, none negotiable in code:
    and free CI. No paid API, SaaS, tracker, CDN, or third-party runtime
    dependency may be introduced — the frontend stays local-origin-only.
 2. **Owner-only merges; protected history.** Work lands through PRs into
-   `main`; Samuel alone merges. An agent must NEVER merge, auto-merge, squash,
+   `main`; the repository owner alone merges. An agent must NEVER merge, auto-merge, squash,
    rebase into, or push `main`; must never force-push or delete refs; and must
    stop and question even a later request to do so. Tags exist only through
    the release workflow.
@@ -80,26 +80,26 @@ Numbered for citation, repo-scoped, none negotiable in code:
    yes.
 9. **Dependency-free Go.** The Go module stays standard-library only.
    Adding a dependency is an owner decision, not a convenience.
-10. **Every merge releases after the server gate; deploy remains separate.** Every PR, including
-    docs and Dependabot, advances exactly one patch from its current protected
-    base: numeric `VERSION`, chart `version`, `appVersion`, and changelog
-    `X.Y.Z`, plus plain `vX.Y.Z` image tag. Successful main CI publishes that exact SHA as one
-    server-locked plain `vX.Y.Z` release. The explicit workflow dispatch after
-    a token-created tag selects the publisher definition from protected `main`
-    and carries the completed main-run ID. A separate read-only job verifies
-    the authoritative Actions record before the privileged job can start, so
-    an ordinary manual dispatch cannot publish unmerged source. Squash and
-    rebase are both supported: the protected-main push must be one merge-free
-    linear base-to-head range whose final snapshot is the exact next patch, and
-    that complete final SHA gets one release. There is no skip or force path.
-    The automatic-release PR remains Draft until the repository owner's GET-only
-    receipt proves GitHub immutable releases enabled and exact
-    GitHub-Actions-bound required checks enforced against the current base with
-    no bypass actor or update restriction; see
-    `docs/release-governance.md`. Every created or reused GitHub Release must
-    also report authoritative `immutable: true`. Images deploy by digest;
-    `vX.Y.Z@sha256:<digest>` is a reference, never a tag, and publication is
-    never deployment or promotion.
+10. **Every merge releases after the server gate; deploy remains separate.**
+    Every PR, including docs and Dependabot, advances exactly one patch from
+    its current protected base across numeric `VERSION`, chart `version`,
+    `appVersion`, changelog `X.Y.Z`, and plain-v image alias. PR, protected-main,
+    and recovery validation inspect every intermediate state: retain or advance
+    one patch only; skip, reversion, transient future, or multiple integration
+    boundaries are denied. Successful main CI binds one exact-SHA,
+    noncancelling path. Before tag/registry/signing/Release effects, separate
+    `platform-release` jobs use only a repository-scoped
+    Administration-read-only App token for authoritative settings GETs; they
+    expose no token output, and ordinary `GITHUB_TOKEN` is the sole mutation
+    credential. New Releases carry one canonical mode-0600
+    `release-manifest.json` identity asset and must report `immutable: true`;
+    notes are informational, and the terminal step rebinds the annotated tag
+    records. Registry version tags are mutable aliases—only their manifest-bound
+    digests are immutable artifact identities. Final-digest HIGH/CRITICAL
+    scanning and the scheduled read-only digest/signature/SBOM/provenance/chart
+    audit are mandatory. The automatic-release PR remains Draft until the
+    external closed receipt in `docs/release-governance.md` is exact. There is
+    no skip, force, credential-crossover, deployment, or promotion path.
 11. **No secrets, no personal data.** No credential, token, private host
     fact, or personal data ever enters this repository — including in
     tests, fixtures, and docs.
@@ -188,22 +188,20 @@ Build and test, in this order (the same gate CI enforces):
 
 Releases: every PR advances numeric `VERSION`, chart `version`, `appVersion`,
 and changelog `X.Y.Z`, plus plain `vX.Y.Z` `image.tag`, by exactly one patch
-from its current protected base. Successful main CI creates the plain git tag at the
-exact merged SHA and explicitly dispatches the protected-main publisher with
-that successful run's ID; a token-created tag is never assumed to trigger
-another push workflow. The publisher's read-only authorization job verifies
-the exact run, repository, workflow path, push event, successful conclusion,
-main branch, and source SHA before its write/packages/OIDC job can start. The
-publisher emits the signed multi-arch image, signed OCI chart, and GitHub
-Release. Histories and tags are append-only; stale concurrent PRs must resync
-and take the new next patch. Deployment RESOLVES digests, never tags. The
-Helm chart/OCI tag is the documented numeric `X.Y.Z` exception because Helm
-requires its registry tag to equal valid chart SemVer; Git/image/Release tags
-remain plain `vX.Y.Z`.
-Before the first Release governed by this path, the repository owner must make
-the release-control settings receipt exact. The receipt is a required Ready
-gate, never permission for an agent to change settings or merge. A failed or
-unknown preflight leaves the PR Draft.
+from its current protected base. Every intermediate commit retains the current
+version or advances one patch. Successful main CI creates the annotated Git tag
+at the exact merged SHA and explicitly dispatches the protected-main publisher
+with that successful run's ID. The read-only authorization job verifies the
+exact run/repository/workflow/event/conclusion/branch/SHA. Separate
+environment-gated settings jobs use the pinned App action and step-local
+Administration-read token before any side effect; no token crosses into the
+write/packages/OIDC job. The Release's sole machine identity is canonical
+`release-manifest.json`; human notes are not identity. Image `vX.Y.Z` and Helm
+`X.Y.Z` tags are mutable registry aliases, while their recorded digests are
+immutable and signed. Histories and annotated Git tags are append-only; stale
+concurrent PRs resync and take the new next patch. Deployment resolves digests,
+never aliases. A failed/unknown external receipt leaves the PR Draft and grants
+no permission to create credentials, change settings, or merge.
 The rendered image reference carries both —
 `repository:vX.Y.Z@sha256:<hex>` — so a Pod states which release
 it is, while only the digest selects the bytes and only the digest is signed,
@@ -276,12 +274,29 @@ experiment, and removes the worktree afterward.
 
 **Exact-head receipt.** Review identity is textual because agents share the
 owner's GitHub account; it is not a claim of separate GitHub principals. The
-reviewer posts one normal PR comment containing a line exactly
-`HEAD: <40-lowercase-hex>` and a verdict exactly `APPROVE` or
-`REQUEST-CHANGES`, ending with `- <Agent> (adversarial reviewer)`. Any head
+reviewer posts one normal PR comment beginning with these exact fields:
+
+    HEAD: <40-lowercase-hex>
+    VERDICT: APPROVE | REQUEST-CHANGES
+
+It ends with `- <distinct context> (adversarial reviewer)`. Any head
 change invalidates the receipt. The author replies with reproduction and repair
 evidence; a fresh independent context re-reviews the new exact head. If the
 owner merges first, record a post-merge audit and classify—not erase—the gap.
+
+**Main Worker receipt.** After author completion, exact-head CI, settings, and
+base freshness have been evaluated, the Main Worker posts one bounded normal
+comment containing exactly these five nonblank lines (with one concrete verdict
+and a distinct context signature):
+
+    HEAD: <40-lowercase-hex>
+    ROLE: MAIN-WORKER
+    VERDICT: PASS | BLOCK
+    SCOPE: architecture,merge-order,authority,settings,base-freshness,required-checks
+    - <distinct context> (Main Worker)
+
+Any head change invalidates it. `PASS` is evidence for the coordinator, never
+review, Ready, settings, merge, or release authority.
 
 **The review must:**
 
@@ -310,7 +325,7 @@ owner merges first, record a post-merge audit and classify—not erase—the gap
    post-merge run as part of the change under review.
 
 **Verdict format** — posted as a normal PR comment, so every vendor and the
-owner see the identical record: exact head, APPROVE or REQUEST-CHANGES; numbered
+owner see the identical record: exact `HEAD`, exact `VERDICT`, numbered
 findings with severity and file:line; the mutation kill matrix; flake
 results; a claim-audit table (SUPPORTED / OVERSTATED per claim); explicit
 "no finding — checked X, Y, Z" statements so silence is never ambiguous;
@@ -541,7 +556,8 @@ included; it is the same battery CI enforces:
 
 - **pr-gate.yml** — pull requests AND pushes to `main` (plus manual
   dispatch): `security` (checksum-verified tool install, actionlint,
-  `gitleaks git` over full history, `gitleaks dir`),
+  `gitleaks git` over full history, `gitleaks dir`, HIGH/CRITICAL source
+  dependency and repository-configuration gates),
   `dependency-review` (PRs only; fails on high severity), `application`
   (toolchain pinned AND verified — Node 24.19.0, npm 11.17.0,
   Go 1.26.5; frontend check/test/build; gofmt/vet/tests/race; the
@@ -560,16 +576,24 @@ included; it is the same battery CI enforces:
   number the gate enforced.
 - **codeql.yml** — pull requests, `main` pushes, weekly cron.
 - **release-after-main.yml** — success-only exact-SHA main-CI completion;
-  creates or verifies the annotated tag and explicitly dispatches the
-  publisher definition on protected `main` with the exact completed-run ID.
-  The release boundary is recovered for both squash and multi-commit rebase
-  pushes. Distinct main SHAs share no cancellation group.
+  its separate `platform-release` job uses only the isolated settings token and
+  must pass before the ordinary-token job creates/verifies the annotated tag
+  and dispatches the publisher on protected `main` with the exact completed-run
+  ID. Recovery validates the full intermediate history. Distinct main SHAs
+  share no cancellation group.
 - **release-publisher.yml** — explicit dispatch on protected `main`; a
   read-only authorization job GETs and validates the exact successful PR-gate
-  push run before the source checkout and privileged publication job. Exact
-  source/tag/lock checks and authoritative immutable Release state remain; an
-  ordinary manual/unmerged dispatch, skip flag, or force path cannot publish
-  (requirement 10).
+  push run, then a separate environment-gated Administration-read-only App job
+  rechecks live settings. Only after both succeed can ordinary `GITHUB_TOKEN`
+  publish/sign. The final digest scan, sole canonical manifest asset,
+  draft/upload/publish state machine, and unconditional terminal REST tag
+  rebind are load-bearing; manual/unmerged dispatch, skip, force, clobber, or
+  token crossover cannot publish (requirement 10).
+- **release-integrity-audit.yml** — scheduled/manual read-only audit of the
+  latest immutable manifest: annotated tag/source, mutable registry alias to
+  immutable digest bindings, image/chart signatures, exact two-platform
+  SBOM/provenance attestations, chart digest, and HIGH/CRITICAL image-digest
+  rescan. It has no signing, package-write, Release-write, or build path.
 - **GitHub event basis.** GitHub documents that `GITHUB_TOKEN`-created refs
   suppress recursive workflow events except explicit dispatch, that
   `workflow_run` fires regardless of conclusion and uses default-branch
@@ -582,7 +606,9 @@ included; it is the same battery CI enforces:
 - **Zero-spend guardrails.** Workflows declare top-level
   `permissions: {}` with narrow per-job read grants;
   `persist-credentials: false` on every checkout; GitHub-hosted
-  `ubuntu-24.04` runners only; every action pinned to a full commit SHA
+  `ubuntu-24.04` runners only; every job has a positive timeout; PR concurrency
+  may cancel only the superseded run for that PR while main uses exact-SHA,
+  noncancelling groups; every action is pinned to a full commit SHA
   with a version comment; third-party tools installed only through the
   checksum-verifying `scripts/ci/install-tools.sh`. No external service
   ever receives repository content or measurements — the self-hosted

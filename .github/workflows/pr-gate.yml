@@ -9,15 +9,16 @@ on:
 permissions: {}
 
 concurrency:
-  # PR synchronizations may cancel an older run for the same PR.  Every main
-  # push instead uses its unique run id, so a later merge can never erase the
-  # successful-CI event that publishes an earlier merge.
-  group: pr-gate-${{ github.event.pull_request.number || github.run_id }}
-  cancel-in-progress: true
+  # PR synchronizations may cancel an older run for the same PR. Every main
+  # push uses its exact source SHA and cannot be canceled, so a later merge can
+  # never erase the successful-CI event that publishes an earlier merge.
+  group: pr-gate-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   security:
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     permissions:
       contents: read
     steps:
@@ -69,10 +70,15 @@ jobs:
         run: gitleaks git --no-banner --redact --max-target-megabytes=2 .
       - name: Scan working tree for secrets
         run: gitleaks dir --no-banner --redact .
+      - name: Gate source dependencies at HIGH and CRITICAL
+        run: trivy fs --scanners vuln --severity HIGH,CRITICAL --exit-code 1 .
+      - name: Gate repository configuration at HIGH and CRITICAL
+        run: trivy config --severity HIGH,CRITICAL --exit-code 1 .
 
   dependency-review:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     permissions:
       contents: read
     steps:
@@ -87,6 +93,7 @@ jobs:
 
   application:
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     permissions:
       contents: read
     steps:
@@ -176,6 +183,7 @@ jobs:
 
   chart:
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     permissions:
       contents: read
     steps:
@@ -217,6 +225,7 @@ jobs:
 
   container:
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     permissions:
       contents: read
     steps:
@@ -243,6 +252,7 @@ jobs:
     # services or accounts.
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
+    timeout-minutes: 25
     permissions:
       contents: write
     steps:

@@ -11,29 +11,43 @@ Git, image, and GitHub Release tags use the exact plain `vX.Y.Z` form.
 
 ### Added
 
-- Every protected-main merge now carries and publishes its own immutable
-  semantic patch release. Pull requests (including docs and dependency
-  updates) must advance the four committed source locks by exactly one patch
-  from their protected base. Successful main CI is bound to its exact source
-  SHA, creates the plain version tag, and explicitly dispatches the publisher
-  definition from protected `main` without relying on recursive tag-push
-  events. The dispatch carries the authoritative completed-run ID; a separate
-  read-only job validates the exact successful PR-gate push before the
-  write/packages/OIDC job can start, so a manual unmerged-source dispatch is
-  denied. Both enabled owner merge modes are executable release paths:
-  one-commit squashes and multi-commit linear rebases validate the exact
-  base-to-final-tree patch transition without dropping the final source SHA.
-  Rapid merges have
-  independent release paths; exact complete artifact state is retryable, while
-  partial, foreign, or conflicting immutable state fails closed as burned.
-  Complete reuse authenticates an exact two-member `linux/amd64` and
-  `linux/arm64` attestation set; tag target/message/tagger/time and GitHub
-  Release title/body/draft/prerelease/immutable/zero-assets metadata are all
-  exact. Repository server controls remain a separate Ready gate proven by a
-  GET-only, closed-schema settings receipt.
-  Git/image/Release tags use one plain `vX.Y.Z`. Helm's documented exception
-  stays numeric `X.Y.Z` because its OCI tag must equal valid chart SemVer.
-  `tag@sha256:digest` is a deploy reference, never a tag.
+- Every protected-main merge now carries and publishes its own semantic patch
+  release. Pull requests (including docs and dependency updates) must advance
+  the four committed source locks by exactly one patch from their protected
+  base. The PR, protected-main, and recovery paths share one intermediate-state
+  machine: each commit retains `VERSION` or advances one patch; skips,
+  reversions, transient future values, and collapsed multiple boundaries fail.
+  Successful main CI binds the exact final SHA, creates its annotated plain-v
+  Git tag, and explicitly dispatches the publisher definition from protected
+  `main` with the authoritative completed-run ID.
+
+  A read-only run-authorization job rejects manual/unmerged dispatches. Before
+  tag, registry, signing, attestation, or Release effects, structurally separate
+  environment-gated jobs mint a current-repository Administration-read-only App
+  token and authoritatively recheck immutable Releases, SHA-pinned Actions,
+  signed-commit/main rules, strict checks, and repository security. The token is
+  step-local and never crosses into a mutation job; ordinary `GITHUB_TOKEN` is
+  the sole mutation credential.
+
+  Rapid merges have exact-SHA, noncancelling paths. Real shell create, verify,
+  conflict, race, and bounded retry paths are hostile-tested. Complete image
+  reuse authenticates the exact `linux/amd64` and `linux/arm64` SBOM/provenance
+  set. The final image digest is HIGH/CRITICAL vulnerability-gated before
+  signing. New Releases are created Draft with exactly one canonical mode-0600
+  `release-manifest.json` machine asset binding source, image digest, chart
+  digest, signature, SBOM, and provenance expectations. Asset name/count/size,
+  SHA-256, canonical content, draft/upload/publish state, and final immutable
+  state are exact; human title/notes are informational. The workflow then ends
+  with an unconditional REST rebind of both annotated tag records.
+
+  Image `vX.Y.Z` and Helm `X.Y.Z` registry tags are explicitly mutable aliases;
+  only their recorded digests are immutable artifact identities. A scheduled
+  read-only audit revalidates the Release/manifest/tag, alias-to-digest
+  bindings, image/chart signatures, exact SBOM/provenance set, chart digest, and
+  an immutable-digest vulnerability rescan. Recursive duplicate JSON members
+  are rejected at every event, REST, registry, Buildx, manifest, and Cosign
+  boundary. Repository server controls remain an external Ready gate proven by
+  the closed GET-only settings receipt.
 - A deployed Pod now states which release it is. The shared labels helper
   emits `app.kubernetes.io/version` on every rendered object, taken from the
   chart's own `appVersion` rather than from values, and the container image

@@ -5,10 +5,12 @@ from __future__ import annotations
 import base64
 import contextlib
 import copy
+import hashlib
 import importlib.util
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -104,6 +106,61 @@ def exact_tag_records(tag: str, source: str, message: str, date: str) -> tuple[d
     )
 
 
+def release_manifest() -> dict[str, object]:
+    return RC.build_release_manifest(
+        repository="owner/site",
+        source_sha="a" * 40,
+        version=RC.Version.parse("0.1.10"),
+        image="ghcr.io/owner/site",
+        image_digest="sha256:" + "d" * 64,
+        chart="ghcr.io/owner/charts/site",
+        chart_digest="sha256:" + "e" * 64,
+    )
+
+
+def release_record(
+    state: str, manifest: dict[str, object] | None = None
+) -> tuple[dict[str, object], bytes, bytes | None]:
+    manifest = manifest or release_manifest()
+    raw = RC.canonical_json_bytes(manifest)
+    assets: list[dict[str, object]] = []
+    asset_bytes: bytes | None = None
+    if state != "draft-empty":
+        assets = [
+            {
+                "id": 123,
+                "name": RC.RELEASE_MANIFEST_NAME,
+                "state": "uploaded",
+                "content_type": "application/json",
+                "size": len(raw),
+                "digest": "sha256:" + hashlib.sha256(raw).hexdigest(),
+            }
+        ]
+        asset_bytes = raw
+    if state == "draft-empty":
+        draft, immutable = True, False
+    elif state == "draft-ready":
+        draft, immutable = True, False
+    elif state == "exact":
+        draft, immutable = False, True
+    else:
+        raise ValueError(f"unsupported fixture release state: {state}")
+    return (
+        {
+            "tag_name": manifest["tag"],
+            "name": "informational title is not artifact identity",
+            "body": "informational notes may change\n",
+            "author": {"login": "github-actions[bot]"},
+            "draft": draft,
+            "prerelease": False,
+            "immutable": immutable,
+            "assets": assets,
+        },
+        raw,
+        asset_bytes,
+    )
+
+
 REQUIRED_CHECKS = (
     "analyze (go, manual)",
     "analyze (javascript-typescript, none)",
@@ -119,6 +176,22 @@ def settings_receipt() -> dict[str, object]:
     return {
         "repository": "owner/site",
         "branch": "main",
+        "actions_enabled": True,
+        "actions_allowed": "all",
+        "actions_sha_pinning": True,
+        "default_workflow_permissions": "read",
+        "can_approve_pull_request_reviews": False,
+        "code_coverage_max_drop": None,
+        "code_coverage_minimum": 80,
+        "code_quality_severity": "errors",
+        "code_scanning_tools": [
+            {
+                "alerts_threshold": "errors",
+                "security_alerts_threshold": "high_or_higher",
+                "tool": "CodeQL",
+            }
+        ],
+        "dismiss_stale_reviews_on_push": False,
         "merge_methods": ["rebase", "squash"],
         "required_status_checks": [
             {"context": context, "integration_id": 15368} for context in REQUIRED_CHECKS
@@ -126,11 +199,20 @@ def settings_receipt() -> dict[str, object]:
         "strict_status_checks": True,
         "require_pull_request": True,
         "require_linear_history": True,
+        "require_code_owner_review": False,
+        "require_last_push_approval": False,
+        "require_signatures": True,
+        "required_approving_review_count": 0,
+        "required_review_thread_resolution": True,
+        "required_reviewers": [],
         "allow_force_pushes": False,
         "allow_deletions": False,
         "restrict_updates": False,
         "bypass_actors": [],
         "immutable_releases": True,
+        "private_vulnerability_reporting": True,
+        "secret_scanning": True,
+        "secret_scanning_push_protection": True,
     }
 
 
@@ -146,11 +228,25 @@ def settings_api() -> dict[str, object]:
             "allow_merge_commit": False,
             "allow_rebase_merge": True,
             "allow_squash_merge": True,
+            "security_and_analysis": {
+                "secret_scanning": {"status": "enabled"},
+                "secret_scanning_push_protection": {"status": "enabled"},
+            },
         },
         "repos/owner/site/immutable-releases": {
             "enabled": True,
             "enforced_by_owner": False,
         },
+        "repos/owner/site/actions/permissions": {
+            "enabled": True,
+            "allowed_actions": "all",
+            "sha_pinning_required": True,
+        },
+        "repos/owner/site/actions/permissions/workflow": {
+            "default_workflow_permissions": "read",
+            "can_approve_pull_request_reviews": False,
+        },
+        "repos/owner/site/private-vulnerability-reporting": {"enabled": True},
         "repos/owner/site/rulesets": [
             {
                 "id": ruleset_id,
@@ -173,12 +269,39 @@ def settings_api() -> dict[str, object]:
             },
             "bypass_actors": [],
             "rules": [
+                {"type": "creation"},
                 {"type": "deletion"},
                 {"type": "non_fast_forward"},
                 {"type": "required_linear_history"},
+                {"type": "required_signatures"},
+                {
+                    "type": "code_scanning",
+                    "parameters": {
+                        "code_scanning_tools": [
+                            {
+                                "tool": "CodeQL",
+                                "security_alerts_threshold": "high_or_higher",
+                                "alerts_threshold": "errors",
+                            }
+                        ]
+                    },
+                },
+                {"type": "code_quality", "parameters": {"severity": "errors"}},
+                {
+                    "type": "code_coverage",
+                    "parameters": {"minimum_coverage": 80, "max_coverage_drop": None},
+                },
                 {
                     "type": "pull_request",
-                    "parameters": {"allowed_merge_methods": ["rebase", "squash"]},
+                    "parameters": {
+                        "allowed_merge_methods": ["rebase", "squash"],
+                        "dismiss_stale_reviews_on_push": False,
+                        "require_code_owner_review": False,
+                        "require_last_push_approval": False,
+                        "required_approving_review_count": 0,
+                        "required_review_thread_resolution": True,
+                        "required_reviewers": [],
+                    },
                 },
                 {
                     "type": "required_status_checks",
@@ -188,7 +311,6 @@ def settings_api() -> dict[str, object]:
                         "strict_required_status_checks_policy": True,
                     },
                 },
-                {"type": "code_scanning", "parameters": {}},
             ],
         },
     }
@@ -260,6 +382,200 @@ class EventTests(unittest.TestCase):
         self.assertEqual({intent.tag for intent in completion_order}, {"v0.1.10", "v0.1.11", "v0.1.12"})
         self.assertEqual(len({intent.source_sha for intent in completion_order}), 3)
         self.assertEqual(RC.ReleaseIntent(shas[0], versions[0]), RC.ReleaseIntent(shas[0], versions[0]))
+
+
+class StrictJsonBoundaryTests(unittest.TestCase):
+    @staticmethod
+    def invoke(arguments: list[str]) -> tuple[int, str]:
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(
+            io.StringIO()
+        ) as denied:
+            status = RC.main(arguments)
+        return status, denied.getvalue()
+
+    def test_recursive_duplicates_and_nonfinite_values_have_exact_reasons(self):
+        for raw, reason in (
+            ('{"outer":{"member":1,"member":2}}', "duplicate JSON member 'member'"),
+            ('{"value":NaN}', "non-finite JSON constant 'NaN' is forbidden"),
+            ('{"value":Infinity}', "non-finite JSON constant 'Infinity' is forbidden"),
+        ):
+            with self.subTest(raw=raw), self.assertRaises(RC.ContractError) as denied:
+                RC.parse_json(raw, "hostile boundary")
+            self.assertEqual(str(denied.exception), reason)
+
+    def test_event_tag_release_registry_and_buildx_boundaries_reject_duplicates(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            cases = (
+                (
+                    "event.json",
+                    '{"repository":{"full_name":"owner/site","full_name":"attacker/site"},"workflow_run":{}}',
+                    ["workflow-run", "--event", "{path}", "--repository", "owner/site"],
+                    "duplicate JSON member 'full_name'",
+                ),
+                (
+                    "tag.json",
+                    '{"ref":"refs/tags/v0.1.10","object":{"type":"tag","type":"commit","sha":"'
+                    + "b" * 40
+                    + '"}}',
+                    ["tag-ref-object", "--ref-json", "{path}", "--tag", "v0.1.10"],
+                    "duplicate JSON member 'type'",
+                ),
+                (
+                    "release.json",
+                    '{"assets":[{"id":1,"id":2}]}',
+                    ["release-asset-id", "--release-json", "{path}"],
+                    "duplicate JSON member 'id'",
+                ),
+                (
+                    "token.json",
+                    '{"token":"one","token":"two"}',
+                    ["registry-token", "--token-json", "{path}"],
+                    "duplicate JSON member 'token'",
+                ),
+                (
+                    "buildx.json",
+                    '{"linux/amd64":{"SLSA":{},"SLSA":{}}}',
+                    ["json-keys", "--json", "{path}"],
+                    "duplicate JSON member 'SLSA'",
+                ),
+            )
+            for filename, raw, arguments, reason in cases:
+                path = root / filename
+                path.write_text(raw, encoding="utf-8")
+                resolved = [str(path) if item == "{path}" else item for item in arguments]
+                status, stderr = self.invoke(resolved)
+                with self.subTest(filename=filename):
+                    self.assertEqual(status, 1)
+                    self.assertEqual(stderr, f"DENY: {reason}\n")
+
+    def test_manifest_settings_and_cosign_boundaries_reject_nested_duplicates(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            manifest = Path(temporary) / RC.RELEASE_MANIFEST_NAME
+            manifest.write_text('{"artifacts":{"image":{"digest":1,"digest":2}}}', encoding="utf-8")
+            with self.assertRaises(RC.ContractError) as denied:
+                RC.read_release_manifest(manifest, require_mode=False)
+            self.assertEqual(str(denied.exception), "duplicate JSON member 'digest'")
+
+        response = subprocess.CompletedProcess(
+            [], 0, stdout='{"security_and_analysis":{"status":1,"status":2}}', stderr=""
+        )
+        with mock.patch.object(RC.subprocess, "run", return_value=response), self.assertRaises(
+            RC.ContractError
+        ) as denied:
+            RC._github_api_get("repos/owner/site")
+        self.assertEqual(str(denied.exception), "duplicate JSON member 'status'")
+
+        outer = '{"payload":"one","payload":"two"}'
+        with self.assertRaises(RC.ContractError) as denied:
+            RC._verified_statements(outer)
+        self.assertEqual(str(denied.exception), "duplicate JSON member 'payload'")
+
+        hostile_payload = base64.b64encode(
+            b'{"predicate":{"buildDefinition":{},"buildDefinition":{}}}'
+        ).decode("ascii")
+        with self.assertRaises(RC.ContractError) as denied:
+            RC._verified_statements(json.dumps({"payload": hostile_payload}))
+        self.assertEqual(str(denied.exception), "duplicate JSON member 'buildDefinition'")
+
+
+class GovernanceReceiptTests(unittest.TestCase):
+    HEAD = "a" * 40
+
+    def test_canonical_adversarial_verdict_syntax_and_head_binding(self):
+        for verdict in ("APPROVE", "REQUEST-CHANGES"):
+            receipt = (
+                f"HEAD: {self.HEAD}\n"
+                f"VERDICT: {verdict}\n"
+                "1. Evidence remains bound to this head.\n"
+                "- Red Team (adversarial reviewer)"
+            )
+            self.assertEqual(
+                RC.validate_review_receipt(
+                    receipt, expected_head=self.HEAD, role="adversarial"
+                ),
+                verdict,
+            )
+        mutants = (
+            f"HEAD: {self.HEAD}\nAPPROVE\n- Red Team (adversarial reviewer)",
+            f"HEAD: {'b' * 40}\nVERDICT: APPROVE\n- Red Team (adversarial reviewer)",
+            f"HEAD: {self.HEAD}\nVERDICT: approve\n- Red Team (adversarial reviewer)",
+            f"HEAD: {self.HEAD}\nVERDICT: APPROVE\nVERDICT: APPROVE\n- Red Team (adversarial reviewer)",
+            f"HEAD: {self.HEAD}\nVERDICT: APPROVE\n- Agent (adversarial reviewer)",
+            f"HEAD: {self.HEAD}\nVERDICT: APPROVE\n- Red Team",
+        )
+        for index, receipt in enumerate(mutants):
+            with self.subTest(index=index), self.assertRaises(RC.ContractError):
+                RC.validate_review_receipt(
+                    receipt, expected_head=self.HEAD, role="adversarial"
+                )
+
+    def test_main_worker_receipt_is_exactly_five_bounded_lines(self):
+        exact = (
+            f"HEAD: {self.HEAD}\n"
+            "ROLE: MAIN-WORKER\n"
+            "VERDICT: PASS\n"
+            f"SCOPE: {RC.MAIN_WORKER_SCOPE}\n"
+            "- Architecture Control (Main Worker)"
+        )
+        self.assertEqual(
+            RC.validate_review_receipt(
+                exact, expected_head=self.HEAD, role="main-worker"
+            ),
+            "PASS",
+        )
+        self.assertEqual(
+            RC.validate_review_receipt(
+                exact.replace("VERDICT: PASS", "VERDICT: BLOCK"),
+                expected_head=self.HEAD,
+                role="main-worker",
+            ),
+            "BLOCK",
+        )
+        mutants = (
+            exact.replace(self.HEAD, "b" * 40, 1),
+            exact.replace("ROLE: MAIN-WORKER", "ROLE: REVIEWER"),
+            exact.replace("VERDICT: PASS", "VERDICT: APPROVE"),
+            exact.replace("architecture,merge-order", "merge-order,architecture"),
+            exact.replace("Architecture Control", "distinct context"),
+            exact + "\nextra",
+            exact.replace("ROLE: MAIN-WORKER\n", "ROLE: MAIN-WORKER\n\n"),
+            exact.replace("Architecture Control", "A" * 65),
+        )
+        for index, receipt in enumerate(mutants):
+            with self.subTest(index=index), self.assertRaises(RC.ContractError):
+                RC.validate_review_receipt(
+                    receipt, expected_head=self.HEAD, role="main-worker"
+                )
+
+    def test_governance_docs_pin_receipts_milestone_parity_and_generic_owner_wording(self):
+        agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+        template = (ROOT / ".github/PULL_REQUEST_TEMPLATE.md").read_text(
+            encoding="utf-8"
+        )
+        for text in (agents, template):
+            for token in (
+                "HEAD: <40-lowercase-hex>",
+                "VERDICT: APPROVE | REQUEST-CHANGES",
+                "ROLE: MAIN-WORKER",
+                "VERDICT: PASS | BLOCK",
+                f"SCOPE: {RC.MAIN_WORKER_SCOPE}",
+                "(Main Worker)",
+            ):
+                self.assertIn(token, text)
+        self.assertIn("Issue milestone: `vX.Y.Z`", template)
+        self.assertIn("PR milestone: `vX.Y.Z`", template)
+        self.assertIn("must equal the issue milestone and next patch", template)
+        self.assertIn("the repository owner alone merges", agents)
+        governance = (ROOT / "docs/release-governance.md").read_text(encoding="utf-8")
+        self.assertIn("The repository owner alone chooses squash or rebase", governance)
+        self.assertIn("the repository owner alone merges", governance)
+
+        actual = {
+            path: (ROOT / path).read_text(encoding="utf-8")
+            for path in ("VERSION", "chart/Chart.yaml", "chart/values.yaml", "CHANGELOG.md")
+        }
+        self.assertEqual(RC.validate_snapshot(actual).tag, "v0.1.10")
 
 
 class MainRunBindingTests(unittest.TestCase):
@@ -337,6 +653,15 @@ class SettingsReceiptTests(unittest.TestCase):
     def require_documented_contract(text: str) -> None:
         for token in (
             "Release-control readiness receipt",
+            '"actions_allowed": "all"',
+            '"actions_enabled": true',
+            '"actions_sha_pinning": true',
+            '"can_approve_pull_request_reviews": false',
+            '"code_coverage_max_drop": null',
+            '"code_coverage_minimum": 80',
+            '"code_quality_severity": "errors"',
+            '"default_workflow_permissions": "read"',
+            '"dismiss_stale_reviews_on_push": false',
             '"immutable_releases": true',
             '"merge_methods": ["rebase", "squash"]',
             '"context": "security", "integration_id": 15368',
@@ -344,12 +669,29 @@ class SettingsReceiptTests(unittest.TestCase):
             '"strict_status_checks": true',
             '"require_pull_request": true',
             '"require_linear_history": true',
+            '"require_code_owner_review": false',
+            '"require_last_push_approval": false',
+            '"require_signatures": true',
+            '"required_approving_review_count": 0',
+            '"required_review_thread_resolution": true',
+            '"required_reviewers": []',
+            '"private_vulnerability_reporting": true',
+            '"secret_scanning": true',
+            '"secret_scanning_push_protection": true',
             '"allow_force_pushes": false',
             '"allow_deletions": false',
             '"restrict_updates": false',
             '"bypass_actors": []',
             "settings-preflight",
             "settings-receipt",
+            "platform-release",
+            "PLATFORM_RELEASE_APP_ID",
+            "PLATFORM_RELEASE_APP_PRIVATE_KEY",
+            "bcd2ba49218906704ab6c1aa796996da409d3eb1",
+            "permission-administration: read",
+            "ordinary `GITHUB_TOKEN` is the sole credential",
+            "mutable aliases",
+            "Only-Owner-Push",
             "must remain Draft",
         ):
             if token not in text:
@@ -362,17 +704,38 @@ class SettingsReceiptTests(unittest.TestCase):
         for key, value in (
             ("repository", "other/site"),
             ("branch", "release"),
+            ("actions_enabled", False),
+            ("actions_allowed", "unknown"),
+            ("actions_allowed", "selected"),
+            ("actions_allowed", "local_only"),
+            ("actions_sha_pinning", False),
+            ("default_workflow_permissions", "write"),
+            ("can_approve_pull_request_reviews", True),
+            ("code_coverage_max_drop", 1),
+            ("code_coverage_minimum", 79),
+            ("code_quality_severity", "warnings"),
+            ("code_scanning_tools", []),
+            ("dismiss_stale_reviews_on_push", True),
             ("merge_methods", ["squash"]),
             ("merge_methods", ["merge", "rebase", "squash"]),
             ("merge_methods", ["rebase", "rebase", "squash"]),
             ("strict_status_checks", False),
             ("require_pull_request", False),
             ("require_linear_history", False),
+            ("require_code_owner_review", True),
+            ("require_last_push_approval", True),
+            ("require_signatures", False),
+            ("required_approving_review_count", 1),
+            ("required_review_thread_resolution", False),
+            ("required_reviewers", [{"present": True}]),
             ("allow_force_pushes", True),
             ("allow_deletions", True),
             ("restrict_updates", True),
             ("bypass_actors", ["present"]),
             ("immutable_releases", False),
+            ("private_vulnerability_reporting", False),
+            ("secret_scanning", False),
+            ("secret_scanning_push_protection", False),
         ):
             changed = copy.deepcopy(exact)
             changed[key] = value
@@ -413,13 +776,16 @@ class SettingsReceiptTests(unittest.TestCase):
         if self_calls != [
             "repos/owner/site",
             "repos/owner/site/immutable-releases",
+            "repos/owner/site/actions/permissions",
+            "repos/owner/site/actions/permissions/workflow",
+            "repos/owner/site/private-vulnerability-reporting",
             "repos/owner/site/rulesets",
             "repos/owner/site/rulesets/42",
         ]:
             raise AssertionError(f"unexpected settings endpoints: {self_calls}")
-        if getter.call_args_list[2].kwargs != {"paginate": True}:
+        if getter.call_args_list[5].kwargs != {"paginate": True}:
             raise AssertionError("ruleset inventory must use exhaustive pagination")
-        if any(call.kwargs for index, call in enumerate(getter.call_args_list) if index != 2):
+        if any(call.kwargs for index, call in enumerate(getter.call_args_list) if index != 5):
             raise AssertionError("only the list endpoint should paginate")
         return receipt
 
@@ -432,7 +798,13 @@ class SettingsReceiptTests(unittest.TestCase):
             ("repos/owner/site", ("allow_merge_commit",), True),
             ("repos/owner/site", ("allow_rebase_merge",), False),
             ("repos/owner/site", ("default_branch",), "release"),
+            ("repos/owner/site", ("security_and_analysis", "secret_scanning", "status"), "disabled"),
+            ("repos/owner/site", ("security_and_analysis", "secret_scanning_push_protection", "status"), "disabled"),
             ("repos/owner/site/immutable-releases", ("enabled",), False),
+            ("repos/owner/site/actions/permissions", ("sha_pinning_required",), False),
+            ("repos/owner/site/actions/permissions/workflow", ("default_workflow_permissions",), "write"),
+            ("repos/owner/site/actions/permissions/workflow", ("can_approve_pull_request_reviews",), True),
+            ("repos/owner/site/private-vulnerability-reporting", ("enabled",), False),
             ("repos/owner/site/rulesets/42", ("enforcement",), "disabled"),
             ("repos/owner/site/rulesets/42", ("conditions", "ref_name", "include"), ["~ALL"]),
             ("repos/owner/site/rulesets/42", ("bypass_actors",), [{"actor_type": "RepositoryRole"}]),
@@ -447,9 +819,14 @@ class SettingsReceiptTests(unittest.TestCase):
         detail = exact["repos/owner/site/rulesets/42"]
         rules = detail["rules"]
         for rule_type in (
+            "creation",
+            "code_coverage",
+            "code_quality",
+            "code_scanning",
             "deletion",
             "non_fast_forward",
             "required_linear_history",
+            "required_signatures",
             "pull_request",
             "required_status_checks",
         ):
@@ -461,10 +838,46 @@ class SettingsReceiptTests(unittest.TestCase):
         changed = copy.deepcopy(exact)
         changed["repos/owner/site/rulesets/42"]["rules"].append({"type": "update"})
         mutations.append(changed)
+        changed = copy.deepcopy(exact)
+        changed["repos/owner/site/rulesets/42"]["rules"].append(
+            {"type": "foreign_rule"}
+        )
+        mutations.append(changed)
+        for rule_type, parameters in (
+            (
+                "code_scanning",
+                {
+                    "code_scanning_tools": [
+                        {
+                            "tool": "CodeQL",
+                            "security_alerts_threshold": "medium_or_higher",
+                            "alerts_threshold": "errors",
+                        }
+                    ]
+                },
+            ),
+            ("code_quality", {"severity": "warnings"}),
+            ("code_coverage", {"minimum_coverage": 79, "max_coverage_drop": None}),
+            ("code_coverage", {"minimum_coverage": 80, "max_coverage_drop": 1}),
+        ):
+            changed = copy.deepcopy(exact)
+            rule = next(
+                item
+                for item in changed["repos/owner/site/rulesets/42"]["rules"]
+                if item["type"] == rule_type
+            )
+            rule["parameters"] = parameters
+            mutations.append(changed)
 
         for field, value in (
             ("allowed_merge_methods", ["merge", "rebase", "squash"]),
             ("allowed_merge_methods", ["squash"]),
+            ("dismiss_stale_reviews_on_push", True),
+            ("require_code_owner_review", True),
+            ("require_last_push_approval", True),
+            ("required_approving_review_count", 1),
+            ("required_review_thread_resolution", False),
+            ("required_reviewers", [{"reviewer": "foreign"}]),
         ):
             changed = copy.deepcopy(exact)
             pull = next(
@@ -474,6 +887,14 @@ class SettingsReceiptTests(unittest.TestCase):
             )
             pull["parameters"][field] = value
             mutations.append(changed)
+        changed = copy.deepcopy(exact)
+        pull = next(
+            rule
+            for rule in changed["repos/owner/site/rulesets/42"]["rules"]
+            if rule["type"] == "pull_request"
+        )
+        pull["parameters"]["foreign"] = False
+        mutations.append(changed)
         for field, value in (
             ("strict_required_status_checks_policy", False),
             ("do_not_enforce_on_create", True),
@@ -486,6 +907,14 @@ class SettingsReceiptTests(unittest.TestCase):
             )
             status["parameters"][field] = value
             mutations.append(changed)
+        changed = copy.deepcopy(exact)
+        status = next(
+            rule
+            for rule in changed["repos/owner/site/rulesets/42"]["rules"]
+            if rule["type"] == "required_status_checks"
+        )
+        status["parameters"]["foreign"] = False
+        mutations.append(changed)
         for replacement in (
             [{"context": context, "integration_id": 15368} for context in REQUIRED_CHECKS[:-1]],
             [
@@ -577,26 +1006,52 @@ class SettingsReceiptTests(unittest.TestCase):
         self.require_documented_contract(runbook)
         tokens = (
             "Release-control readiness receipt",
+            '"actions_allowed": "all"',
+            '"actions_sha_pinning": true',
+            '"default_workflow_permissions": "read"',
             '"immutable_releases": true',
             '"merge_methods": ["rebase", "squash"]',
             '"context": "security", "integration_id": 15368',
             '"strict_status_checks": true',
             '"require_pull_request": true',
             '"require_linear_history": true',
+            '"require_signatures": true',
+            '"required_review_thread_resolution": true',
+            '"required_approving_review_count": 0',
+            '"code_coverage_minimum": 80',
+            '"private_vulnerability_reporting": true',
+            '"secret_scanning": true',
+            '"secret_scanning_push_protection": true',
             '"allow_force_pushes": false',
             '"allow_deletions": false',
             '"restrict_updates": false',
             '"bypass_actors": []',
             "settings-preflight",
             "settings-receipt",
+            "platform-release",
+            "PLATFORM_RELEASE_APP_ID",
+            "PLATFORM_RELEASE_APP_PRIVATE_KEY",
+            "bcd2ba49218906704ab6c1aa796996da409d3eb1",
+            "permission-administration: read",
+            "ordinary `GITHUB_TOKEN` is the sole credential",
+            "mutable aliases",
+            "Only-Owner-Push",
             "must remain Draft",
         )
         for token in tokens:
             with self.subTest(deletion=token), self.assertRaises(ValueError):
-                self.require_documented_contract(runbook.replace(token, "", 1))
+                self.require_documented_contract(runbook.replace(token, ""))
         for old, new in (
             ('"immutable_releases": true', '"immutable_releases": false'),
+            ('"actions_sha_pinning": true', '"actions_sha_pinning": false'),
             ('"strict_status_checks": true', '"strict_status_checks": false'),
+            ('"require_signatures": true', '"require_signatures": false'),
+            ('"required_review_thread_resolution": true', '"required_review_thread_resolution": false'),
+            ('"required_approving_review_count": 0', '"required_approving_review_count": 1'),
+            ('"code_coverage_minimum": 80', '"code_coverage_minimum": 79'),
+            ('"private_vulnerability_reporting": true', '"private_vulnerability_reporting": false'),
+            ('"secret_scanning": true', '"secret_scanning": false'),
+            ('"secret_scanning_push_protection": true', '"secret_scanning_push_protection": false'),
             ('"allow_force_pushes": false', '"allow_force_pushes": true'),
             ('"allow_deletions": false', '"allow_deletions": true'),
             ('"restrict_updates": false', '"restrict_updates": true'),
@@ -729,33 +1184,115 @@ class ImmutableMetadataTests(unittest.TestCase):
                     tagger_date=self.DATE,
                 )
 
-    def test_release_metadata_and_zero_asset_inventory_are_exact(self):
-        exact = {
-            "tag_name": self.TAG,
-            "name": f"lidersea.com {self.TAG}",
-            "body": "exact notes\n",
-            "draft": False,
-            "prerelease": False,
-            "immutable": True,
-            "assets": [],
-        }
-        RC.validate_release_record(exact, tag=self.TAG, title=f"lidersea.com {self.TAG}", body="exact notes")
-        for key, value in (
-            ("tag_name", "v0.1.11"),
-            ("name", "foreign"),
-            ("body", "foreign"),
-            ("body", None),
-            ("draft", True),
-            ("prerelease", True),
-            ("immutable", False),
-            ("immutable", None),
-            ("assets", [{"name": "foreign.bin"}]),
-            ("assets", None),
+    def test_manifest_asset_is_the_exact_immutable_release_identity(self):
+        manifest = release_manifest()
+        exact, raw, asset = release_record("exact", manifest)
+        self.assertEqual(
+            RC.validate_release_record(
+                exact,
+                manifest=manifest,
+                manifest_bytes=raw,
+                asset_bytes=asset,
+            ),
+            "exact",
+        )
+
+        # Human-readable title and notes are deliberately informational. The
+        # sole canonical manifest asset is the release identity.
+        changed_notes = copy.deepcopy(exact)
+        changed_notes["name"] = "different informational title"
+        changed_notes["body"] = "different informational notes\n"
+        self.assertEqual(
+            RC.validate_release_record(
+                changed_notes,
+                manifest=manifest,
+                manifest_bytes=raw,
+                asset_bytes=asset,
+            ),
+            "exact",
+        )
+
+        mutations: list[dict[str, object]] = []
+        for path, value in (
+            (("tag_name",), "v0.1.11"),
+            (("author", "login"), "owner"),
+            (("draft",), True),
+            (("prerelease",), True),
+            (("immutable",), False),
+            (("immutable",), None),
+            (("assets",), []),
+            (("assets",), [*exact["assets"], copy.deepcopy(exact["assets"][0])]),
+            (("assets", 0, "name"), "foreign.json"),
+            (("assets", 0, "state"), "new"),
+            (("assets", 0, "content_type"), "application/octet-stream"),
+            (("assets", 0, "size"), len(raw) + 1),
+            (("assets", 0, "digest"), "sha256:" + "f" * 64),
         ):
             changed = copy.deepcopy(exact)
-            changed[key] = value
-            with self.subTest(key=key, value=value), self.assertRaises(RC.ContractError):
-                RC.validate_release_record(changed, tag=self.TAG, title=f"lidersea.com {self.TAG}", body="exact notes")
+            parent = changed
+            for key in path[:-1]:
+                parent = parent[key]
+            parent[path[-1]] = value
+            mutations.append(changed)
+        for index, changed in enumerate(mutations):
+            with self.subTest(index=index), self.assertRaises(RC.ContractError):
+                RC.validate_release_record(
+                    changed,
+                    manifest=manifest,
+                    manifest_bytes=raw,
+                    asset_bytes=asset,
+                )
+        for wrong_asset in (None, raw + b" ", raw[:-1]):
+            with self.subTest(asset_bytes=wrong_asset), self.assertRaises(RC.ContractError):
+                RC.validate_release_record(
+                    exact,
+                    manifest=manifest,
+                    manifest_bytes=raw,
+                    asset_bytes=wrong_asset,
+                )
+
+    def test_manifest_schema_bytes_and_mode_are_closed_and_deterministic(self):
+        manifest = release_manifest()
+        self.assertEqual(RC.validate_release_manifest(manifest), manifest)
+        canonical = RC.canonical_json_bytes(manifest)
+        self.assertEqual(canonical, RC.canonical_json_bytes(copy.deepcopy(manifest)))
+        mutations: list[dict[str, object]] = []
+        for path, value in (
+            (("repository",), "attacker/site"),
+            (("tag",), "v0.1.11"),
+            (("workflow_identity",), "https://example.invalid/workflow"),
+            (("artifacts", "image", "alias"), "ghcr.io/owner/site:v0.1.11"),
+            (("artifacts", "image", "digest"), "sha256:" + "f" * 64),
+            (("artifacts", "chart", "digest_reference"), "foreign"),
+            (("artifacts", "image", "signature", "required"), False),
+            (("artifacts", "image", "sbom", "platforms"), ["linux/amd64"]),
+        ):
+            changed = copy.deepcopy(manifest)
+            parent = changed
+            for key in path[:-1]:
+                parent = parent[key]
+            parent[path[-1]] = value
+            mutations.append(changed)
+        extra = copy.deepcopy(manifest)
+        extra["foreign"] = True
+        mutations.append(extra)
+        for index, changed in enumerate(mutations):
+            with self.subTest(index=index), self.assertRaises(RC.ContractError):
+                RC.validate_release_manifest(changed)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / RC.RELEASE_MANIFEST_NAME
+            RC.write_release_manifest(path, manifest)
+            parsed, raw = RC.read_release_manifest(
+                path, expected_repository="owner/site", require_mode=os.name != "nt"
+            )
+            self.assertEqual(parsed, manifest)
+            self.assertEqual(raw, canonical)
+            if os.name != "nt":
+                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            path.write_bytes(json.dumps(manifest, indent=2).encode("utf-8"))
+            with self.assertRaises(RC.ContractError):
+                RC.read_release_manifest(path, require_mode=False)
 
 
 class PublicationTransactionTests(unittest.TestCase):
@@ -774,17 +1311,6 @@ class PublicationTransactionTests(unittest.TestCase):
             "tagger_date": self.DATE,
         }
 
-    def release(self) -> dict[str, object]:
-        return {
-            "tag_name": self.TAG,
-            "name": f"lidersea.com {self.TAG}",
-            "body": "exact notes\n",
-            "draft": False,
-            "prerelease": False,
-            "immutable": True,
-            "assets": [],
-        }
-
     def test_absent_create_verify_and_concurrent_retry_need_no_local_tag_ref(self):
         ref, tag = exact_tag_records(self.TAG, self.SOURCE, self.MESSAGE, self.DATE)
         # Both racers can observe absence. The winner creates the exact REST
@@ -794,11 +1320,16 @@ class PublicationTransactionTests(unittest.TestCase):
         self.assertEqual(RC.classify_tag_state(200, ref, tag, **self.tag_expected()), "exact")
         self.assertEqual(RC.classify_tag_state(200, ref, tag, **self.tag_expected()), "exact")
 
-        expected_release = self.release()
+        manifest = release_manifest()
+        expected_release, raw, asset = release_record("exact", manifest)
         for _racer in range(2):
             self.assertEqual(
                 RC.classify_release_state(
-                    404, None, tag=self.TAG, title=f"lidersea.com {self.TAG}", body="exact notes"
+                    404,
+                    None,
+                    manifest=manifest,
+                    manifest_bytes=raw,
+                    asset_bytes=None,
                 ),
                 "absent",
             )
@@ -807,21 +1338,57 @@ class PublicationTransactionTests(unittest.TestCase):
                 RC.classify_release_state(
                     200,
                     expected_release,
-                    tag=self.TAG,
-                    title=f"lidersea.com {self.TAG}",
-                    body="exact notes",
+                    manifest=manifest,
+                    manifest_bytes=raw,
+                    asset_bytes=asset,
                 ),
                 "exact",
             )
 
+    def test_draft_upload_publish_state_machine_is_exact_and_resumable(self):
+        manifest = release_manifest()
+        for expected in ("draft-empty", "draft-ready", "exact"):
+            record, raw, asset = release_record(expected, manifest)
+            self.assertEqual(
+                RC.classify_release_state(
+                    200,
+                    record,
+                    manifest=manifest,
+                    manifest_bytes=raw,
+                    asset_bytes=asset,
+                ),
+                expected,
+            )
+        # A published mutable Release and an "immutable" draft are burned
+        # states; neither can be retried into the required state.
+        for draft, immutable in ((False, False), (True, True)):
+            record, raw, asset = release_record("draft-ready", manifest)
+            record["draft"], record["immutable"] = draft, immutable
+            with self.subTest(draft=draft, immutable=immutable), self.assertRaises(
+                RC.ContractError
+            ):
+                RC.classify_release_state(
+                    200,
+                    record,
+                    manifest=manifest,
+                    manifest_bytes=raw,
+                    asset_bytes=asset,
+                )
+
     def test_missing_records_conflicts_and_non_authoritative_absence_fail_closed(self):
         ref, tag = exact_tag_records(self.TAG, self.SOURCE, self.MESSAGE, self.DATE)
+        manifest = release_manifest()
+        exact_release, raw, asset = release_record("exact", manifest)
         for status in (0, 301, 401, 403, 409, 422, 429, 500, 503):
             with self.subTest(kind="tag-status", status=status), self.assertRaises(RC.ContractError):
                 RC.classify_tag_state(status, None, None, **self.tag_expected())
             with self.subTest(kind="release-status", status=status), self.assertRaises(RC.ContractError):
                 RC.classify_release_state(
-                    status, None, tag=self.TAG, title=f"lidersea.com {self.TAG}", body="exact notes"
+                    status,
+                    None,
+                    manifest=manifest,
+                    manifest_bytes=raw,
+                    asset_bytes=None,
                 )
         for changed_ref, changed_tag in ((None, tag), (ref, None)):
             with self.assertRaises(RC.ContractError):
@@ -831,16 +1398,30 @@ class PublicationTransactionTests(unittest.TestCase):
         with self.assertRaises(RC.ContractError):
             RC.classify_release_state(
                 404,
-                self.release(),
-                tag=self.TAG,
-                title=f"lidersea.com {self.TAG}",
-                body="exact notes",
+                exact_release,
+                manifest=manifest,
+                manifest_bytes=raw,
+                asset_bytes=asset,
+            )
+        with self.assertRaises(RC.ContractError):
+            RC.classify_release_state(
+                200,
+                None,
+                manifest=manifest,
+                manifest_bytes=raw,
+                asset_bytes=None,
             )
 
     def test_exact_shell_state_assertions_kill_deletion_and_inversion_mutants(self):
-        for state in ("absent", "exact"):
+        for state in ("absent", "draft-empty", "draft-ready", "exact"):
             self.assertEqual(RC.require_publication_state(state, state), state)
-        for actual, required in (("absent", "exact"), ("exact", "absent"), ("foreign", "exact")):
+        for actual, required in (
+            ("absent", "exact"),
+            ("draft-empty", "draft-ready"),
+            ("draft-ready", "exact"),
+            ("exact", "absent"),
+            ("foreign", "exact"),
+        ):
             with self.subTest(actual=actual, required=required), self.assertRaises(RC.ContractError):
                 RC.require_publication_state(actual, required)
 
@@ -870,21 +1451,40 @@ class PublicationTransactionTests(unittest.TestCase):
         self.assertEqual(invoke([*tag_args, "--require", "exact"]), 1)
 
         with tempfile.TemporaryDirectory() as temporary:
-            notes = Path(temporary) / "notes.md"
-            notes.write_text("exact notes\n", encoding="utf-8")
+            manifest_path = Path(temporary) / RC.RELEASE_MANIFEST_NAME
+            RC.write_release_manifest(manifest_path, release_manifest())
             release_args = [
                 "release-state",
                 "--http-status",
                 "404",
-                "--tag",
-                self.TAG,
-                "--title",
-                f"lidersea.com {self.TAG}",
-                "--body",
-                str(notes),
+                "--manifest",
+                str(manifest_path),
+                "--repository",
+                "owner/site",
             ]
             self.assertEqual(invoke([*release_args, "--require", "absent"]), 0)
             self.assertEqual(invoke([*release_args, "--require", "exact"]), 1)
+
+            record, _raw, asset = release_record("exact")
+            release_json = Path(temporary) / "release.json"
+            asset_path = Path(temporary) / RC.RELEASE_MANIFEST_NAME
+            release_json.write_text(json.dumps(record), encoding="utf-8")
+            self.assertIsNotNone(asset)
+            exact_args = [
+                "release-state",
+                "--http-status",
+                "200",
+                "--release-json",
+                str(release_json),
+                "--manifest",
+                str(manifest_path),
+                "--asset-content",
+                str(asset_path),
+                "--repository",
+                "owner/site",
+            ]
+            self.assertEqual(invoke([*exact_args, "--require", "exact"]), 0)
+            self.assertEqual(invoke([*exact_args, "--require", "draft-ready"]), 1)
 
 
 class AttestationSetTests(unittest.TestCase):
@@ -1061,6 +1661,97 @@ class GitTransitionTests(unittest.TestCase):
             for first_parent in (False, True):
                 with self.subTest(first_parent=first_parent), self.assertRaises(RC.ContractError):
                     RC.validate_transition(root, base, merge_head, first_parent=first_parent)
+
+    def test_every_intermediate_version_state_rejects_skip_reversion_and_future(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.git(root, "init", "-q")
+            self.git(root, "branch", "-m", "main")
+            base = self.commit(root, "0.1.9")
+
+            self.git(root, "checkout", "-q", "-b", "skip", base)
+            skip = self.commit(root, "0.1.11")
+            for operation in (
+                lambda: RC.validate_transition(root, base, skip, first_parent=False),
+                lambda: RC.discover_transition_window(root, skip),
+            ):
+                with self.assertRaises(RC.ContractError) as denied:
+                    operation()
+                self.assertIn("VERSION skip or future value", str(denied.exception))
+                self.assertIn("0.1.9 -> 0.1.11; expected 0.1.10", str(denied.exception))
+
+            self.git(root, "checkout", "-q", "-b", "reversion", base)
+            self.commit(root, "0.1.10")
+            reverted = self.commit(root, "0.1.9")
+            repaired = self.commit(root, "0.1.10")
+            for head in (reverted, repaired):
+                for operation in (
+                    lambda head=head: RC.validate_transition(
+                        root, base, head, first_parent=False
+                    ),
+                    lambda head=head: RC.discover_transition_window(root, head),
+                ):
+                    with self.assertRaises(RC.ContractError) as denied:
+                        operation()
+                    self.assertIn("VERSION reversion", str(denied.exception))
+                    self.assertIn("0.1.10 -> 0.1.9", str(denied.exception))
+
+            self.git(root, "checkout", "-q", "-b", "transient-future", base)
+            self.commit(root, "0.1.10")
+            future = self.commit(root, "0.1.12")
+            repaired_future = self.commit(root, "0.1.11")
+            for head in (future, repaired_future):
+                for operation in (
+                    lambda head=head: RC.validate_transition(
+                        root, base, head, first_parent=True
+                    ),
+                    lambda head=head: RC.discover_transition_window(root, head),
+                ):
+                    with self.assertRaises(RC.ContractError) as denied:
+                        operation()
+                    self.assertIn("VERSION skip or future value", str(denied.exception))
+                    self.assertIn("0.1.10 -> 0.1.12; expected 0.1.11", str(denied.exception))
+
+            # Two sequential one-patch main releases are valid recovery
+            # history, but can never be collapsed into one PR/push boundary.
+            self.git(root, "checkout", "-q", "-b", "two-releases", base)
+            first = self.commit(root, "0.1.10")
+            second = self.commit(root, "0.1.11")
+            with self.assertRaises(RC.ContractError) as denied:
+                RC.validate_transition(root, base, second, first_parent=True)
+            self.assertIn("exactly 1 one-patch boundary; found 2", str(denied.exception))
+            window = RC.discover_transition_window(root, second)
+            self.assertEqual(window.base_sha, first)
+            self.assertEqual(window.intent, RC.ReleaseIntent(second, RC.Version.parse("0.1.11")))
+
+    def test_recovery_validates_preinitialization_and_version_disappearance(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.git(root, "init", "-q")
+            self.git(root, "branch", "-m", "main")
+            self.metadata_commit(root, "before VERSION existed")
+            initialized = self.commit(root, "0.1.9")
+            released = self.commit(root, "0.1.10")
+            window = RC.discover_transition_window(root, released)
+            self.assertEqual(window.base_sha, initialized)
+            self.assertEqual(window.intent.tag, "v0.1.10")
+
+            (root / "VERSION").unlink()
+            self.git(root, "add", "-u")
+            self.git(
+                root,
+                "-c",
+                "user.name=Release Test",
+                "-c",
+                "user.email=release@example.invalid",
+                "commit",
+                "-m",
+                "remove VERSION",
+            )
+            disappeared = self.git(root, "rev-parse", "HEAD")
+            with self.assertRaises(RC.ContractError) as denied:
+                RC.discover_transition_window(root, disappeared)
+            self.assertIn("VERSION disappeared after initialization", str(denied.exception))
 
 
 class ExistingImageShellPathTests(unittest.TestCase):
@@ -1242,7 +1933,341 @@ cosign() {
                 self.assertIn("existing image state: burned", killed.stdout)
 
 
+class PublicationShellTransactionTests(unittest.TestCase):
+    TAG = "v0.1.10"
+    SOURCE = "a" * 40
+    DATE = "2026-08-13T15:21:32Z"
+
+    @staticmethod
+    def workflow_run_block(path: Path, step_name: str) -> str:
+        lines = path.read_text(encoding="utf-8").splitlines()
+        marker = f"      - name: {step_name}"
+        try:
+            start = lines.index(marker)
+            run = lines.index("        run: |", start)
+        except ValueError as exc:
+            raise AssertionError(f"workflow step is missing: {step_name}") from exc
+        body: list[str] = []
+        for line in lines[run + 1 :]:
+            if line.startswith("      - name:"):
+                break
+            if line.startswith("          "):
+                body.append(line[10:])
+            elif not line:
+                body.append("")
+            else:
+                break
+        if not body:
+            raise AssertionError(f"workflow step has no executable run block: {step_name}")
+        return "\n".join(body) + "\n"
+
+    @staticmethod
+    def run_bash(
+        prelude: str, block: str, environment: dict[str, str]
+    ) -> subprocess.CompletedProcess[str]:
+        merged = os.environ.copy()
+        merged.update(environment)
+        return subprocess.run(
+            [ExistingImageShellPathTests.bash_executable(), "-c", prelude + "\n" + block],
+            cwd=ROOT,
+            env=merged,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            timeout=30,
+        )
+
+    def run_tag_transaction(self, mode: str) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+        block = self.workflow_run_block(
+            ROOT / ".github/workflows/release-after-main.yml",
+            "Create or verify the exact immutable annotated tag",
+        )
+        with tempfile.TemporaryDirectory(dir=ROOT, prefix=".tag-transaction-") as temporary:
+            runner = Path(temporary)
+            relative = runner.relative_to(ROOT).as_posix()
+            ref, tag = exact_tag_records(self.TAG, self.SOURCE, f"Release {self.TAG} from {self.SOURCE}", self.DATE)
+            foreign = copy.deepcopy(tag)
+            foreign["object"]["sha"] = "c" * 40
+            (runner / "ref.json").write_text(json.dumps(ref), encoding="utf-8")
+            (runner / "tag.json").write_text(json.dumps(tag), encoding="utf-8")
+            (runner / "foreign-tag.json").write_text(json.dumps(foreign), encoding="utf-8")
+            initial = {
+                "exact": "exact",
+                "create": "absent",
+                "race": "absent",
+                "conflict": "foreign",
+                "created-foreign": "absent",
+            }[mode]
+            (runner / "state").write_text(initial + "\n", encoding="utf-8")
+            calls = runner / "calls"
+            calls.write_text("", encoding="utf-8")
+            prelude = r'''
+python3() { "${TEST_PYTHON}" "$@"; }
+git() {
+  if [ "$1" = show ]; then printf '%s\n' "${TAGGER_DATE}"; return 0; fi
+  return 2
+}
+sleep() { :; }
+curl() {
+  local output='' url=''
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --output) output="$2"; shift 2 ;;
+      --write-out|--header|--proto) shift 2 ;;
+      --silent|--show-error|--location) shift ;;
+      *) url="$1"; shift ;;
+    esac
+  done
+  local state
+  state="$(tr -d '\r\n' < "${MOCK_STATE}")"
+  if [[ "${url}" == */git/ref/tags/* ]]; then
+    if [ "${state}" = absent ]; then printf '{}\n' > "${output}"; printf '404'; return 0; fi
+    cp "${MOCK_REF}" "${output}"; printf '200'; return 0
+  fi
+  if [[ "${url}" == */git/tags/* ]]; then
+    if [ "${state}" = foreign ]; then cp "${MOCK_FOREIGN_TAG}" "${output}"; else cp "${MOCK_TAG}" "${output}"; fi
+    printf '200'; return 0
+  fi
+  return 2
+}
+gh() {
+  if [[ "$*" == *'/git/tags'* ]]; then
+    printf 'tags\n' >> "${MOCK_CALLS}"
+    if [ "${MOCK_MODE}" = created-foreign ]; then cat "${MOCK_FOREIGN_TAG}"; else cat "${MOCK_TAG}"; fi
+    return 0
+  fi
+  if [[ "$*" == *'/git/refs'* ]]; then
+    printf 'refs\n' >> "${MOCK_CALLS}"
+    if [ "${MOCK_MODE}" = race ]; then printf 'exact\n' > "${MOCK_STATE}"; return 1; fi
+    printf 'exact\n' > "${MOCK_STATE}"
+    return 0
+  fi
+  return 2
+}
+'''
+            completed = self.run_bash(
+                prelude,
+                block,
+                {
+                    "TEST_PYTHON": ExistingImageShellPathTests.bash_path(sys.executable),
+                    "RUNNER_TEMP": relative,
+                    "GITHUB_API_URL": "https://api.github.test",
+                    "GITHUB_REPOSITORY": "owner/site",
+                    "GH_TOKEN": "mutation-token",
+                    "SOURCE_SHA": self.SOURCE,
+                    "TAG": self.TAG,
+                    "TAGGER_DATE": self.DATE,
+                    "MOCK_MODE": mode,
+                    "MOCK_STATE": f"{relative}/state",
+                    "MOCK_CALLS": f"{relative}/calls",
+                    "MOCK_REF": f"{relative}/ref.json",
+                    "MOCK_TAG": f"{relative}/tag.json",
+                    "MOCK_FOREIGN_TAG": f"{relative}/foreign-tag.json",
+                },
+            )
+            return completed, calls.read_text(encoding="utf-8").splitlines()
+
+    def test_real_tag_verify_create_race_and_conflict_paths(self):
+        existing, calls = self.run_tag_transaction("exact")
+        self.assertEqual(existing.returncode, 0, existing.stdout + existing.stderr)
+        self.assertIn(f"verified existing {self.TAG} at {self.SOURCE}", existing.stdout)
+        self.assertEqual(calls, [])
+
+        created, calls = self.run_tag_transaction("create")
+        self.assertEqual(created.returncode, 0, created.stdout + created.stderr)
+        self.assertEqual(calls, ["tags", "refs"])
+
+        raced, calls = self.run_tag_transaction("race")
+        self.assertEqual(raced.returncode, 0, raced.stdout + raced.stderr)
+        self.assertEqual(calls, ["tags", "refs"])
+
+        conflict, calls = self.run_tag_transaction("conflict")
+        self.assertNotEqual(conflict.returncode, 0)
+        self.assertEqual(calls, [])
+        self.assertIn(
+            "DENY: annotated tag target is not the exact source commit", conflict.stderr
+        )
+
+        created_foreign, calls = self.run_tag_transaction("created-foreign")
+        self.assertNotEqual(created_foreign.returncode, 0)
+        self.assertEqual(calls, ["tags"])
+        self.assertIn(
+            "DENY: annotated tag target is not the exact source commit",
+            created_foreign.stderr,
+        )
+
+    def run_release_transaction(
+        self, mode: str, block: str | None = None
+    ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+        block = block or self.workflow_run_block(
+            ROOT / ".github/workflows/release-publisher.yml",
+            "Create the draft, upload the manifest, and publish immutably",
+        )
+        block = block.replace("${{ steps.release.outputs.tag }}", self.TAG)
+        with tempfile.TemporaryDirectory(dir=ROOT, prefix=".release-transaction-") as temporary:
+            runner = Path(temporary)
+            relative = runner.relative_to(ROOT).as_posix()
+            manifest = release_manifest()
+            manifest_path = runner / RC.RELEASE_MANIFEST_NAME
+            RC.write_release_manifest(manifest_path, manifest)
+            for state in ("draft-empty", "draft-ready", "exact"):
+                record, _raw, _asset = release_record(state, manifest)
+                (runner / f"{state}.json").write_text(json.dumps(record), encoding="utf-8")
+            hostile, _raw, _asset = release_record("exact", manifest)
+            hostile["assets"].append(copy.deepcopy(hostile["assets"][0]))
+            (runner / "foreign.json").write_text(json.dumps(hostile), encoding="utf-8")
+            initial = {
+                "exact": "exact",
+                "create": "absent",
+                "create-race": "absent",
+                "stuck-create": "absent",
+                "upload-race": "draft-empty",
+                "edit-race": "draft-ready",
+                "foreign": "foreign",
+            }[mode]
+            (runner / "state").write_text(initial + "\n", encoding="utf-8")
+            calls = runner / "calls"
+            calls.write_text("", encoding="utf-8")
+            (runner / "release-notes.md").write_text("informational notes\n", encoding="utf-8")
+            prelude = r'''
+python3() { "${TEST_PYTHON}" "$@"; }
+sleep() { :; }
+curl() {
+  local output='' url=''
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --output) output="$2"; shift 2 ;;
+      --write-out|--header|--proto) shift 2 ;;
+      --silent|--show-error|--location|--fail-with-body) shift ;;
+      *) url="$1"; shift ;;
+    esac
+  done
+  if [[ "${url}" == */releases/assets/* ]]; then
+    cp "${MOCK_MANIFEST}" "${output}"
+    return 0
+  fi
+  local state
+  state="$(tr -d '\r\n' < "${MOCK_STATE}")"
+  if [ "${state}" = absent ]; then printf '{}\n' > "${output}"; printf '404'; return 0; fi
+  cp "${MOCK_FIXTURES}/${state}.json" "${output}"
+  printf '200'
+}
+gh() {
+  if [ "$1" != release ]; then return 2; fi
+  local operation="$2"
+  printf '%s\n' "${operation}" >> "${MOCK_CALLS}"
+  case "${operation}" in
+    create)
+      if [ "${MOCK_MODE}" = stuck-create ]; then return 1; fi
+      if [ "${MOCK_MODE}" = create-race ]; then printf 'exact\n' > "${MOCK_STATE}"; return 1; fi
+      printf 'draft-empty\n' > "${MOCK_STATE}"; return 0 ;;
+    upload)
+      if [ "${MOCK_MODE}" = upload-race ]; then printf 'exact\n' > "${MOCK_STATE}"; return 1; fi
+      printf 'draft-ready\n' > "${MOCK_STATE}"; return 0 ;;
+    edit)
+      if [ "${MOCK_MODE}" = edit-race ]; then printf 'exact\n' > "${MOCK_STATE}"; return 1; fi
+      printf 'exact\n' > "${MOCK_STATE}"; return 0 ;;
+    *) return 2 ;;
+  esac
+}
+'''
+            completed = self.run_bash(
+                prelude,
+                block,
+                {
+                    "TEST_PYTHON": ExistingImageShellPathTests.bash_path(sys.executable),
+                    "RUNNER_TEMP": relative,
+                    "GITHUB_API_URL": "https://api.github.test",
+                    "GITHUB_REPOSITORY": "owner/site",
+                    "GH_TOKEN": "mutation-token",
+                    "MOCK_MODE": mode,
+                    "MOCK_STATE": f"{relative}/state",
+                    "MOCK_CALLS": f"{relative}/calls",
+                    "MOCK_FIXTURES": relative,
+                    "MOCK_MANIFEST": f"{relative}/{RC.RELEASE_MANIFEST_NAME}",
+                },
+            )
+            return completed, calls.read_text(encoding="utf-8").splitlines()
+
+    def test_real_release_create_upload_publish_and_retry_paths(self):
+        exact, calls = self.run_release_transaction("exact")
+        self.assertEqual(exact.returncode, 0, exact.stdout + exact.stderr)
+        self.assertEqual(calls, [])
+
+        created, calls = self.run_release_transaction("create")
+        self.assertEqual(created.returncode, 0, created.stdout + created.stderr)
+        self.assertEqual(calls, ["create", "upload", "edit"])
+
+        for mode, expected_call in (
+            ("create-race", "create"),
+            ("upload-race", "upload"),
+            ("edit-race", "edit"),
+        ):
+            raced, calls = self.run_release_transaction(mode)
+            with self.subTest(mode=mode):
+                self.assertEqual(raced.returncode, 0, raced.stdout + raced.stderr)
+                self.assertEqual(calls, [expected_call])
+                self.assertIn("checking for an exact concurrent winner", raced.stderr)
+
+        stuck, calls = self.run_release_transaction("stuck-create")
+        self.assertNotEqual(stuck.returncode, 0)
+        self.assertEqual(calls, ["create"])
+        self.assertIn(
+            "DENY: draft create did not reach a resumable or exact state", stuck.stderr
+        )
+
+        foreign, calls = self.run_release_transaction("foreign")
+        self.assertNotEqual(foreign.returncode, 0)
+        self.assertEqual(calls, [])
+        self.assertIn(
+            "DENY: GitHub Release must contain exactly one manifest asset", foreign.stderr
+        )
+
+    def test_terminal_exact_state_assertion_kills_inversion_mutant(self):
+        block = self.workflow_run_block(
+            ROOT / ".github/workflows/release-publisher.yml",
+            "Create the draft, upload the manifest, and publish immutably",
+        )
+        guard = 'if [ "${state}" != exact ]; then'
+        self.assertIn(guard, block)
+        mutant = block.replace(guard, 'if [ "${state}" = exact ]; then', 1)
+        killed, _calls = self.run_release_transaction("create", mutant)
+        self.assertNotEqual(killed.returncode, 0, killed.stdout + killed.stderr)
+        self.assertIn(
+            "DENY: GitHub Release did not become authoritative immutable exact state",
+            killed.stderr,
+        )
+
+
 class WorkflowStructureTests(unittest.TestCase):
+    PINNED_ACTION_SHA = "bcd2ba49218906704ab6c1aa796996da409d3eb1"
+
+    @staticmethod
+    def job(workflow: str, name: str, following: str | None = None) -> str:
+        marker = f"\n  {name}:\n"
+        if marker not in workflow:
+            raise ValueError(f"workflow job is missing: {name}")
+        segment = workflow.split(marker, 1)[1]
+        if following is not None:
+            next_marker = f"\n  {following}:\n"
+            if next_marker not in segment:
+                raise ValueError(f"workflow job ordering is missing: {name} -> {following}")
+            segment = segment.split(next_marker, 1)[0]
+        return segment
+
+    @staticmethod
+    def workflow_jobs(workflow: str) -> dict[str, str]:
+        jobs = workflow.split("\njobs:\n", 1)[1]
+        matches = list(re.finditer(r"(?m)^  ([A-Za-z0-9_-]+):\s*$", jobs))
+        return {
+            match.group(1): jobs[match.end() : matches[index + 1].start()]
+            if index + 1 < len(matches)
+            else jobs[match.end() :]
+            for index, match in enumerate(matches)
+        }
+
     @staticmethod
     def require_tag_partition(publisher: str) -> None:
         image = publisher.split("id: image_state", 1)[1].split("id: chart_state", 1)[0]
@@ -1260,6 +2285,7 @@ class WorkflowStructureTests(unittest.TestCase):
             "fetch-depth: 0",
             "release-window",
             "tag-state",
+            "tag-created-object",
             "classify_tag exact >/dev/null",
             "classify_tag absent >/dev/null",
             'tagger[name]=${tagger_name}',
@@ -1273,12 +2299,19 @@ class WorkflowStructureTests(unittest.TestCase):
             "cosign attest --yes --statement",
             "cosign verify-attestation --type slsaprovenance1 --output json",
             "release-state",
-            "classify_release exact >/dev/null",
-            "classify_release absent >/dev/null",
+            "release-manifest",
+            "manifest-record",
+            "release-asset-id",
+            "gh release create \"${tag}\" --verify-tag --draft",
+            "gh release upload \"${tag}\" \"${manifest}\"",
+            "gh release edit \"${tag}\" --draft=false",
+            "draft-empty",
+            "draft-ready",
+            "observe_release | grep -Fx exact",
             "/releases/tags/${tag}",
             "X-GitHub-Api-Version: 2026-03-10",
             "for attempt in 1 2 3 4 5",
-            'test "${race_verified}" = true',
+            "Terminally rebind the REST tag ref and annotated object",
         ):
             if required not in publisher:
                 raise ValueError(f"publisher lost exact release wiring: {required}")
@@ -1291,20 +2324,29 @@ class WorkflowStructureTests(unittest.TestCase):
                 raise ValueError(f"publisher must use {repeated} for both existing and new images")
         if orchestrator.count("classify_tag exact >/dev/null") < 3:
             raise ValueError("orchestrator must verify exact tag state before reuse, after a race, and after create")
-        if publisher.count("classify_release exact >/dev/null") < 3:
-            raise ValueError("publisher must verify exact Release state before reuse, after a race, and after create")
+        if publisher.count("state=\"$(observe_release)\"") < 4:
+            raise ValueError("publisher must re-observe Release state after each resumable transaction edge")
         if publisher.count("X-GitHub-Api-Version: 2026-03-10") < 2:
             raise ValueError("publisher must version both main-run and Release REST reads")
-        for forbidden in ("cosign download attestation", 'git rev-list -n 1 "${tag}"'):
+        terminal_marker = "\n      - name: Terminally rebind the REST tag ref and annotated object\n"
+        terminal = publisher.split(terminal_marker, 1)[1]
+        if "\n      - name:" in terminal or "\n        if:" in terminal:
+            raise ValueError("terminal REST tag rebind must be unconditional and literally last")
+        for required in ("tag-ref-object", "tag-record", "${SOURCE_SHA}", "/git/tags/${tag_object}"):
+            if required not in terminal:
+                raise ValueError(f"terminal REST tag rebind lost: {required}")
+        for forbidden in (
+            "cosign download attestation",
+            'git rev-list -n 1 "${tag}"',
+            "--clobber",
+        ):
             if forbidden in publisher:
                 raise ValueError(f"publisher contains unauthenticated or local-ref verifier: {forbidden}")
 
     @staticmethod
     def require_successful_main_privilege_boundary(orchestrator: str, publisher: str) -> None:
-        if '\n  authorize:\n' not in publisher or '\n  publish:\n' not in publisher:
-            raise ValueError("publisher must separate read-only authorization from privileged publication")
-        authorize = publisher.split('\n  authorize:\n', 1)[1].split('\n  publish:\n', 1)[0]
-        publish = publisher.split('\n  publish:\n', 1)[1]
+        authorize = WorkflowStructureTests.job(publisher, "authorize", "immutable_settings")
+        publish = WorkflowStructureTests.job(publisher, "publish")
         for required in (
             "actions: read",
             "contents: read",
@@ -1325,8 +2367,8 @@ class WorkflowStructureTests(unittest.TestCase):
             if forbidden in authorize:
                 raise ValueError(f"authorization job gained privilege: {forbidden}")
         for required in (
-            "needs: authorize",
-            "if: needs.authorize.result == 'success'",
+            "needs: [authorize, immutable_settings]",
+            "needs.immutable_settings.result == 'success'",
             "ref: ${{ needs.authorize.outputs.source_sha }}",
             "fetch-depth: 0",
             "persist-credentials: false",
@@ -1352,12 +2394,120 @@ class WorkflowStructureTests(unittest.TestCase):
             if forbidden in publisher:
                 raise ValueError(f"publisher retained tag-selected or event-SHA authority: {forbidden}")
 
+    @classmethod
+    def require_settings_token_isolation(cls, orchestrator: str, publisher: str) -> None:
+        pin = f"actions/create-github-app-token@{cls.PINNED_ACTION_SHA} # v3.2.0"
+        for label, workflow, mutation_name, mutation_following in (
+            ("orchestrator", orchestrator, "release", None),
+            ("publisher", publisher, "publish", None),
+        ):
+            settings = cls.job(
+                workflow,
+                "immutable_settings",
+                "release" if label == "orchestrator" else "publish",
+            )
+            mutation = cls.job(workflow, mutation_name, mutation_following)
+            for required in (
+                "environment: platform-release",
+                pin,
+                "app-id: ${{ vars.PLATFORM_RELEASE_APP_ID }}",
+                "private-key: ${{ secrets.PLATFORM_RELEASE_APP_PRIVATE_KEY }}",
+                "owner: ${{ github.repository_owner }}",
+                "repositories: ${{ github.event.repository.name }}",
+                "permission-administration: read",
+                "skip-token-revoke: false",
+                "IMMUTABLE_SETTINGS_TOKEN: ${{ steps.immutable_settings.outputs.token }}",
+                'GH_TOKEN="${IMMUTABLE_SETTINGS_TOKEN}"',
+                "settings-preflight",
+            ):
+                if required not in settings:
+                    raise ValueError(f"{label} settings token isolation lost: {required}")
+            if "\n    outputs:" in settings:
+                raise ValueError(f"{label} settings job must expose no token-capable output")
+            for forbidden in (
+                "contents: write",
+                "packages: write",
+                "actions: write",
+                "id-token: write",
+                "secrets.GITHUB_TOKEN",
+            ):
+                if forbidden in settings:
+                    raise ValueError(f"{label} settings job gained mutation authority: {forbidden}")
+            for forbidden in (
+                "IMMUTABLE_SETTINGS_TOKEN",
+                "PLATFORM_RELEASE_APP_ID",
+                "PLATFORM_RELEASE_APP_PRIVATE_KEY",
+                "steps.immutable_settings.outputs.token",
+                "create-github-app-token",
+            ):
+                if forbidden in mutation:
+                    raise ValueError(f"{label} mutation job gained settings token: {forbidden}")
+            if "secrets.GITHUB_TOKEN" not in mutation:
+                raise ValueError(f"{label} mutation job lost ordinary GITHUB_TOKEN authority")
+        orchestrator_release = cls.job(orchestrator, "release")
+        publisher_settings = cls.job(publisher, "immutable_settings", "publish")
+        publisher_publish = cls.job(publisher, "publish")
+        if "needs: immutable_settings" not in orchestrator_release:
+            raise ValueError("tag mutation must depend on the immutable-settings recheck")
+        if "needs: authorize" not in publisher_settings:
+            raise ValueError("settings recheck must follow successful-main authorization")
+        if "needs: [authorize, immutable_settings]" not in publisher_publish:
+            raise ValueError("registry/signing/Release mutation must depend on settings recheck")
+
+    @staticmethod
+    def require_integrity_audit(audit: str) -> None:
+        for required in (
+            "schedule:",
+            "workflow_dispatch:",
+            "timeout-minutes: 45",
+            "cancel-in-progress: false",
+            "release-state",
+            "--require exact",
+            "release-manifest.json",
+            "tag-record",
+            "Audit mutable registry aliases against immutable manifest digests",
+            'test "${observed}" = "${expected}"',
+            "attestation-set",
+            "json-keys",
+            "audit-sbom.json",
+            "CHART_DIGEST",
+            "Rescan the immutable image digest at HIGH and CRITICAL",
+            "trivy image --scanners vuln --severity HIGH,CRITICAL --exit-code 1",
+            '"${IMAGE_ALIAS%:*}@${IMAGE_DIGEST}"',
+        ):
+            if required not in audit:
+                raise ValueError(f"scheduled release-integrity audit lost: {required}")
+        if audit.count("cosign verify --certificate-identity") < 2:
+            raise ValueError("scheduled audit must verify both image and chart signatures")
+        for forbidden in (
+            "contents: write",
+            "packages: write",
+            "id-token: write",
+            "cosign sign",
+            "cosign attest",
+            "gh release create",
+            "gh release edit",
+            "helm push",
+            "docker buildx build",
+        ):
+            if forbidden in audit:
+                raise ValueError(f"scheduled release-integrity audit gained mutation: {forbidden}")
+
     def test_no_distinct_main_sha_can_be_canceled_or_share_release_identity(self):
         gate = (ROOT / ".github/workflows/pr-gate.yml").read_text(encoding="utf-8")
+        codeql = (ROOT / ".github/workflows/codeql.yml").read_text(encoding="utf-8")
         orchestrator = (ROOT / ".github/workflows/release-after-main.yml").read_text(encoding="utf-8")
         publisher = (ROOT / ".github/workflows/release-publisher.yml").read_text(encoding="utf-8")
-        self.assertIn("github.event.pull_request.number || github.run_id", gate)
-        self.assertNotIn("queue:", gate + orchestrator + publisher)
+        audit = (ROOT / ".github/workflows/release-integrity-audit.yml").read_text(encoding="utf-8")
+        for workflow in (gate, codeql):
+            self.assertIn("github.event.pull_request.number || github.sha", workflow)
+            self.assertIn("cancel-in-progress: ${{ github.event_name == 'pull_request' }}", workflow)
+        self.assertIn("release-after-main-${{ github.event.workflow_run.head_sha }}", orchestrator)
+        self.assertIn("release-${{ inputs.source_sha }}", publisher)
+        self.assertIn("release-integrity-audit-${{ github.sha }}", audit)
+        for workflow in (orchestrator, publisher, audit):
+            self.assertIn("cancel-in-progress: false", workflow)
+        self.assertNotIn("queue:", gate + codeql + orchestrator + publisher + audit)
         self.assertIn("workflow_run:", orchestrator)
         self.assertIn("github.event.workflow_run.head_sha", orchestrator)
         self.assertIn("actions: write", orchestrator)
@@ -1365,6 +2515,7 @@ class WorkflowStructureTests(unittest.TestCase):
         self.assertIn("source_sha:", publisher)
         self.assertNotRegex(publisher, r"(?ms)^\s+push:\s*\n\s+tags:")
         self.require_successful_main_privilege_boundary(orchestrator, publisher)
+        self.require_settings_token_isolation(orchestrator, publisher)
         self.assertGreaterEqual(publisher.count("registry-state --http-status"), 2)
         self.assertGreaterEqual(publisher.count("--data-urlencode \"scope=repository:"), 2)
         self.assertGreaterEqual(publisher.count("docker-content-digest:"), 2)
@@ -1393,13 +2544,13 @@ class WorkflowStructureTests(unittest.TestCase):
             ("publisher", '--repository "${GITHUB_REPOSITORY}"'),
             ("publisher", '--source-sha "${SOURCE_SHA}"'),
             ("publisher", 'test "${authorized_sha}" = "${SOURCE_SHA}"'),
-            ("publisher", "needs: authorize"),
-            ("publisher", "if: needs.authorize.result == 'success'"),
+            ("publisher", "needs: [authorize, immutable_settings]"),
+            ("publisher", "needs.immutable_settings.result == 'success'"),
             ("publisher", "ref: ${{ needs.authorize.outputs.source_sha }}"),
             ("publisher", 'workflow-ref "${GITHUB_WORKFLOW_REF}"'),
         ):
-            changed_orchestrator = orchestrator.replace(token, "", 1) if owner == "orchestrator" else orchestrator
-            changed_publisher = publisher.replace(token, "", 1) if owner == "publisher" else publisher
+            changed_orchestrator = orchestrator.replace(token, "") if owner == "orchestrator" else orchestrator
+            changed_publisher = publisher.replace(token, "") if owner == "publisher" else publisher
             with self.subTest(main_run_mutation=token), self.assertRaises(ValueError):
                 self.require_successful_main_privilege_boundary(changed_orchestrator, changed_publisher)
         with self.assertRaises(ValueError):
@@ -1411,6 +2562,7 @@ class WorkflowStructureTests(unittest.TestCase):
             ("orchestrator", "fetch-depth: 0"),
             ("orchestrator", "release-window"),
             ("orchestrator", "tag-state"),
+            ("orchestrator", "tag-created-object"),
             ("orchestrator", "classify_tag exact >/dev/null"),
             ("orchestrator", "classify_tag absent >/dev/null"),
             ("orchestrator", 'tagger[name]=${tagger_name}'),
@@ -1420,20 +2572,28 @@ class WorkflowStructureTests(unittest.TestCase):
             ("publisher", "cosign attest --yes --statement"),
             ("publisher", "cosign verify-attestation --type slsaprovenance1 --output json"),
             ("publisher", "release-state"),
-            ("publisher", "classify_release exact >/dev/null"),
-            ("publisher", "classify_release absent >/dev/null"),
+            ("publisher", "release-manifest"),
+            ("publisher", "manifest-record"),
+            ("publisher", "release-asset-id"),
+            ("publisher", "gh release upload \"${tag}\" \"${manifest}\""),
+            ("publisher", "gh release edit \"${tag}\" --draft=false"),
+            ("publisher", "observe_release | grep -Fx exact"),
             ("publisher", "/releases/tags/${tag}"),
             ("publisher", "X-GitHub-Api-Version: 2026-03-10"),
             ("publisher", "for attempt in 1 2 3 4 5"),
-            ("publisher", 'test "${race_verified}" = true'),
+            ("publisher", "Terminally rebind the REST tag ref and annotated object"),
             ("publisher", "attestation-statement"),
             ("publisher", "attestation-set"),
         ):
-            changed_orchestrator = orchestrator.replace(token, "", 1) if owner == "orchestrator" else orchestrator
-            changed_publisher = publisher.replace(token, "", 1) if owner == "publisher" else publisher
+            changed_orchestrator = orchestrator.replace(token, "") if owner == "orchestrator" else orchestrator
+            changed_publisher = publisher.replace(token, "") if owner == "publisher" else publisher
             with self.subTest(wiring_mutation=token), self.assertRaises(ValueError):
                 self.require_exact_release_wiring(changed_orchestrator, changed_publisher)
-        for forbidden in ("cosign download attestation", 'git rev-list -n 1 "${tag}"'):
+        for forbidden in (
+            "cosign download attestation",
+            'git rev-list -n 1 "${tag}"',
+            "--clobber",
+        ):
             with self.subTest(forbidden_mutation=forbidden), self.assertRaises(ValueError):
                 self.require_exact_release_wiring(orchestrator, publisher + forbidden)
         template = (ROOT / ".github/PULL_REQUEST_TEMPLATE.md").read_text(encoding="utf-8")
@@ -1444,9 +2604,84 @@ class WorkflowStructureTests(unittest.TestCase):
             "Next patch release",
             "Successful-main run binding and manual/unmerged dispatch denial",
             "requires-review",
-            "architecture sanity review",
+            "ROLE: MAIN-WORKER",
         ):
             self.assertIn(required, template)
+
+    def test_settings_token_boundary_mutants_are_killed(self):
+        orchestrator = (ROOT / ".github/workflows/release-after-main.yml").read_text(encoding="utf-8")
+        publisher = (ROOT / ".github/workflows/release-publisher.yml").read_text(encoding="utf-8")
+        self.require_settings_token_isolation(orchestrator, publisher)
+        for owner, token in (
+            ("orchestrator", "environment: platform-release"),
+            (
+                "orchestrator",
+                f"actions/create-github-app-token@{self.PINNED_ACTION_SHA} # v3.2.0",
+            ),
+            ("orchestrator", "permission-administration: read"),
+            ("orchestrator", "skip-token-revoke: false"),
+            ("orchestrator", 'GH_TOKEN="${IMMUTABLE_SETTINGS_TOKEN}"'),
+            ("publisher", "app-id: ${{ vars.PLATFORM_RELEASE_APP_ID }}"),
+            ("publisher", "private-key: ${{ secrets.PLATFORM_RELEASE_APP_PRIVATE_KEY }}"),
+            ("publisher", "repositories: ${{ github.event.repository.name }}"),
+            ("publisher", "settings-preflight"),
+            ("publisher", "needs: [authorize, immutable_settings]"),
+        ):
+            changed_orchestrator = orchestrator.replace(token, "") if owner == "orchestrator" else orchestrator
+            changed_publisher = publisher.replace(token, "") if owner == "publisher" else publisher
+            with self.subTest(token=token), self.assertRaises(ValueError):
+                self.require_settings_token_isolation(changed_orchestrator, changed_publisher)
+        for workflow_mutant in (
+            orchestrator.replace(
+                "GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}",
+                "GH_TOKEN: ${{ steps.immutable_settings.outputs.token }}",
+                1,
+            ),
+            orchestrator.replace(
+                "permissions:\n      actions: write",
+                "outputs:\n      token: ${{ steps.immutable_settings.outputs.token }}\n    permissions:\n      actions: write",
+                1,
+            ),
+        ):
+            with self.assertRaises(ValueError):
+                self.require_settings_token_isolation(workflow_mutant, publisher)
+
+    def test_every_job_has_a_positive_timeout_and_every_action_is_sha_pinned(self):
+        for path in sorted((ROOT / ".github/workflows").glob("*.yml")):
+            workflow = path.read_text(encoding="utf-8")
+            jobs = self.workflow_jobs(workflow)
+            self.assertTrue(jobs, path.name)
+            for name, job in jobs.items():
+                with self.subTest(path=path.name, job=name):
+                    self.assertRegex(job, r"(?m)^    timeout-minutes: [1-9][0-9]*$")
+                mutant = job.replace("timeout-minutes:", "timeout-removed:", 1)
+                with self.assertRaises(AssertionError):
+                    self.assertRegex(mutant, r"(?m)^    timeout-minutes: [1-9][0-9]*$")
+            for action in re.findall(r"(?m)^\s*uses:\s+([^\s#]+)", workflow):
+                with self.subTest(path=path.name, action=action):
+                    self.assertRegex(action, r"@[0-9a-f]{40}$")
+
+    def test_manifest_scan_and_scheduled_read_only_integrity_audit_are_load_bearing(self):
+        gate = (ROOT / ".github/workflows/pr-gate.yml").read_text(encoding="utf-8")
+        publisher = (ROOT / ".github/workflows/release-publisher.yml").read_text(encoding="utf-8")
+        audit = (ROOT / ".github/workflows/release-integrity-audit.yml").read_text(encoding="utf-8")
+        self.assertIn("trivy fs --scanners vuln --severity HIGH,CRITICAL --exit-code 1", gate)
+        self.assertIn("trivy config --severity HIGH,CRITICAL --exit-code 1", gate)
+        scan = publisher.index("Gate the final image digest at HIGH and CRITICAL")
+        sign = publisher.index("Sign the immutable image digest")
+        self.assertLess(scan, sign)
+        self.assertIn('"${IMAGE}@${{ steps.image.outputs.digest }}"', publisher[scan:sign])
+        self.require_integrity_audit(audit)
+        for token in (
+            "--require exact",
+            'test "${observed}" = "${expected}"',
+            "cosign verify --certificate-identity",
+            "attestation-set",
+            "audit-sbom.json",
+            "trivy image --scanners vuln --severity HIGH,CRITICAL --exit-code 1",
+        ):
+            with self.subTest(audit_mutant=token), self.assertRaises(ValueError):
+                self.require_integrity_audit(audit.replace(token, ""))
 
 
 if __name__ == "__main__":

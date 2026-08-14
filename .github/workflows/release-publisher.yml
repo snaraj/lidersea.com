@@ -31,6 +31,7 @@ env:
 jobs:
   authorize:
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     permissions:
       actions: read
       contents: read
@@ -64,10 +65,47 @@ jobs:
           test "${authorized_sha}" = "${SOURCE_SHA}"
           printf 'source_sha=%s\n' "${authorized_sha}" >> "${GITHUB_OUTPUT}"
 
-  publish:
+  immutable_settings:
     needs: authorize
     if: needs.authorize.result == 'success'
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: platform-release
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the authorized settings contract
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.authorize.outputs.source_sha }}
+          persist-credentials: false
+      - name: Mint the isolated Admin-read settings token
+        id: immutable_settings
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ vars.PLATFORM_RELEASE_APP_ID }}
+          private-key: ${{ secrets.PLATFORM_RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-administration: read
+          skip-token-revoke: false
+      - name: Recheck authoritative immutable publication settings
+        env:
+          IMMUTABLE_SETTINGS_TOKEN: ${{ steps.immutable_settings.outputs.token }}
+        run: |
+          set -euo pipefail
+          test -n "${IMMUTABLE_SETTINGS_TOKEN}"
+          GH_TOKEN="${IMMUTABLE_SETTINGS_TOKEN}" \
+            python3 -I -B scripts/ci/release_contract.py settings-preflight \
+              --repository "${GITHUB_REPOSITORY}" >/dev/null
+
+  publish:
+    needs: [authorize, immutable_settings]
+    if: >-
+      needs.authorize.result == 'success' &&
+      needs.immutable_settings.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
     permissions:
       contents: write
       packages: write
@@ -119,14 +157,17 @@ jobs:
           api="${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}"
           status="$(curl --silent --show-error --location \
             --proto '=https' --tlsv1.2 --output "${ref_json}" --write-out '%{http_code}' \
-            --header 'Accept: application/vnd.github+json' \
+           --header 'Accept: application/vnd.github+json' \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
             --header "Authorization: Bearer ${GH_TOKEN}" \
             "${api}/git/ref/tags/${TAG}")"
           test "${status}" = 200
-          tag_object="$(jq -er '.object.sha' "${ref_json}")"
+          tag_object="$(python3 -I -B scripts/ci/release_contract.py tag-ref-object \
+            --ref-json "${ref_json}" --tag "${TAG}")"
           status="$(curl --silent --show-error --location \
             --proto '=https' --tlsv1.2 --output "${tag_json}" --write-out '%{http_code}' \
             --header 'Accept: application/vnd.github+json' \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
             --header "Authorization: Bearer ${GH_TOKEN}" \
             "${api}/git/tags/${tag_object}")"
           test "${status}" = 200
@@ -165,7 +206,8 @@ jobs:
             --proto '=https' --tlsv1.2 --netrc-file "${credentials}" \
             --get --data-urlencode "scope=repository:${repository}:pull" \
             'https://ghcr.io/token' > "${token_file}"
-          token="$(jq -er '.token // .access_token' "${token_file}")"
+          token="$(python3 -I -B scripts/ci/release_contract.py registry-token \
+            --token-json "${token_file}")"
           rm -f -- "${token_file}" "${credentials}"
           manifest="${RUNNER_TEMP}/existing-image-manifest.json"
           headers="${RUNNER_TEMP}/existing-image-headers.txt"
@@ -201,8 +243,20 @@ jobs:
             --format '{{ json .SBOM }}' > "${sbom}"; then
             source_match=false
           fi
-          provenance_platforms="$(jq -r 'keys[]' "${provenance}" 2>/dev/null | paste -sd ' ' - || true)"
-          sbom_platforms="$(jq -r 'keys[]' "${sbom}" 2>/dev/null | paste -sd ' ' - || true)"
+          provenance_keys="${RUNNER_TEMP}/existing-image-provenance.keys"
+          sbom_keys="${RUNNER_TEMP}/existing-image-sbom.keys"
+          if ! python3 -I -B scripts/ci/release_contract.py json-keys \
+            --json "${provenance}" > "${provenance_keys}"; then
+            source_match=false
+            : > "${provenance_keys}"
+          fi
+          if ! python3 -I -B scripts/ci/release_contract.py json-keys \
+            --json "${sbom}" > "${sbom_keys}"; then
+            source_match=false
+            : > "${sbom_keys}"
+          fi
+          provenance_platforms="$(paste -sd ' ' "${provenance_keys}")"
+          sbom_platforms="$(paste -sd ' ' "${sbom_keys}")"
           if [ "${provenance_platforms}" != "${expected_platforms}" ] || \
              [ "${sbom_platforms}" != "${expected_platforms}" ]; then
             source_match=false
@@ -298,6 +352,10 @@ jobs:
           fi
           [[ "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]
           printf 'digest=%s\n' "${digest}" >> "${GITHUB_OUTPUT}"
+      - name: Gate the final image digest at HIGH and CRITICAL
+        run: >-
+          trivy image --scanners vuln --severity HIGH,CRITICAL --exit-code 1
+          "${IMAGE}@${{ steps.image.outputs.digest }}"
       - name: Sign the immutable image digest
         if: steps.image_state.outputs.state == 'absent'
         run: cosign sign --yes "${IMAGE}@${{ steps.image.outputs.digest }}"
@@ -315,12 +373,16 @@ jobs:
           set -euo pipefail
           # The platform set is derived from the index itself and then
           # asserted to be EXACTLY the build step's platform list above, in
-          # jq `keys` sort order: a third or missing platform fails the
+          # Sorted strict-JSON key order: a third or missing platform fails the
           # release. Update BOTH together.
           expected_platforms='linux/amd64 linux/arm64'
-          provenance_platforms="$(docker buildx imagetools inspect "${IMAGE}@${DIGEST}" \
-            --format '{{ json .Provenance }}' | jq -r 'keys[]')"
-          mapfile -t platforms <<< "${provenance_platforms}"
+          provenance="${RUNNER_TEMP}/new-image-provenance.json"
+          provenance_keys="${RUNNER_TEMP}/new-image-provenance.keys"
+          docker buildx imagetools inspect "${IMAGE}@${DIGEST}" \
+            --format '{{ json .Provenance }}' > "${provenance}"
+          python3 -I -B scripts/ci/release_contract.py json-keys \
+            --json "${provenance}" > "${provenance_keys}"
+          mapfile -t platforms < "${provenance_keys}"
           test "${platforms[*]}" = "${expected_platforms}"
           source="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
           statements=()
@@ -373,7 +435,8 @@ jobs:
             --proto '=https' --tlsv1.2 --netrc-file "${credentials}" \
             --get --data-urlencode "scope=repository:${repository}:pull" \
             'https://ghcr.io/token' > "${token_file}"
-          token="$(jq -er '.token // .access_token' "${token_file}")"
+          token="$(python3 -I -B scripts/ci/release_contract.py registry-token \
+            --token-json "${token_file}")"
           rm -f -- "${token_file}" "${credentials}"
           manifest="${RUNNER_TEMP}/existing-chart-manifest.json"
           headers="${RUNNER_TEMP}/existing-chart-headers.txt"
@@ -444,7 +507,7 @@ jobs:
           [[ "${chart_digest}" =~ ^sha256:[0-9a-f]{64}$ ]]
           cosign sign --yes "${CHART}@${chart_digest}"
           printf 'digest=%s\n' "${chart_digest}" >> "${GITHUB_OUTPUT}"
-      - name: Resolve the one chart digest for release notes
+      - name: Resolve the one chart digest for the release manifest
         id: chart
         env:
           EXISTING_DIGEST: ${{ steps.chart_state.outputs.digest }}
@@ -462,27 +525,48 @@ jobs:
           fi
           [[ "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]
           printf 'digest=%s\n' "${digest}" >> "${GITHUB_OUTPUT}"
-      - name: Create or verify the exact GitHub release
+      - name: Generate the deterministic release manifest and informational notes
+        id: manifest
+        run: |
+          set -euo pipefail
+          manifest="${RUNNER_TEMP}/release-manifest.json"
+          umask 077
+          python3 -I -B scripts/ci/release_contract.py release-manifest \
+            --output "${manifest}" --repository "${GITHUB_REPOSITORY}" \
+            --source-sha "${SOURCE_SHA}" \
+            --version "${{ steps.release.outputs.version }}" \
+            --image "${IMAGE}" --image-digest "${{ steps.image.outputs.digest }}" \
+            --chart "${CHART}" --chart-digest "${{ steps.chart.outputs.digest }}" \
+            >/dev/null
+          test "$(basename "${manifest}")" = release-manifest.json
+          test "$(stat -c '%a' "${manifest}")" = 600
+          python3 -I -B scripts/ci/release_contract.py manifest-record \
+            --manifest "${manifest}" --repository "${GITHUB_REPOSITORY}" \
+            --github-output "${GITHUB_OUTPUT}"
+          {
+            printf '## lidersea.com %s\n\n' "${{ steps.release.outputs.tag }}"
+            printf 'Digest-bound artifacts (registry tags remain verified mutable aliases):\n\n'
+            printf '| Artifact | Reference |\n| --- | --- |\n'
+            printf "| Image | \`%s:%s@%s\` |\n" "${IMAGE}" "${{ steps.release.outputs.tag }}" "${{ steps.image.outputs.digest }}"
+            printf "| Chart | \`%s:%s@%s\` |\n" "${CHART}" "${{ steps.release.outputs.version }}" "${{ steps.chart.outputs.digest }}"
+            printf '\nThe exact machine identity is the attached release-manifest.json asset; these notes are informational.\n'
+            printf 'The image digest is signed and carries exact per-platform SBOM and SLSA provenance expectations. The chart digest is signed.\n'
+            printf '\nSee CHANGELOG.md for human-readable changes.\n'
+          } > "${RUNNER_TEMP}/release-notes.md"
+      - name: Create the draft, upload the manifest, and publish immutably
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           tag="${{ steps.release.outputs.tag }}"
-          {
-            printf '## lidersea.com %s\n\n' "${tag}"
-            printf 'Immutable artifacts (deploy by digest, never by tag):\n\n'
-            printf '| Artifact | Reference |\n| --- | --- |\n'
-            printf "| Image | \`%s:%s@%s\` |\n" "${IMAGE}" "${tag}" "${{ steps.image.outputs.digest }}"
-            printf "| Chart | \`%s:%s@%s\` |\n" "${CHART}" "${{ steps.release.outputs.version }}" "${{ steps.chart.outputs.digest }}"
-            printf '\nSigned with keyless Cosign by this workflow identity; SBOM and SLSA provenance embedded in the image index.\n'
-            printf 'That complete provenance is additionally attached as two keyless cosign attestations (slsaprovenance1), one per architecture, with exact source, revision, platform, image, and digest bindings.\n'
-            printf '\nSee CHANGELOG.md for human-readable changes.\n'
-          } > "${RUNNER_TEMP}/release-notes.md"
+          manifest="${RUNNER_TEMP}/release-manifest.json"
           existing="${RUNNER_TEMP}/existing-release.json"
+          downloaded="${RUNNER_TEMP}/downloaded-release-manifest.json"
           api="${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/releases/tags/${tag}"
-          classify_release() {
-            local required="$1" status
+          observe_release() {
+            local status asset_id
             local -a record_args=()
+            rm -f -- "${downloaded}"
             status="$(curl --silent --show-error --location \
               --proto '=https' --tlsv1.2 --output "${existing}" --write-out '%{http_code}' \
               --header 'Accept: application/vnd.github+json' \
@@ -491,32 +575,103 @@ jobs:
               "${api}")"
             if [ "${status}" = 200 ]; then
               record_args=(--release-json "${existing}")
+              if asset_id="$(python3 -I -B scripts/ci/release_contract.py release-asset-id \
+                --release-json "${existing}" 2>/dev/null)"; then
+                curl --fail-with-body --silent --show-error --location \
+                  --proto '=https' --tlsv1.2 --output "${downloaded}" \
+                  --header 'Accept: application/octet-stream' \
+                  --header 'X-GitHub-Api-Version: 2026-03-10' \
+                  --header "Authorization: Bearer ${GH_TOKEN}" \
+                  "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}"
+                chmod 0600 "${downloaded}"
+                record_args+=(--asset-content "${downloaded}")
+              fi
             fi
             python3 -I -B scripts/ci/release_contract.py release-state \
-              --http-status "${status}" --require "${required}" \
-              "${record_args[@]}" --tag "${tag}" \
-              --title "lidersea.com ${tag}" \
-              --body "${RUNNER_TEMP}/release-notes.md"
+              --http-status "${status}" "${record_args[@]}" \
+              --manifest "${manifest}" --repository "${GITHUB_REPOSITORY}"
           }
-          if classify_release exact >/dev/null 2>&1; then
-            printf 'verified complete existing GitHub Release %s\n' "${tag}"
-          else
-            classify_release absent >/dev/null
-            if ! gh release create "${tag}" --verify-tag \
+          state="$(observe_release)"
+          if [ "${state}" = absent ]; then
+            if ! gh release create "${tag}" --verify-tag --draft \
               --title "lidersea.com ${tag}" \
               --notes-file "${RUNNER_TEMP}/release-notes.md"; then
-              printf 'release create did not succeed; checking for an exact concurrent winner\n' >&2
+              printf 'draft create did not succeed; checking for an exact concurrent winner\n' >&2
             fi
-            # Creation and a concurrent 422 winner share the same bounded,
-            # authoritative verification path. No local tag ref participates.
-            race_verified=false
             for attempt in 1 2 3 4 5; do
-              if classify_release exact >/dev/null 2>&1; then
-                race_verified=true
+              state="$(observe_release)"
+              if [ "${state}" != absent ]; then
                 break
               fi
               sleep "${attempt}"
             done
-            test "${race_verified}" = true
-            classify_release exact >/dev/null
+            if [ "${state}" = absent ]; then
+              printf 'DENY: draft create did not reach a resumable or exact state\n' >&2
+              exit 1
+            fi
           fi
+          if [ "${state}" = draft-empty ]; then
+            if ! gh release upload "${tag}" "${manifest}"; then
+              printf 'manifest upload did not succeed; checking for an exact concurrent winner\n' >&2
+            fi
+            for attempt in 1 2 3 4 5; do
+              state="$(observe_release)"
+              if [ "${state}" = draft-ready ] || [ "${state}" = exact ]; then
+                break
+              fi
+              sleep "${attempt}"
+            done
+            if [ "${state}" != draft-ready ] && [ "${state}" != exact ]; then
+              printf 'DENY: manifest upload did not reach draft-ready or exact state\n' >&2
+              exit 1
+            fi
+          fi
+          if [ "${state}" = draft-ready ]; then
+            if ! gh release edit "${tag}" --draft=false; then
+              printf 'draft publish did not succeed; checking for an exact concurrent winner\n' >&2
+            fi
+            for attempt in 1 2 3 4 5; do
+              state="$(observe_release)"
+              if [ "${state}" = exact ]; then
+                break
+              fi
+              sleep "${attempt}"
+            done
+          fi
+          if [ "${state}" != exact ]; then
+            printf 'DENY: GitHub Release did not become authoritative immutable exact state\n' >&2
+            exit 1
+          fi
+          observe_release | grep -Fx exact >/dev/null
+      - name: Terminally rebind the REST tag ref and annotated object
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          ref_json="${RUNNER_TEMP}/terminal-tag-ref.json"
+          tag_json="${RUNNER_TEMP}/terminal-tag-object.json"
+          api="${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}"
+          status="$(curl --silent --show-error --location \
+            --proto '=https' --tlsv1.2 --output "${ref_json}" --write-out '%{http_code}' \
+            --header 'Accept: application/vnd.github+json' \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            "${api}/git/ref/tags/${TAG}")"
+          test "${status}" = 200
+          tag_object="$(python3 -I -B scripts/ci/release_contract.py tag-ref-object \
+            --ref-json "${ref_json}" --tag "${TAG}")"
+          status="$(curl --silent --show-error --location \
+            --proto '=https' --tlsv1.2 --output "${tag_json}" --write-out '%{http_code}' \
+            --header 'Accept: application/vnd.github+json' \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            "${api}/git/tags/${tag_object}")"
+          test "${status}" = 200
+          python3 -I -B scripts/ci/release_contract.py tag-record \
+            --ref-json "${ref_json}" --tag-json "${tag_json}" \
+            --tag "${TAG}" --source-sha "${SOURCE_SHA}" \
+            --message "Release ${TAG} from ${SOURCE_SHA}" \
+            --tagger-name 'github-actions[bot]' \
+            --tagger-email '41898282+github-actions[bot]@users.noreply.github.com' \
+            --tagger-date "$(git show -s --format=%cI "${SOURCE_SHA}")"

@@ -553,6 +553,99 @@ class GovernanceReceiptTests(unittest.TestCase):
         if "Only the coordinator may apply\n`requires-review`" in template:
             raise ValueError("PR template inverted requires-review authority")
 
+    @staticmethod
+    def require_agents_review_contract(agents: str) -> str:
+        collapsed = " ".join(agents.split())
+        for required in (
+            "`requires-review` is PR-head-only",
+            "The author lane applies `requires-review` only when the exact PR head, "
+            "body, commits, and evidence are author-complete",
+            "The reviewer removes it when posting either verdict",
+            "Never apply or interpret `requires-review` on an issue",
+            "Use an explicit normal comment for issue-spec review",
+        ):
+            if required not in collapsed:
+                raise ValueError(f"canonical AGENTS review contract lost: {required}")
+        for forbidden in (
+            "applies `requires-review` the moment a PR or issue is",
+            "open agent-authored PR or issue",
+            "On an issue it carries the same meaning",
+            "Apply `requires-review` once the issue is",
+            "Only the coordinator applies `requires-review`",
+        ):
+            if forbidden in collapsed:
+                raise ValueError(f"canonical AGENTS issue/authority inversion: {forbidden}")
+        match = re.search(
+            r"\*\*Exact-head receipt\.\*\*.*?```text\n(.*?)\n```", agents, re.S
+        )
+        if match is None:
+            raise ValueError("canonical AGENTS adversarial receipt sample is absent")
+        return match.group(1)
+
+    def test_agents_review_contract_is_pr_head_only_and_validator_valid(self):
+        agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+        sample = self.require_agents_review_contract(agents)
+        exact = (
+            sample.replace("<40-lowercase-hex>", self.HEAD)
+            .replace("APPROVE | REQUEST-CHANGES", "APPROVE")
+            .replace(
+                "<mutants attempted and killed, or explicit no-finding scope>",
+                "paired governance mutants killed",
+            )
+            .replace(
+                "<SUPPORTED / OVERSTATED results for every material claim>",
+                "every material claim checked",
+            )
+            .replace("<distinct context>", "Independent Review")
+        )
+        for verdict in ("APPROVE", "REQUEST-CHANGES"):
+            receipt = exact.replace("VERDICT: APPROVE", f"VERDICT: {verdict}")
+            self.assertEqual(
+                RC.validate_review_receipt(
+                    receipt, expected_head=self.HEAD, role="adversarial"
+                ),
+                verdict,
+            )
+
+        contract_mutants = {
+            "delete_pr_head_only": agents.replace(
+                "`requires-review` is\n  PR-head-only.", "", 1
+            ),
+            "invert_author_authority": agents.replace(
+                "The author lane applies `requires-review` only when",
+                "Only the coordinator applies `requires-review` when",
+                1,
+            ),
+            "restore_issue_interpretation": agents.replace(
+                "Never apply or interpret `requires-review` on an issue",
+                "Apply and interpret `requires-review` on an issue",
+                1,
+            ),
+        }
+        for name, mutant in contract_mutants.items():
+            with self.subTest(contract_mutant=name), self.assertRaises(ValueError):
+                self.require_agents_review_contract(mutant)
+
+        receipt_mutants = {
+            "delete_mutation_audit": exact.replace(
+                "Mutation audit: paired governance mutants killed\n", "", 1
+            ),
+            "delete_claim_audit": exact.replace(
+                "Claim audit: every material claim checked\n", "", 1
+            ),
+            "invalid_verdict_field": exact.replace(
+                "VERDICT: APPROVE", "APPROVE", 1
+            ),
+            "duplicate_head": exact.replace(
+                f"HEAD: {self.HEAD}", f"HEAD: {self.HEAD}\nHEAD: {self.HEAD}", 1
+            ),
+        }
+        for name, mutant in receipt_mutants.items():
+            with self.subTest(receipt_mutant=name), self.assertRaises(RC.ContractError):
+                RC.validate_review_receipt(
+                    mutant, expected_head=self.HEAD, role="adversarial"
+                )
+
     def test_canonical_adversarial_verdict_syntax_and_head_binding(self):
         exact = (
             f"HEAD: {self.HEAD}\n"

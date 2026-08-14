@@ -287,15 +287,23 @@ experiment, and removes the worktree afterward.
 
 **Exact-head receipt.** Review identity is textual because agents share the
 owner's GitHub account; it is not a claim of separate GitHub principals. The
-reviewer posts one normal PR comment beginning with these exact fields:
+reviewer posts one normal PR comment using this complete shape, with exactly one
+mutation audit, exactly one claim audit, and the signature as the final nonblank
+line (numbered findings or explicit no-finding scope may appear between them):
 
-    HEAD: <40-lowercase-hex>
-    VERDICT: APPROVE | REQUEST-CHANGES
+```text
+HEAD: <40-lowercase-hex>
+VERDICT: APPROVE | REQUEST-CHANGES
+Mutation audit: <mutants attempted and killed, or explicit no-finding scope>
+Claim audit: <SUPPORTED / OVERSTATED results for every material claim>
+- <distinct context> (adversarial reviewer)
+```
 
-It ends with `- <distinct context> (adversarial reviewer)`. Any head
-change invalidates the receipt. The author replies with reproduction and repair
-evidence; a fresh independent context re-reviews the new exact head. If the
-owner merges first, record a post-merge audit and classify—not erase—the gap.
+Replace every placeholder with concrete evidence; the displayed shape itself
+must validate after substitution. Any head change invalidates the receipt. The
+author replies with reproduction and repair evidence; a fresh independent
+context re-reviews the new exact head. If the owner merges first, record a
+post-merge audit and classify—not erase—the gap.
 
 **Main Worker receipt.** After author completion, exact-head CI, settings, and
 base freshness have been evaluated, the Main Worker posts one bounded normal
@@ -367,20 +375,19 @@ authority: the owner alone merges.
   `tests`, `ci`, `docs`, `release`, `fix`, `provider-neutrality`,
   `delivery-lane`, `features`, `requires-review`. New labels are added to
   all three at once.
-- **`requires-review` — the review-readiness signal.** The author lane
-  applies `requires-review` the moment a PR or issue is
-  complete-from-author — every commit pushed, body and evidence final —
-  so review attention is productive. Its ABSENCE on an open
-  agent-authored PR or issue means the item is still in flight:
-  reviewers and other lanes must not spend review effort on it. The
-  reviewer removes it when posting the verdict; on REQUEST-CHANGES the
-  author re-applies it once the fix commits are pushed. On an issue it
-  carries the same meaning — complete enough to act on or decide — and
-  whoever then acts on it or records the decision removes the label;
-  opening a PR that claims the issue counts as acting. It is
-  a coordination signal only: never a substitute for draft/ready state,
-  for the APPROVE verdict that flips a PR ready, or for owner merge
-  authority.
+- **`requires-review` — the review-readiness signal.** `requires-review` is
+  PR-head-only. The author lane applies `requires-review` only when the exact PR
+  head, body, commits, and evidence are author-complete, so review attention is
+  productive. Its ABSENCE on an open agent-authored PR means the PR is still in
+  flight: reviewers and other lanes must not spend review effort on it. The
+  reviewer removes it when posting either verdict; on REQUEST-CHANGES the
+  author re-applies it only after the complete replacement head is pushed.
+  Never apply or interpret `requires-review` on an issue: an issue has no head
+  and cannot satisfy an exact-head receipt or Ready gate. Use an explicit normal
+  comment for issue-spec review; treat legacy issue uses as coordinator cleanup
+  residue. The label is a coordination signal only: never a substitute for
+  draft/ready state, for the APPROVE verdict that flips a PR ready, or for owner
+  merge authority.
 - **Agent labels.** Every agent-created PR and issue carries TWO further
   labels: the umbrella `agent-authored` AND the acting agent's own label —
   `fable5` (Claude Fable 5), `5.6-sol` (ChatGPT 5.6 SOL ULTRA), `opus5`
@@ -428,9 +435,8 @@ The complete delivery loop, each step gated by the sections around it:
 
 1. **Claim the work.** File (or take) the issue; state intent and
    constraints. Label it — including both agent labels — assign the
-   owner, set a milestone. Apply `requires-review` once the issue is
-   complete-from-author — the problem stated, the acceptance criteria
-   final; until it carries that label, the issue is still being drafted.
+   owner, set a milestone. Never apply or interpret `requires-review` on the
+   issue; request any issue-spec review through an explicit normal comment.
 2. **Branch from `origin/main`** after `git fetch origin`; branch names
    are lane-prefixed (`fable5/<topic>`). One writer per branch, always —
    a branch that is not yours is a branch you never push to. Reserve the exact

@@ -154,12 +154,14 @@ def exact_tag_records(tag: str, source: str, message: str, date: str) -> tuple[d
 
 def release_manifest() -> dict[str, object]:
     return RC.build_release_manifest(
-        repository=RC.EXPECTED_REPOSITORY,
+        # These are independent test oracles, not aliases of the production
+        # constants that this fixture is expected to police.
+        repository="snaraj/lidersea.com",
         source_sha="a" * 40,
         version=RC.Version.parse("0.1.10"),
-        image=RC.EXPECTED_IMAGE,
+        image="ghcr.io/snaraj/lidersea-com",
         image_digest="sha256:" + "d" * 64,
-        chart=RC.EXPECTED_CHART,
+        chart="ghcr.io/snaraj/charts/lidersea-com",
         chart_digest="sha256:" + "e" * 64,
     )
 
@@ -181,8 +183,10 @@ def release_record(
                 "size": len(raw),
                 "digest": "sha256:" + hashlib.sha256(raw).hexdigest(),
                 "uploader": {
-                    "login": RC.GITHUB_ACTIONS_BOT_LOGIN,
-                    "id": RC.GITHUB_ACTIONS_BOT_ID,
+                    # Keep the evidence fixture independent of the production
+                    # constants used by validate_release_record.
+                    "login": "github-actions[bot]",
+                    "id": 41898282,
                 },
             }
         ]
@@ -201,8 +205,8 @@ def release_record(
             "name": "informational title is not artifact identity",
             "body": "informational notes may change\n",
             "author": {
-                "login": RC.GITHUB_ACTIONS_BOT_LOGIN,
-                "id": RC.GITHUB_ACTIONS_BOT_ID,
+                "login": "github-actions[bot]",
+                "id": 41898282,
             },
             "draft": draft,
             "prerelease": False,
@@ -535,14 +539,30 @@ class StrictJsonBoundaryTests(unittest.TestCase):
 class GovernanceReceiptTests(unittest.TestCase):
     HEAD = "a" * 40
 
+    @staticmethod
+    def require_template_authority(template: str) -> None:
+        for required in (
+            "The author applies `requires-review`",
+            "reviewer removes it when posting either verdict",
+            "Only the coordinator may change",
+            "Mutation audit:",
+            "Claim audit:",
+        ):
+            if required not in template:
+                raise ValueError(f"PR template governance handoff lost: {required}")
+        if "Only the coordinator may apply\n`requires-review`" in template:
+            raise ValueError("PR template inverted requires-review authority")
+
     def test_canonical_adversarial_verdict_syntax_and_head_binding(self):
+        exact = (
+            f"HEAD: {self.HEAD}\n"
+            "VERDICT: APPROVE\n"
+            "Mutation audit: paired authority mutants were killed.\n"
+            "Claim audit: every material claim was checked.\n"
+            "- Red Team (adversarial reviewer)"
+        )
         for verdict in ("APPROVE", "REQUEST-CHANGES"):
-            receipt = (
-                f"HEAD: {self.HEAD}\n"
-                f"VERDICT: {verdict}\n"
-                "1. Evidence remains bound to this head.\n"
-                "- Red Team (adversarial reviewer)"
-            )
+            receipt = exact.replace("VERDICT: APPROVE", f"VERDICT: {verdict}")
             self.assertEqual(
                 RC.validate_review_receipt(
                     receipt, expected_head=self.HEAD, role="adversarial"
@@ -550,12 +570,16 @@ class GovernanceReceiptTests(unittest.TestCase):
                 verdict,
             )
         mutants = (
-            f"HEAD: {self.HEAD}\nAPPROVE\n- Red Team (adversarial reviewer)",
-            f"HEAD: {'b' * 40}\nVERDICT: APPROVE\n- Red Team (adversarial reviewer)",
-            f"HEAD: {self.HEAD}\nVERDICT: approve\n- Red Team (adversarial reviewer)",
-            f"HEAD: {self.HEAD}\nVERDICT: APPROVE\nVERDICT: APPROVE\n- Red Team (adversarial reviewer)",
-            f"HEAD: {self.HEAD}\nVERDICT: APPROVE\n- Agent (adversarial reviewer)",
-            f"HEAD: {self.HEAD}\nVERDICT: APPROVE\n- Red Team",
+            exact.replace("VERDICT: APPROVE", "APPROVE", 1),
+            exact.replace(self.HEAD, "b" * 40, 1),
+            exact.replace("VERDICT: APPROVE", "VERDICT: approve", 1),
+            exact.replace(
+                "VERDICT: APPROVE", "VERDICT: APPROVE\nVERDICT: APPROVE", 1
+            ),
+            exact.replace("Mutation audit: paired authority mutants were killed.\n", "", 1),
+            exact.replace("Claim audit: every material claim was checked.\n", "", 1),
+            exact.replace("Red Team", "Agent", 1),
+            exact.replace("- Red Team (adversarial reviewer)", "- Red Team", 1),
         )
         for index, receipt in enumerate(mutants):
             with self.subTest(index=index), self.assertRaises(RC.ContractError):
@@ -616,6 +640,61 @@ class GovernanceReceiptTests(unittest.TestCase):
                 "(Main Worker)",
             ):
                 self.assertIn(token, text)
+        self.require_template_authority(template)
+        for mutant in (
+            template.replace(
+                "The author applies `requires-review`",
+                "Only the coordinator applies `requires-review`",
+                1,
+            ),
+            template.replace("reviewer removes it when posting either verdict", "", 1),
+            template.replace("Mutation audit:", "Evidence:", 1),
+            template.replace("Claim audit:", "Summary:", 1),
+        ):
+            with self.assertRaises(ValueError):
+                self.require_template_authority(mutant)
+
+        adversarial_match = re.search(
+            r"Adversarial reviewer receipt.*?```text\n(.*?)\n```", template, re.S
+        )
+        self.assertIsNotNone(adversarial_match)
+        adversarial = (
+            adversarial_match.group(1)
+            .replace("<40-lowercase-hex>", self.HEAD)
+            .replace("APPROVE | REQUEST-CHANGES", "APPROVE")
+            .replace(
+                "<mutants attempted and killed, or explicit no-finding scope>",
+                "paired authority mutants killed",
+            )
+            .replace(
+                "<SUPPORTED / OVERSTATED results for every material claim>",
+                "all material claims SUPPORTED",
+            )
+            .replace("<distinct context>", "Independent Review")
+        )
+        self.assertEqual(
+            RC.validate_review_receipt(
+                adversarial, expected_head=self.HEAD, role="adversarial"
+            ),
+            "APPROVE",
+        )
+
+        main_worker_match = re.search(
+            r"Main Worker receipt.*?```text\n(.*?)\n```", template, re.S
+        )
+        self.assertIsNotNone(main_worker_match)
+        main_worker = (
+            main_worker_match.group(1)
+            .replace("<40-lowercase-hex>", self.HEAD)
+            .replace("PASS | BLOCK", "PASS")
+            .replace("<distinct context>", "Architecture Control")
+        )
+        self.assertEqual(
+            RC.validate_review_receipt(
+                main_worker, expected_head=self.HEAD, role="main-worker"
+            ),
+            "PASS",
+        )
         self.assertIn("Issue milestone: `vX.Y.Z`", template)
         self.assertIn("PR milestone: `vX.Y.Z`", template)
         self.assertIn("must equal the issue milestone and next patch", template)
@@ -1314,6 +1393,36 @@ class TrivySourceCoverageTests(unittest.TestCase):
         "vite": "8.2.1",
     }
 
+    @staticmethod
+    def require_exact_trivy_version_claim(installer: str, contract: str) -> None:
+        for source, required in (
+            (installer, "TRIVY_VERSION=v0.73.0"),
+            (
+                installer,
+                "TRIVY_SHA256=2edd39da482bb4e9831962487b68f68e3928ec3137794757f54d00383d79547b",
+            ),
+            (contract, "Trivy v0.73.0 identifies `trivy fs ... .` JSON"),
+        ):
+            if required not in source:
+                raise ValueError(f"Trivy version/checksum claim drifted: {required}")
+
+    def test_exact_scanner_version_claim_matches_checksum_pinned_installer(self):
+        installer = (ROOT / "scripts/ci/install-tools.sh").read_text(encoding="utf-8")
+        contract = (ROOT / "scripts/ci/release_contract.py").read_text(encoding="utf-8")
+        self.require_exact_trivy_version_claim(installer, contract)
+        for changed_installer, changed_contract in (
+            (installer.replace("v0.73.0", "v0.72.0", 1), contract),
+            (installer, contract.replace("v0.73.0", "v0.72", 1)),
+            (
+                installer.replace("v0.73.0", "v0.74.0", 1),
+                contract.replace("v0.73.0", "v0.74.0", 1),
+            ),
+        ):
+            with self.assertRaises(ValueError):
+                self.require_exact_trivy_version_claim(
+                    changed_installer, changed_contract
+                )
+
     def report(self) -> dict[str, object]:
         return {
             "SchemaVersion": 2,
@@ -1409,6 +1518,53 @@ class TrivySourceCoverageTests(unittest.TestCase):
 class PublisherBindingTests(unittest.TestCase):
     SHA = "a" * 40
 
+    @staticmethod
+    def require_canonical_production_authority(
+        repository: str, image: str, chart: str, publisher: str
+    ) -> None:
+        # This oracle deliberately repeats the reviewed external identities.
+        # It must not derive a package path from RC constants or workflow env.
+        expected = (
+            "snaraj/lidersea.com",
+            "ghcr.io/snaraj/lidersea-com",
+            "ghcr.io/snaraj/charts/lidersea-com",
+        )
+        if (repository, image, chart) != expected:
+            raise ValueError("production repository/package authority is not canonical")
+        for destination in (
+            "IMAGE: ghcr.io/snaraj/lidersea-com",
+            "CHART: ghcr.io/snaraj/charts/lidersea-com",
+        ):
+            if destination not in publisher:
+                raise ValueError(f"publisher destination escaped canonical authority: {destination}")
+
+    def test_production_package_authority_is_an_independent_literal_oracle(self):
+        publisher = (ROOT / ".github/workflows/release-publisher.yml").read_text(
+            encoding="utf-8"
+        )
+        self.require_canonical_production_authority(
+            RC.EXPECTED_REPOSITORY,
+            RC.EXPECTED_IMAGE,
+            RC.EXPECTED_CHART,
+            publisher,
+        )
+        paired_mutant = publisher.replace(
+            "IMAGE: ghcr.io/snaraj/lidersea-com",
+            "IMAGE: ghcr.io/snaraj/foreign-image",
+            1,
+        ).replace(
+            "CHART: ghcr.io/snaraj/charts/lidersea-com",
+            "CHART: ghcr.io/snaraj/charts/foreign-chart",
+            1,
+        )
+        with self.assertRaises(ValueError):
+            self.require_canonical_production_authority(
+                "snaraj/lidersea.com",
+                "ghcr.io/snaraj/foreign-image",
+                "ghcr.io/snaraj/charts/foreign-chart",
+                paired_mutant,
+            )
+
     def test_source_sha_ref_event_and_snapshot_checks_are_executable(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -1417,7 +1573,7 @@ class PublisherBindingTests(unittest.TestCase):
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(contents, encoding="utf-8")
             workflow_ref = (
-                f"{RC.EXPECTED_REPOSITORY}/.github/workflows/"
+                "snaraj/lidersea.com/.github/workflows/"
                 "release-publisher.yml@refs/heads/main"
             )
             intent = RC.validate_publisher(
@@ -1426,10 +1582,10 @@ class PublisherBindingTests(unittest.TestCase):
                 self.SHA,
                 "refs/heads/main",
                 "workflow_dispatch",
-                RC.EXPECTED_REPOSITORY,
+                "snaraj/lidersea.com",
                 workflow_ref,
-                RC.EXPECTED_IMAGE,
-                RC.EXPECTED_CHART,
+                "ghcr.io/snaraj/lidersea-com",
+                "ghcr.io/snaraj/charts/lidersea-com",
             )
             self.assertEqual(intent, RC.ReleaseIntent(self.SHA, RC.Version.parse("0.1.10")))
             exact = (
@@ -1437,10 +1593,10 @@ class PublisherBindingTests(unittest.TestCase):
                 self.SHA,
                 "refs/heads/main",
                 "workflow_dispatch",
-                RC.EXPECTED_REPOSITORY,
+                "snaraj/lidersea.com",
                 workflow_ref,
-                RC.EXPECTED_IMAGE,
-                RC.EXPECTED_CHART,
+                "ghcr.io/snaraj/lidersea-com",
+                "ghcr.io/snaraj/charts/lidersea-com",
             )
             mutants = (
                 ("b" * 40, *exact[1:]),
@@ -1450,7 +1606,7 @@ class PublisherBindingTests(unittest.TestCase):
                 (*exact[:4], "snaraj/lidersea-com", *exact[5:]),
                 (
                     *exact[:5],
-                    f"{RC.EXPECTED_REPOSITORY}/.github/workflows/"
+                    "snaraj/lidersea.com/.github/workflows/"
                     "release-publisher.yml@refs/tags/v0.1.10",
                     *exact[6:],
                 ),
@@ -1497,27 +1653,33 @@ class PublisherBindingTests(unittest.TestCase):
                 "--output",
                 str(output),
                 "--repository",
-                RC.EXPECTED_REPOSITORY,
+                "snaraj/lidersea.com",
                 "--source-sha",
                 self.SHA,
                 "--version",
                 "0.1.10",
                 "--image",
-                RC.EXPECTED_IMAGE,
+                "ghcr.io/snaraj/lidersea-com",
                 "--image-digest",
                 "sha256:" + "d" * 64,
                 "--chart",
-                RC.EXPECTED_CHART,
+                "ghcr.io/snaraj/charts/lidersea-com",
                 "--chart-digest",
                 "sha256:" + "e" * 64,
             ]
             with contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(RC.main(exact), 0)
             manifest, _raw = RC.read_release_manifest(
-                output, expected_repository=RC.EXPECTED_REPOSITORY, require_mode=False
+                output, expected_repository="snaraj/lidersea.com", require_mode=False
             )
-            self.assertEqual(manifest["artifacts"]["image"]["registry"], RC.EXPECTED_IMAGE)
-            self.assertEqual(manifest["artifacts"]["chart"]["registry"], RC.EXPECTED_CHART)
+            self.assertEqual(
+                manifest["artifacts"]["image"]["registry"],
+                "ghcr.io/snaraj/lidersea-com",
+            )
+            self.assertEqual(
+                manifest["artifacts"]["chart"]["registry"],
+                "ghcr.io/snaraj/charts/lidersea-com",
+            )
 
             for flag, wrong in (
                 ("--repository", "snaraj/lidersea-com"),
@@ -2589,6 +2751,48 @@ class PublicationShellTransactionTests(unittest.TestCase):
     TAG = "v0.1.10"
     SOURCE = "a" * 40
     DATE = "2026-08-13T15:21:32Z"
+
+    def test_release_bot_authority_is_independent_across_every_release_state(self):
+        self.assertEqual(
+            (RC.GITHUB_ACTIONS_BOT_LOGIN, RC.GITHUB_ACTIONS_BOT_ID),
+            ("github-actions[bot]", 41898282),
+        )
+        for state, expected in (
+            ("draft-empty", "draft-empty"),
+            ("draft-ready", "draft-ready"),
+            ("exact", "exact"),
+        ):
+            record, raw, asset = release_record(state)
+            self.assertEqual(record["author"], {"login": "github-actions[bot]", "id": 41898282})
+            if state == "draft-empty":
+                self.assertEqual(record["assets"], [])
+            else:
+                self.assertEqual(
+                    record["assets"][0]["uploader"],
+                    {"login": "github-actions[bot]", "id": 41898282},
+                )
+            self.assertEqual(
+                RC.validate_release_record(
+                    record,
+                    manifest=release_manifest(),
+                    manifest_bytes=raw,
+                    asset_bytes=asset,
+                ),
+                expected,
+            )
+
+        # Retry transactions reuse the prepared/staged/exact fixtures above;
+        # the scheduled audit must exercise the same exact-state validator.
+        publisher = (ROOT / ".github/workflows/release-publisher.yml").read_text(
+            encoding="utf-8"
+        )
+        audit = (ROOT / ".github/workflows/release-integrity-audit.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("for attempt in 1 2 3 4 5", publisher)
+        self.assertIn("release-state", publisher)
+        self.assertIn("release-state", audit)
+        self.assertIn("--require exact", audit)
 
     @staticmethod
     def workflow_run_block(path: Path, step_name: str) -> str:

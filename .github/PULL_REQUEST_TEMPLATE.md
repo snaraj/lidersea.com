@@ -47,6 +47,8 @@ Adversarial reviewer receipt (normal comment; findings/evidence may follow):
 ```text
 HEAD: <40-lowercase-hex>
 VERDICT: APPROVE | REQUEST-CHANGES
+Mutation audit: <mutants attempted and killed, or explicit no-finding scope>
+Claim audit: <SUPPORTED / OVERSTATED results for every material claim>
 - <distinct context> (adversarial reviewer)
 ```
 
@@ -60,9 +62,11 @@ SCOPE: architecture,merge-order,authority,settings,base-freshness,required-check
 - <distinct context> (Main Worker)
 ```
 
-Any head change invalidates both receipts. Only the coordinator may apply
-`requires-review` or change Draft/Ready state after author completion, exact-head
-CI, current-base verification, and the external settings boundary are all exact.
+Any head change invalidates both receipts. The author applies `requires-review`
+only after the exact head, body, commits, and evidence are author-complete; the
+reviewer removes it when posting either verdict. Only the coordinator may change
+Draft/Ready state after independent approval, Main Worker PASS, exact-head CI,
+current-base verification, and the external settings boundary are all exact.
 
 ## Residual risks
 

@@ -391,6 +391,12 @@ def validate_review_receipt(text: str, *, expected_head: str, role: str) -> str:
             line.startswith("VERDICT:") for line in lines
         ) != 1:
             raise ContractError("adversarial receipt headers must occur exactly once")
+        if sum(line.startswith("Mutation audit:") for line in lines) != 1 or sum(
+            line.startswith("Claim audit:") for line in lines
+        ) != 1:
+            raise ContractError(
+                "adversarial receipt must report exactly one mutation and claim audit"
+            )
         signature = re.fullmatch(
             r"- ([A-Za-z0-9][A-Za-z0-9 ._-]{0,63}) \(adversarial reviewer\)",
             lines[-1],
@@ -1710,7 +1716,7 @@ def validate_trivy_source_report(
     report: Mapping[str, object], package_document: Mapping[str, object]
 ) -> int:
     """Prove the frontend build graph entered the recurring HIGH/CRITICAL scan."""
-    # Trivy v0.72 identifies `trivy fs ... .` JSON as a repository artifact.
+    # Trivy v0.73.0 identifies `trivy fs ... .` JSON as a repository artifact.
     # Pin that real emitter identity so a synthetic or wrong scanner report
     # cannot satisfy the frontend dependency-inventory proof.
     if (

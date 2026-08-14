@@ -87,15 +87,25 @@ Numbered for citation, repo-scoped, none negotiable in code:
     and recovery validation inspect every intermediate state: retain or advance
     one patch only; skip, reversion, transient future, or multiple integration
     boundaries are denied. Successful main CI binds one exact-SHA,
-    noncancelling path. Before tag/registry/signing/Release effects, separate
+    noncancelling path: the paginated PR-gate inventory requires five success
+    conclusions plus the explicit push-only dependency-review skip, and the
+    separate same-SHA CodeQL run requires both analyze jobs to succeed. Before
+    tag/registry/signing/Release effects, separate
     `platform-release` jobs use only a repository-scoped
     Administration-read-only App token for authoritative settings GETs; they
     expose no token output, and ordinary `GITHUB_TOKEN` is the sole mutation
-    credential. New Releases carry one canonical mode-0600
+    credential. Before registry effects, the dotted repository
+    `snaraj/lidersea.com` binds only to the explicit, non-derived packages
+    `ghcr.io/snaraj/lidersea-com` and
+    `ghcr.io/snaraj/charts/lidersea-com`. New Releases carry one canonical mode-0600
     `release-manifest.json` identity asset and must report `immutable: true`;
-    notes are informational, and the terminal step rebinds the annotated tag
-    records. Registry version tags are mutable aliases—only their manifest-bound
-    digests are immutable artifact identities. Final-digest HIGH/CRITICAL
+    both Release author and sole asset uploader are the canonical
+    `github-actions[bot]` ID `41898282`; notes are informational, and the terminal step rebinds the annotated tag
+    records. Registry version tags are mutable aliases—both intended aliases
+    are re-resolved after push, before manifest staging, and before immutable
+    publication; only their manifest-bound digests are immutable artifact
+    identities. Exact non-null, signed amd64/arm64 SPDX payloads are mandatory
+    for new, reused, and audited images. Final-digest HIGH/CRITICAL
     scanning and the scheduled read-only digest/signature/SBOM/provenance/chart
     audit are mandatory. The automatic-release PR remains Draft until the
     external closed receipt in `docs/release-governance.md` is exact. There is
@@ -196,7 +206,10 @@ exact run/repository/workflow/event/conclusion/branch/SHA. Separate
 environment-gated settings jobs use the pinned App action and step-local
 Administration-read token before any side effect; no token crosses into the
 write/packages/OIDC job. The Release's sole machine identity is canonical
-`release-manifest.json`; human notes are not identity. Image `vX.Y.Z` and Helm
+`release-manifest.json`; its Release author and sole asset uploader must be the
+canonical workflow bot. Human notes are not identity. The production repository
+and both image/chart package paths are explicit closed identities, never a
+lossy dot-to-hyphen derivation. Image `vX.Y.Z` and Helm
 `X.Y.Z` tags are mutable registry aliases, while their recorded digests are
 immutable and signed. Histories and annotated Git tags are append-only; stale
 concurrent PRs resync and take the new next patch. Deployment resolves digests,
@@ -557,7 +570,9 @@ included; it is the same battery CI enforces:
 - **pr-gate.yml** — pull requests AND pushes to `main` (plus manual
   dispatch): `security` (checksum-verified tool install, actionlint,
   `gitleaks git` over full history, `gitleaks dir`, HIGH/CRITICAL source
-  dependency and repository-configuration gates),
+  dependency and repository-configuration gates; the filesystem scan pins
+  `--include-dev-deps` and proves every direct frontend build dependency is in
+  its report),
   `dependency-review` (PRs only; fails on high severity), `application`
   (toolchain pinned AND verified — Node 24.19.0, npm 11.17.0,
   Go 1.26.5; frontend check/test/build; gofmt/vet/tests/race; the
@@ -577,22 +592,27 @@ included; it is the same battery CI enforces:
 - **codeql.yml** — pull requests, `main` pushes, weekly cron.
 - **release-after-main.yml** — success-only exact-SHA main-CI completion;
   its separate `platform-release` job uses only the isolated settings token and
-  must pass before the ordinary-token job creates/verifies the annotated tag
-  and dispatches the publisher on protected `main` with the exact completed-run
-  ID. Recovery validates the full intermediate history. Distinct main SHAs
+  must pass before the ordinary-token job paginates and validates the exact
+  PR-gate job inventory, boundedly waits for the separate same-SHA CodeQL run
+  and its two successful analyze jobs, creates/verifies the annotated tag, and
+  dispatches the publisher on protected `main` with both completed-run IDs.
+  Recovery validates the full intermediate history. Distinct main SHAs
   share no cancellation group.
 - **release-publisher.yml** — explicit dispatch on protected `main`; a
-  read-only authorization job GETs and validates the exact successful PR-gate
-  push run, then a separate environment-gated Administration-read-only App job
+  read-only authorization job GETs and validates both exact successful
+  aggregate runs and their paginated PR-gate/CodeQL job inventories, then a
+  separate environment-gated Administration-read-only App job
   rechecks live settings. Only after both succeed can ordinary `GITHUB_TOKEN`
-  publish/sign. The final digest scan, sole canonical manifest asset,
+  publish/sign. Its first binding also validates the exact dotted production
+  repository and both explicit hyphenated package destinations before registry
+  effects. The final digest scan, bot-authored/bot-uploaded sole canonical manifest asset,
   draft/upload/publish state machine, and unconditional terminal REST tag
   rebind are load-bearing; manual/unmerged dispatch, skip, force, clobber, or
   token crossover cannot publish (requirement 10).
 - **release-integrity-audit.yml** — scheduled/manual read-only audit of the
   latest immutable manifest: annotated tag/source, mutable registry alias to
-  immutable digest bindings, image/chart signatures, exact two-platform
-  SBOM/provenance attestations, chart digest, and HIGH/CRITICAL image-digest
+  immutable digest bindings, image/chart signatures, exact two-platform signed
+  SPDX SBOM payloads and provenance attestations, chart digest, and HIGH/CRITICAL image-digest
   rescan. It has no signing, package-write, Release-write, or build path.
 - **GitHub event basis.** GitHub documents that `GITHUB_TOKEN`-created refs
   suppress recursive workflow events except explicit dispatch, that

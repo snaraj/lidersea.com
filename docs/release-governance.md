@@ -31,9 +31,15 @@ settings receipt grants no merge or settings-mutation authority.
 The token-created annotated Git tag does not trigger a recursive push workflow.
 The successful-main orchestrator therefore dispatches `release-publisher.yml`
 on protected `main`, never on the tag, and passes the exact source SHA and
-authoritative successful PR-gate run ID. The publisher's read-only authorization
-job rejects any foreign, failed, stale, incomplete, or unmerged run before a
-privileged job can start.
+authoritative successful PR-gate and CodeQL run IDs. Before tag creation, the
+orchestrator paginates the PR-gate jobs and requires the exact main inventory:
+`security`, `application`, `chart`, `container`, and `coverage-badges` succeed,
+while PR-only `dependency-review` is explicitly skipped. It boundedly waits for
+the separate same-SHA main CodeQL run and requires both analyze jobs to succeed.
+The publisher's read-only authorization job independently re-fetches both
+aggregate records and both paginated job inventories. Absent, pending, skipped,
+failed, duplicate, foreign, or wrong-SHA evidence is denied before a privileged
+job can start.
 
 Both workflows then perform the same authoritative settings recheck in a
 structurally separate `immutable_settings` job before any tag, registry,
@@ -175,17 +181,34 @@ The sole machine identity attached to a new GitHub Release is the canonical
 `release-manifest.json` asset. It is created with mode `0600`, uploaded while the
 Release is Draft, and validated by exact name, count, size, SHA-256 digest,
 canonical bytes, and closed image/chart content before publication. Release
-title and notes are informational and are never identity evidence. After REST
+title and notes are informational and are never identity evidence. The Release
+author and sole manifest-asset uploader must each have login
+`github-actions[bot]` and numeric ID `41898282`; missing, foreign, or mismatched
+creator identities fail on new, concurrent-winner, and retry paths. After REST
 reports the Release as immutable and exact, the publisher unconditionally ends
 by rebinding both the tag ref and annotated tag object to the exact source SHA.
 
 Image and chart registry version tags are mutable aliases. The immutable
-identities are their recorded `sha256:` digests. Publication gates the final
+identities are their recorded `sha256:` digests. Before its first registry
+effect, the publisher binds the dotted repository `snaraj/lidersea.com` to the
+explicit, non-derived package identities `ghcr.io/snaraj/lidersea-com` and
+`ghcr.io/snaraj/charts/lidersea-com`; lossy dot-to-hyphen inference is forbidden.
+After every push, the intended
+image and chart aliases are re-resolved from strict registry response bytes and
+their single digest headers. They must equal the produced final digests before
+manifest staging and are checked again before the immutable Release transition;
+wrong destinations, unrecoverable response loss, and concurrent retargets fail.
+Publication strictly parses non-null SPDX documents for exactly `linux/amd64`
+and `linux/arm64`, signs exact subject/platform/payload statements, and verifies
+the authenticated set for both new and reused images. It also gates the final
 image digest for HIGH/CRITICAL vulnerabilities before signing. The scheduled
 read-only release-integrity audit downloads and validates the sole manifest,
 rebinds the annotated Git tag, verifies both aliases still resolve to their
-recorded digests, verifies image/chart signatures, the exact two-platform SBOM
-and provenance set, the chart digest, and rescans the image by immutable digest.
+recorded digests, verifies image/chart signatures, the exact two-platform signed
+SPDX SBOM payload and provenance sets, the chart digest, and rescans the image
+by immutable digest. The recurring source scan pins Trivy `--include-dev-deps`
+and rejects a report unless every direct frontend build dependency is present;
+any HIGH/CRITICAL finding in that graph fails the gate.
 
 GitHub documents the immutable-release control and its protected tag/asset
 behavior in [Immutable releases](https://docs.github.com/en/code-security/concepts/supply-chain-security/immutable-releases),

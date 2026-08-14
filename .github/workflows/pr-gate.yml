@@ -71,7 +71,21 @@ jobs:
       - name: Scan working tree for secrets
         run: gitleaks dir --no-banner --redact .
       - name: Gate source dependencies at HIGH and CRITICAL
-        run: trivy fs --scanners vuln --severity HIGH,CRITICAL --exit-code 1 .
+        run: |
+          set -euo pipefail
+          report="${RUNNER_TEMP}/trivy-source.json"
+          set +e
+          trivy fs --scanners vuln --include-dev-deps --list-all-pkgs \
+            --severity HIGH,CRITICAL --exit-code 1 --format json \
+            --output "${report}" .
+          scan_status=$?
+          set -e
+          python3 -I -B scripts/ci/release_contract.py trivy-source \
+            --report "${report}" --package-json frontend/package.json >/dev/null
+          if [ "${scan_status}" -ne 0 ]; then
+            printf 'DENY: Trivy source scan did not complete cleanly\n' >&2
+            exit 1
+          fi
       - name: Gate repository configuration at HIGH and CRITICAL
         run: trivy config --severity HIGH,CRITICAL --exit-code 1 .
 
@@ -280,8 +294,8 @@ jobs:
           # exiting nonzero fails this step and publishes nothing, instead of
           # the pipeline silently taking awk's exit status and letting a
           # partially failing suite publish a green count on a main push.
-          set -o pipefail
-          cd frontend
+          set -euo pipefail
+          pushd frontend >/dev/null
           npm ci --ignore-scripts --no-audit --no-fund
           npm run build
           # The frontend badge reports the passing-test count, not a coverage
@@ -298,7 +312,7 @@ jobs:
           # exit status - without the self-inflicted SIGPIPE.
           front="$(node --test --test-reporter=tap tests/*.test.mjs 2>&1 \
             | awk '/^# pass /{count=$3} END{print count}')"
-          cd ..
+          popd >/dev/null
           CGO_ENABLED=0 go test -covermode=atomic -coverprofile="${RUNNER_TEMP}/cp.out" ./...
           # Same scaffolding exclusion as the enforcement step, so the badge
           # publishes the identical production-statement number the gate holds.
@@ -313,11 +327,13 @@ jobs:
           GO_PCT: ${{ steps.cov.outputs.go }}
           FRONT_PASS: ${{ steps.cov.outputs.front }}
         run: |
+          set -euo pipefail
           color() {
             awk -v p="$1" 'BEGIN{ if (p>=90) print "brightgreen"; else if (p>=75) print "green"; else if (p>=60) print "yellow"; else print "orange" }'
           }
           work="${RUNNER_TEMP}/badges"
-          mkdir -p "${work}" && cd "${work}"
+          mkdir -p "${work}"
+          pushd "${work}" >/dev/null
           git init -q -b badges .
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
@@ -327,5 +343,7 @@ jobs:
           # a published count is by construction a fully passing suite.
           printf '{"schemaVersion":1,"label":"frontend tests","message":"%s passing","color":"brightgreen"}\n' \
             "${FRONT_PASS}" > frontend-tests.json
-          git add . && git commit -qm "coverage badges for ${GITHUB_SHA}"
+          git add .
+          git commit -qm "coverage badges for ${GITHUB_SHA}"
           git push -q --force "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" badges
+          popd >/dev/null

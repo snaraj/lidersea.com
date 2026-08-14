@@ -69,6 +69,52 @@ def main_run_record(sha: str, run_id: int = 123) -> dict[str, object]:
     }
 
 
+def codeql_run_record(sha: str, run_id: int = 456) -> dict[str, object]:
+    record = main_run_record(sha, run_id)
+    record["name"] = "CodeQL"
+    record["path"] = ".github/workflows/codeql.yml"
+    return record
+
+
+def job_pages(workflow: str, run_id: int) -> list[dict[str, object]]:
+    expected = {
+        "pr-gate": RC.PR_GATE_MAIN_JOBS,
+        "codeql": RC.CODEQL_MAIN_JOBS,
+    }[workflow]
+    jobs = [
+        {
+            "id": 1000 + index,
+            "run_id": run_id,
+            "name": name,
+            "status": "completed",
+            "conclusion": conclusion,
+        }
+        for index, (name, conclusion) in enumerate(expected.items())
+    ]
+    midpoint = max(1, len(jobs) // 2)
+    return [
+        {"total_count": len(jobs), "jobs": jobs[:midpoint]},
+        {"total_count": len(jobs), "jobs": jobs[midpoint:]},
+    ]
+
+
+def spdx_document(marker: str) -> dict[str, object]:
+    return {
+        "SPDXID": "SPDXRef-DOCUMENT",
+        "spdxVersion": "SPDX-2.3",
+        "dataLicense": "CC0-1.0",
+        "name": f"release-{marker}",
+        "documentNamespace": f"https://example.invalid/sbom/{marker}",
+        "creationInfo": {
+            "created": "2026-08-14T00:00:00Z",
+            "creators": ["Tool: buildkit-syft-scanner"],
+        },
+        "packages": [
+            {"SPDXID": f"SPDXRef-Package-{marker}", "name": f"package-{marker}"}
+        ],
+    }
+
+
 def embedded_predicate(source: str, revision: str, marker: str) -> dict[str, object]:
     return {
         "buildDefinition": {
@@ -108,12 +154,12 @@ def exact_tag_records(tag: str, source: str, message: str, date: str) -> tuple[d
 
 def release_manifest() -> dict[str, object]:
     return RC.build_release_manifest(
-        repository="owner/site",
+        repository=RC.EXPECTED_REPOSITORY,
         source_sha="a" * 40,
         version=RC.Version.parse("0.1.10"),
-        image="ghcr.io/owner/site",
+        image=RC.EXPECTED_IMAGE,
         image_digest="sha256:" + "d" * 64,
-        chart="ghcr.io/owner/charts/site",
+        chart=RC.EXPECTED_CHART,
         chart_digest="sha256:" + "e" * 64,
     )
 
@@ -134,6 +180,10 @@ def release_record(
                 "content_type": "application/json",
                 "size": len(raw),
                 "digest": "sha256:" + hashlib.sha256(raw).hexdigest(),
+                "uploader": {
+                    "login": RC.GITHUB_ACTIONS_BOT_LOGIN,
+                    "id": RC.GITHUB_ACTIONS_BOT_ID,
+                },
             }
         ]
         asset_bytes = raw
@@ -150,7 +200,10 @@ def release_record(
             "tag_name": manifest["tag"],
             "name": "informational title is not artifact identity",
             "body": "informational notes may change\n",
-            "author": {"login": "github-actions[bot]"},
+            "author": {
+                "login": RC.GITHUB_ACTIONS_BOT_LOGIN,
+                "id": RC.GITHUB_ACTIONS_BOT_ID,
+            },
             "draft": draft,
             "prerelease": False,
             "immutable": immutable,
@@ -648,6 +701,136 @@ class MainRunBindingTests(unittest.TestCase):
         self.assertEqual(self.invoke(exact, source_sha="b" * 40), 1)
 
 
+class SuccessfulMainInventoryTests(unittest.TestCase):
+    SHA = "a" * 40
+
+    def test_exact_paginated_pr_gate_and_codeql_jobs_are_required(self):
+        self.assertEqual(
+            RC.validate_workflow_job_inventory(
+                job_pages("pr-gate", 123), workflow="pr-gate", expected_run_id=123
+            ),
+            len(RC.PR_GATE_MAIN_JOBS),
+        )
+        self.assertEqual(
+            RC.validate_workflow_job_inventory(
+                job_pages("codeql", 456), workflow="codeql", expected_run_id=456
+            ),
+            len(RC.CODEQL_MAIN_JOBS),
+        )
+
+    def test_absent_pending_skipped_failed_duplicate_and_foreign_jobs_fail(self):
+        exact = job_pages("pr-gate", 123)
+        flattened = [copy.deepcopy(job) for page in exact for job in page["jobs"]]
+        mutants: list[list[dict[str, object]]] = []
+        for name, key, value in (
+            ("security", "status", "in_progress"),
+            ("security", "conclusion", "skipped"),
+            ("application", "conclusion", "failure"),
+            ("chart", "run_id", 999),
+            ("container", "name", "foreign"),
+            ("coverage-badges", "conclusion", "skipped"),
+            ("dependency-review", "conclusion", "success"),
+        ):
+            changed = copy.deepcopy(flattened)
+            next(job for job in changed if job["name"] == name)[key] = value
+            mutants.append([{"total_count": len(changed), "jobs": changed}])
+        missing = copy.deepcopy(flattened[:-1])
+        mutants.append([{"total_count": len(missing), "jobs": missing}])
+        duplicated = copy.deepcopy(flattened)
+        duplicated.append(copy.deepcopy(duplicated[0]))
+        mutants.append([{"total_count": len(duplicated), "jobs": duplicated}])
+        inconsistent = copy.deepcopy(exact)
+        inconsistent[1]["total_count"] = len(flattened) + 1
+        mutants.append(inconsistent)
+        for index, pages in enumerate(mutants):
+            with self.subTest(index=index), self.assertRaises(RC.ContractError):
+                RC.validate_workflow_job_inventory(
+                    pages, workflow="pr-gate", expected_run_id=123
+                )
+
+        codeql = [copy.deepcopy(job) for page in job_pages("codeql", 456) for job in page["jobs"]]
+        for name in RC.CODEQL_MAIN_JOBS:
+            changed = copy.deepcopy(codeql)
+            next(job for job in changed if job["name"] == name)["conclusion"] = "skipped"
+            with self.subTest(codeql_skip=name), self.assertRaises(RC.ContractError):
+                RC.validate_workflow_job_inventory(
+                    [{"total_count": len(changed), "jobs": changed}],
+                    workflow="codeql",
+                    expected_run_id=456,
+                )
+
+    def test_codeql_poll_is_exact_sha_bounded_state_not_aggregate_inference(self):
+        exact = codeql_run_record(self.SHA)
+        self.assertEqual(
+            RC.select_codeql_main_run(
+                [{"total_count": 0, "workflow_runs": []}],
+                expected_repository="owner/site",
+                expected_source_sha=self.SHA,
+            ),
+            ("absent", None),
+        )
+        pending = copy.deepcopy(exact)
+        pending["status"] = "in_progress"
+        pending["conclusion"] = None
+        self.assertEqual(
+            RC.select_codeql_main_run(
+                [{"total_count": 1, "workflow_runs": [pending]}],
+                expected_repository="owner/site",
+                expected_source_sha=self.SHA,
+            ),
+            ("pending", 456),
+        )
+        self.assertEqual(
+            RC.select_codeql_main_run(
+                [{"total_count": 1, "workflow_runs": [exact]}],
+                expected_repository="owner/site",
+                expected_source_sha=self.SHA,
+            ),
+            ("success", 456),
+        )
+        self.assertEqual(
+            RC.validate_codeql_run_record(
+                exact,
+                expected_repository="owner/site",
+                expected_run_id=456,
+                expected_source_sha=self.SHA,
+            ),
+            self.SHA,
+        )
+
+        mutants: list[list[dict[str, object]]] = []
+        for path, value in (
+            (("head_sha",), "b" * 40),
+            (("head_branch",), "topic"),
+            (("event",), "pull_request"),
+            (("path",), ".github/workflows/foreign.yml"),
+            (("name",), "Foreign"),
+            (("repository", "full_name"), "attacker/site"),
+            (("head_repository", "full_name"), "attacker/site"),
+            (("conclusion",), "failure"),
+            (("conclusion",), "skipped"),
+        ):
+            changed = copy.deepcopy(exact)
+            parent = changed
+            for key in path[:-1]:
+                parent = parent[key]
+            parent[path[-1]] = value
+            mutants.append([{"total_count": 1, "workflow_runs": [changed]}])
+        pending_with_conclusion = copy.deepcopy(pending)
+        pending_with_conclusion["conclusion"] = "success"
+        mutants.append([{"total_count": 1, "workflow_runs": [pending_with_conclusion]}])
+        mutants.append(
+            [{"total_count": 2, "workflow_runs": [exact, copy.deepcopy(exact)]}]
+        )
+        for index, pages in enumerate(mutants):
+            with self.subTest(index=index), self.assertRaises(RC.ContractError):
+                RC.select_codeql_main_run(
+                    pages,
+                    expected_repository="owner/site",
+                    expected_source_sha=self.SHA,
+                )
+
+
 class SettingsReceiptTests(unittest.TestCase):
     @staticmethod
     def require_documented_contract(text: str) -> None:
@@ -691,6 +874,16 @@ class SettingsReceiptTests(unittest.TestCase):
             "permission-administration: read",
             "ordinary `GITHUB_TOKEN` is the sole credential",
             "mutable aliases",
+            "same-SHA main CodeQL run",
+            "both paginated job inventories",
+            "concurrent retargets fail",
+            "--include-dev-deps",
+            "snaraj/lidersea.com",
+            "ghcr.io/snaraj/lidersea-com",
+            "ghcr.io/snaraj/charts/lidersea-com",
+            "explicit, non-derived package identities",
+            "sole manifest-asset uploader",
+            "`github-actions[bot]` and numeric ID `41898282`",
             "Only-Owner-Push",
             "must remain Draft",
         ):
@@ -1035,6 +1228,16 @@ class SettingsReceiptTests(unittest.TestCase):
             "permission-administration: read",
             "ordinary `GITHUB_TOKEN` is the sole credential",
             "mutable aliases",
+            "same-SHA main CodeQL run",
+            "both paginated job inventories",
+            "concurrent retargets fail",
+            "--include-dev-deps",
+            "snaraj/lidersea.com",
+            "ghcr.io/snaraj/lidersea-com",
+            "ghcr.io/snaraj/charts/lidersea-com",
+            "explicit, non-derived package identities",
+            "sole manifest-asset uploader",
+            "`github-actions[bot]` and numeric ID `41898282`",
             "Only-Owner-Push",
             "must remain Draft",
         )
@@ -1077,6 +1280,131 @@ class ArtifactStateTests(unittest.TestCase):
             with self.subTest(status=status), self.assertRaises(RC.ContractError):
                 RC.classify_registry_response(status)
 
+    def test_registry_alias_body_header_and_expected_digest_are_one_identity(self):
+        body = b'{"mediaType":"application/vnd.oci.image.index.v1+json","schemaVersion":2}'
+        digest = "sha256:" + hashlib.sha256(body).hexdigest()
+        headers = f"HTTP/2 200\r\ndocker-content-digest: {digest}\r\n"
+        self.assertEqual(
+            RC.validate_registry_manifest_response(
+                200, body, headers, expected_digest=digest
+            ),
+            digest,
+        )
+        mutants = (
+            (404, body, headers, digest),
+            (200, body + b" ", headers, digest),
+            (200, body, headers + f"Docker-Content-Digest: {digest}\r\n", digest),
+            (200, body, headers, "sha256:" + "e" * 64),
+            (200, b'{"schemaVersion":2,"schemaVersion":2}', headers, digest),
+            (200, b"null", headers, digest),
+        )
+        for index, (status, changed_body, changed_headers, expected) in enumerate(mutants):
+            with self.subTest(index=index), self.assertRaises(RC.ContractError):
+                RC.validate_registry_manifest_response(
+                    status, changed_body, changed_headers, expected_digest=expected
+                )
+
+
+class TrivySourceCoverageTests(unittest.TestCase):
+    DEPENDENCIES = {
+        "@sveltejs/vite-plugin-svelte": "7.3.0",
+        "svelte": "5.56.8",
+        "svelte-check": "4.7.5",
+        "typescript": "6.0.3",
+        "vite": "8.2.1",
+    }
+
+    def report(self) -> dict[str, object]:
+        return {
+            "SchemaVersion": 2,
+            "ArtifactName": ".",
+            "ArtifactType": "repository",
+            "Results": [
+                {
+                    "Target": "frontend/package-lock.json",
+                    "Class": "lang-pkgs",
+                    "Type": "npm",
+                    "Packages": [
+                        {"Name": name, "Version": version, "Relationship": "direct"}
+                        for name, version in self.DEPENDENCIES.items()
+                    ],
+                    "Vulnerabilities": [],
+                },
+                {
+                    "Target": "go.mod",
+                    "Class": "lang-pkgs",
+                    "Type": "gomod",
+                    "Packages": [],
+                    "Vulnerabilities": [],
+                },
+            ],
+        }
+
+    def test_exact_frontend_dev_build_graph_is_present(self):
+        self.assertEqual(
+            RC.validate_trivy_source_report(
+                self.report(), {"devDependencies": self.DEPENDENCIES}
+            ),
+            len(self.DEPENDENCIES),
+        )
+
+    def test_high_or_critical_frontend_build_dependency_has_exact_denial(self):
+        for severity in ("HIGH", "CRITICAL"):
+            report = self.report()
+            report["Results"][0]["Vulnerabilities"] = [
+                {
+                    "VulnerabilityID": f"CVE-2026-{1 if severity == 'HIGH' else 2:04d}",
+                    "PkgName": "vite",
+                    "Severity": severity,
+                }
+            ]
+            expected = (
+                f"Trivy source scan found {severity} "
+                f"CVE-2026-{1 if severity == 'HIGH' else 2:04d} "
+                "in frontend build dependency vite"
+            )
+            with self.subTest(severity=severity), self.assertRaisesRegex(
+                RC.ContractError, re.escape(expected)
+            ):
+                RC.validate_trivy_source_report(
+                    report, {"devDependencies": self.DEPENDENCIES}
+                )
+
+    def test_suppressed_missing_duplicate_and_foreign_frontend_inventory_fail(self):
+        mutants = []
+        wrong_schema = self.report()
+        wrong_schema["SchemaVersion"] = 1
+        mutants.append(wrong_schema)
+        wrong_name = self.report()
+        wrong_name["ArtifactName"] = "frontend"
+        mutants.append(wrong_name)
+        wrong_artifact = self.report()
+        wrong_artifact["ArtifactType"] = "filesystem"
+        mutants.append(wrong_artifact)
+        missing = self.report()
+        missing["Results"] = missing["Results"][1:]
+        mutants.append(missing)
+        wrong_target = self.report()
+        wrong_target["Results"][0]["Target"] = "package-lock.json"
+        mutants.append(wrong_target)
+        wrong_type = self.report()
+        wrong_type["Results"][0]["Type"] = "gomod"
+        mutants.append(wrong_type)
+        omitted = self.report()
+        omitted["Results"][0]["Packages"] = omitted["Results"][0]["Packages"][:-1]
+        mutants.append(omitted)
+        transitive = self.report()
+        transitive["Results"][0]["Packages"][0]["Relationship"] = "indirect"
+        mutants.append(transitive)
+        duplicated = self.report()
+        duplicated["Results"].insert(0, copy.deepcopy(duplicated["Results"][0]))
+        mutants.append(duplicated)
+        for index, report in enumerate(mutants):
+            with self.subTest(index=index), self.assertRaises(RC.ContractError):
+                RC.validate_trivy_source_report(
+                    report, {"devDependencies": self.DEPENDENCIES}
+                )
+
 
 class PublisherBindingTests(unittest.TestCase):
     SHA = "a" * 40
@@ -1088,32 +1416,57 @@ class PublisherBindingTests(unittest.TestCase):
                 path = root / name
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(contents, encoding="utf-8")
-            workflow_ref = "owner/site/.github/workflows/release-publisher.yml@refs/heads/main"
+            workflow_ref = (
+                f"{RC.EXPECTED_REPOSITORY}/.github/workflows/"
+                "release-publisher.yml@refs/heads/main"
+            )
             intent = RC.validate_publisher(
                 root,
                 self.SHA,
                 self.SHA,
                 "refs/heads/main",
                 "workflow_dispatch",
-                "owner/site",
+                RC.EXPECTED_REPOSITORY,
                 workflow_ref,
+                RC.EXPECTED_IMAGE,
+                RC.EXPECTED_CHART,
             )
             self.assertEqual(intent, RC.ReleaseIntent(self.SHA, RC.Version.parse("0.1.10")))
-            for source, checkout, ref, event_name, repository, selected_workflow in (
-                ("b" * 40, self.SHA, "refs/heads/main", "workflow_dispatch", "owner/site", workflow_ref),
-                (self.SHA, "b" * 40, "refs/heads/main", "workflow_dispatch", "owner/site", workflow_ref),
-                (self.SHA, self.SHA, "refs/tags/v0.1.10", "workflow_dispatch", "owner/site", workflow_ref),
-                (self.SHA, self.SHA, "refs/heads/main", "push", "owner/site", workflow_ref),
-                (self.SHA, self.SHA, "refs/heads/main", "workflow_dispatch", "other/site", workflow_ref),
+            exact = (
+                self.SHA,
+                self.SHA,
+                "refs/heads/main",
+                "workflow_dispatch",
+                RC.EXPECTED_REPOSITORY,
+                workflow_ref,
+                RC.EXPECTED_IMAGE,
+                RC.EXPECTED_CHART,
+            )
+            mutants = (
+                ("b" * 40, *exact[1:]),
+                (exact[0], "b" * 40, *exact[2:]),
+                (*exact[:2], "refs/tags/v0.1.10", *exact[3:]),
+                (*exact[:3], "push", *exact[4:]),
+                (*exact[:4], "snaraj/lidersea-com", *exact[5:]),
                 (
-                    self.SHA,
-                    self.SHA,
-                    "refs/heads/main",
-                    "workflow_dispatch",
-                    "owner/site",
-                    "owner/site/.github/workflows/release-publisher.yml@refs/tags/v0.1.10",
+                    *exact[:5],
+                    f"{RC.EXPECTED_REPOSITORY}/.github/workflows/"
+                    "release-publisher.yml@refs/tags/v0.1.10",
+                    *exact[6:],
                 ),
-            ):
+                (*exact[:6], "ghcr.io/snaraj/lidersea.com", exact[7]),
+                (*exact[:7], "ghcr.io/snaraj/charts/lidersea.com"),
+            )
+            for (
+                source,
+                checkout,
+                ref,
+                event_name,
+                repository,
+                selected_workflow,
+                image,
+                chart,
+            ) in mutants:
                 with self.subTest(
                     source=source,
                     checkout=checkout,
@@ -1121,6 +1474,8 @@ class PublisherBindingTests(unittest.TestCase):
                     event=event_name,
                     repository=repository,
                     workflow=selected_workflow,
+                    image=image,
+                    chart=chart,
                 ), self.assertRaises(RC.ContractError):
                     RC.validate_publisher(
                         root,
@@ -1130,7 +1485,53 @@ class PublisherBindingTests(unittest.TestCase):
                         event_name,
                         repository,
                         selected_workflow,
+                        image,
+                        chart,
                     )
+
+    def test_real_dotted_repository_and_hyphenated_packages_are_cli_exact(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / RC.RELEASE_MANIFEST_NAME
+            exact = [
+                "release-manifest",
+                "--output",
+                str(output),
+                "--repository",
+                RC.EXPECTED_REPOSITORY,
+                "--source-sha",
+                self.SHA,
+                "--version",
+                "0.1.10",
+                "--image",
+                RC.EXPECTED_IMAGE,
+                "--image-digest",
+                "sha256:" + "d" * 64,
+                "--chart",
+                RC.EXPECTED_CHART,
+                "--chart-digest",
+                "sha256:" + "e" * 64,
+            ]
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(RC.main(exact), 0)
+            manifest, _raw = RC.read_release_manifest(
+                output, expected_repository=RC.EXPECTED_REPOSITORY, require_mode=False
+            )
+            self.assertEqual(manifest["artifacts"]["image"]["registry"], RC.EXPECTED_IMAGE)
+            self.assertEqual(manifest["artifacts"]["chart"]["registry"], RC.EXPECTED_CHART)
+
+            for flag, wrong in (
+                ("--repository", "snaraj/lidersea-com"),
+                ("--image", "ghcr.io/snaraj/lidersea.com"),
+                ("--chart", "ghcr.io/snaraj/charts/lidersea.com"),
+            ):
+                mutant = list(exact)
+                mutant[mutant.index("--output") + 1] = str(
+                    Path(temporary) / f"wrong-{flag[2:]}.json"
+                )
+                mutant[mutant.index(flag) + 1] = wrong
+                with self.subTest(flag=flag), contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(RC.main(mutant), 1)
+                    self.assertFalse(Path(mutant[2]).exists())
 
 
 class ImmutableMetadataTests(unittest.TestCase):
@@ -1216,6 +1617,8 @@ class ImmutableMetadataTests(unittest.TestCase):
         for path, value in (
             (("tag_name",), "v0.1.11"),
             (("author", "login"), "owner"),
+            (("author", "id"), 1),
+            (("author", "id"), None),
             (("draft",), True),
             (("prerelease",), True),
             (("immutable",), False),
@@ -1225,6 +1628,9 @@ class ImmutableMetadataTests(unittest.TestCase):
             (("assets", 0, "name"), "foreign.json"),
             (("assets", 0, "state"), "new"),
             (("assets", 0, "content_type"), "application/octet-stream"),
+            (("assets", 0, "uploader", "login"), "owner"),
+            (("assets", 0, "uploader", "id"), 1),
+            (("assets", 0, "uploader"), None),
             (("assets", 0, "size"), len(raw) + 1),
             (("assets", 0, "digest"), "sha256:" + "f" * 64),
         ):
@@ -1284,7 +1690,9 @@ class ImmutableMetadataTests(unittest.TestCase):
             path = Path(temporary) / RC.RELEASE_MANIFEST_NAME
             RC.write_release_manifest(path, manifest)
             parsed, raw = RC.read_release_manifest(
-                path, expected_repository="owner/site", require_mode=os.name != "nt"
+                path,
+                expected_repository=RC.EXPECTED_REPOSITORY,
+                require_mode=os.name != "nt",
             )
             self.assertEqual(parsed, manifest)
             self.assertEqual(raw, canonical)
@@ -1460,7 +1868,7 @@ class PublicationTransactionTests(unittest.TestCase):
                 "--manifest",
                 str(manifest_path),
                 "--repository",
-                "owner/site",
+                RC.EXPECTED_REPOSITORY,
             ]
             self.assertEqual(invoke([*release_args, "--require", "absent"]), 0)
             self.assertEqual(invoke([*release_args, "--require", "exact"]), 1)
@@ -1481,7 +1889,7 @@ class PublicationTransactionTests(unittest.TestCase):
                 "--asset-content",
                 str(asset_path),
                 "--repository",
-                "owner/site",
+                RC.EXPECTED_REPOSITORY,
             ]
             self.assertEqual(invoke([*exact_args, "--require", "exact"]), 0)
             self.assertEqual(invoke([*exact_args, "--require", "draft-ready"]), 1)
@@ -1558,6 +1966,108 @@ class AttestationSetTests(unittest.TestCase):
                     source=self.SOURCE,
                     revision=self.REVISION,
                     platform="linux/amd64",
+                )
+
+
+class SbomAttestationTests(unittest.TestCase):
+    IMAGE = "ghcr.io/owner/site"
+    DIGEST = "sha256:" + "d" * 64
+
+    def documents(self) -> dict[str, dict[str, object]]:
+        return {
+            "linux/amd64": spdx_document("amd64"),
+            "linux/arm64": spdx_document("arm64"),
+        }
+
+    def platform_map(self) -> dict[str, object]:
+        return {
+            platform: {"SPDX": document}
+            for platform, document in self.documents().items()
+        }
+
+    def expected(self) -> dict[str, dict[str, object]]:
+        return {
+            platform: RC.build_sbom_statement(
+                document,
+                image=self.IMAGE,
+                digest=self.DIGEST,
+                platform=platform,
+            )
+            for platform, document in self.documents().items()
+        }
+
+    @staticmethod
+    def encode(statements) -> str:
+        return "\n".join(json.dumps(verified_record(statement)) for statement in statements)
+
+    def test_exact_non_null_platform_payloads_and_signed_set_are_required(self):
+        self.assertEqual(RC.validate_sbom_platform_map(self.platform_map()), self.documents())
+        expected = self.expected()
+        self.assertEqual(
+            RC.validate_sbom_attestation_set(self.encode(expected.values()), expected), 2
+        )
+
+    def test_disabled_missing_null_empty_duplicate_foreign_and_malformed_sboms_fail(self):
+        exact = self.platform_map()
+        mutants = []
+        for platform, value in (
+            ("linux/amd64", None),
+            ("linux/amd64", {}),
+            ("linux/amd64", {"SPDX": None}),
+            ("linux/amd64", {"SPDX": {}}),
+            ("linux/amd64", {"SPDX": spdx_document("amd64"), "foreign": {}}),
+        ):
+            changed = copy.deepcopy(exact)
+            changed[platform] = value
+            mutants.append(changed)
+        missing = copy.deepcopy(exact)
+        del missing["linux/arm64"]
+        mutants.append(missing)
+        foreign = copy.deepcopy(exact)
+        foreign["linux/s390x"] = {"SPDX": spdx_document("s390x")}
+        mutants.append(foreign)
+        empty_packages = copy.deepcopy(exact)
+        empty_packages["linux/arm64"]["SPDX"]["packages"] = []
+        mutants.append(empty_packages)
+        for index, value in enumerate(mutants):
+            with self.subTest(index=index), self.assertRaises(RC.ContractError):
+                RC.validate_sbom_platform_map(value)
+
+        expected = self.expected()
+        amd64 = expected["linux/amd64"]
+        wrong_subject = copy.deepcopy(expected["linux/arm64"])
+        wrong_subject["subject"][0]["name"] = self.IMAGE
+        wrong_platform = copy.deepcopy(expected["linux/arm64"])
+        wrong_platform["subject"][0]["name"] = wrong_platform["subject"][0]["name"].replace(
+            "linux/arm64", "linux/s390x"
+        )
+        wrong_payload = copy.deepcopy(expected["linux/arm64"])
+        wrong_payload["predicate"]["name"] = "foreign"
+        malformed = copy.deepcopy(expected["linux/arm64"])
+        malformed["predicate"]["packages"] = []
+        for statements in (
+            [amd64],
+            [amd64, amd64],
+            [amd64, wrong_subject],
+            [amd64, wrong_platform],
+            [amd64, wrong_payload],
+            [amd64, malformed],
+            [*expected.values(), copy.deepcopy(amd64)],
+        ):
+            with self.subTest(count=len(statements)), self.assertRaises(RC.ContractError):
+                RC.validate_sbom_attestation_set(self.encode(statements), expected)
+
+    def test_sbom_cli_rejects_recursive_duplicate_members(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            sbom = Path(temporary) / "sbom.json"
+            sbom.write_text(
+                '{"linux/amd64":{"SPDX":{"SPDXID":"one","SPDXID":"two"}},'
+                '"linux/arm64":null}',
+                encoding="utf-8",
+            )
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(
+                    RC.main(["sbom-platforms", "--json", str(sbom)]), 1
                 )
 
 
@@ -1809,6 +2319,20 @@ class ExistingImageShellPathTests(unittest.TestCase):
                 (runner / f"fixture-{architecture}.json").write_text(
                     json.dumps(predicate), encoding="utf-8"
                 )
+                (runner / f"sbom-{architecture}.json").write_text(
+                    json.dumps(spdx_document(architecture)), encoding="utf-8"
+                )
+            (runner / "sbom-map.json").write_text(
+                json.dumps(
+                    {
+                        f"linux/{architecture}": {
+                            "SPDX": spdx_document(architecture)
+                        }
+                        for architecture in ("amd64", "arm64")
+                    }
+                ),
+                encoding="utf-8",
+            )
             output = runner / "github-output.txt"
             prelude = r'''
 python3() {
@@ -1863,10 +2387,12 @@ curl() {
 
 docker() {
   case "$*" in
+    *'.SBOM'*linux/amd64*) cat "${RUNNER_TEMP}/sbom-amd64.json" ;;
+    *'.SBOM'*linux/arm64*) cat "${RUNNER_TEMP}/sbom-arm64.json" ;;
     *linux/amd64*) cat "${RUNNER_TEMP}/fixture-amd64.json" ;;
     *linux/arm64*) cat "${RUNNER_TEMP}/fixture-arm64.json" ;;
     *'.Provenance'*) printf '{"linux/amd64":{},"linux/arm64":{}}' ;;
-    *'.SBOM'*) printf '{"linux/amd64":{},"linux/arm64":{}}' ;;
+    *'.SBOM'*) cat "${RUNNER_TEMP}/sbom-map.json" ;;
     *) return 2 ;;
   esac
 }
@@ -1875,9 +2401,15 @@ cosign() {
   case "$1" in
     verify) return 0 ;;
     verify-attestation)
-      "${TEST_PYTHON}" -c 'import base64,json,sys; [print(json.dumps({"payload":base64.b64encode(open(path,"rb").read()).decode("ascii")})) for path in sys.argv[1:]]' \
-        "${RUNNER_TEMP}/existing-linux-amd64.statement.json" \
-        "${RUNNER_TEMP}/existing-linux-arm64.statement.json"
+      if [[ "$*" == *'--type spdxjson'* ]]; then
+        "${TEST_PYTHON}" -c 'import base64,json,sys; [print(json.dumps({"payload":base64.b64encode(open(path,"rb").read()).decode("ascii")})) for path in sys.argv[1:]]' \
+          "${RUNNER_TEMP}/existing-linux-amd64.sbom.statement.json" \
+          "${RUNNER_TEMP}/existing-linux-arm64.sbom.statement.json"
+      else
+        "${TEST_PYTHON}" -c 'import base64,json,sys; [print(json.dumps({"payload":base64.b64encode(open(path,"rb").read()).decode("ascii")})) for path in sys.argv[1:]]' \
+          "${RUNNER_TEMP}/existing-linux-amd64.statement.json" \
+          "${RUNNER_TEMP}/existing-linux-arm64.statement.json"
+      fi
       ;;
     *) return 2 ;;
   esac
@@ -1900,9 +2432,10 @@ cosign() {
                 }
             )
             completed = subprocess.run(
-                [self.bash_executable(), "-c", prelude + "\n" + block],
+                [self.bash_executable(), "-s"],
                 cwd=ROOT,
                 env=environment,
+                input=prelude + "\n" + block,
                 check=False,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -1920,17 +2453,136 @@ cosign() {
         self.assertIn("state=complete\n", output)
         self.assertRegex(output, r"digest=sha256:[0-9a-f]{64}\n")
 
-        assignment = 'verified_count="${validated_count}"'
+        assignment = 'verified_count="$((validated_count + validated_sbom_count))"'
         self.assertIn(assignment, block)
         mutants = (
             block.replace(assignment, "", 1),
-            block.replace(assignment, 'verified_count="${#expected_attestations[@]}"', 1),
+            block.replace(assignment, 'verified_count="${validated_count}"', 1),
         )
         for index, mutant in enumerate(mutants):
             with self.subTest(count_mutant=index):
                 killed, _output = self.execute(mutant)
                 self.assertNotEqual(killed.returncode, 0, killed.stdout + killed.stderr)
                 self.assertIn("existing image state: burned", killed.stdout)
+
+
+class RegistryAliasShellTests(unittest.TestCase):
+    @staticmethod
+    def execute(mode: str, alias: str, expected: str) -> subprocess.CompletedProcess[str]:
+        with tempfile.TemporaryDirectory(dir=ROOT, prefix=".registry-alias-") as temporary:
+            runner = Path(temporary)
+            relative = runner.relative_to(ROOT).as_posix()
+            (runner / "exact.json").write_text(
+                '{"mediaType":"application/vnd.oci.image.index.v1+json","schemaVersion":2}',
+                encoding="utf-8",
+            )
+            (runner / "foreign.json").write_text(
+                '{"mediaType":"application/vnd.oci.image.manifest.v1+json","schemaVersion":2}',
+                encoding="utf-8",
+            )
+            (runner / "calls").write_text("0\n", encoding="utf-8")
+            prelude = r'''
+python3() { "${TEST_PYTHON}" "$@"; }
+sleep() { :; }
+curl() {
+  local all="$*" output='' headers=''
+  if [[ "${all}" == *'https://ghcr.io/token'* ]]; then
+    printf '{"token":"fixture-token"}'
+    return 0
+  fi
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --output) output="$2"; shift 2 ;;
+      --dump-header) headers="$2"; shift 2 ;;
+      --write-out|--header|--proto) shift 2 ;;
+      --silent|--show-error|--location|--fail-with-body) shift ;;
+      *) shift ;;
+    esac
+  done
+  local count
+  count="$(tr -d '\r\n' < "${MOCK_CALLS}")"
+  count=$((count + 1))
+  printf '%s\n' "${count}" > "${MOCK_CALLS}"
+  if [ "${MOCK_MODE}" = all-loss ] || \
+     { [ "${MOCK_MODE}" = response-loss ] && [ "${count}" -eq 1 ]; }; then
+    return 7
+  fi
+  if [ "${MOCK_MODE}" = absent ]; then
+    printf '{}\n' > "${output}"
+    : > "${headers}"
+    printf '404'
+    return 0
+  fi
+  if [ "${MOCK_MODE}" = retarget ]; then
+    cp "${MOCK_FOREIGN}" "${output}"
+  else
+    cp "${MOCK_EXACT}" "${output}"
+  fi
+  local digest
+  digest="$(sha256sum "${output}" | awk '{print $1}')"
+  printf 'HTTP/2 200\r\ndocker-content-digest: sha256:%s\r\n' "${digest}" > "${headers}"
+  printf '200'
+}
+'''
+            block = (
+                "source scripts/ci/verify-registry-alias.sh "
+                f"'{alias}' '{expected}' "
+                "'application/vnd.oci.image.index.v1+json' fixture"
+            )
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "TEST_PYTHON": ExistingImageShellPathTests.bash_path(sys.executable),
+                    "RUNNER_TEMP": relative,
+                    "GITHUB_ACTOR": "release-fixture",
+                    "GHCR_PASSWORD": "fixture-password",
+                    "MOCK_MODE": mode,
+                    "MOCK_CALLS": f"{relative}/calls",
+                    "MOCK_EXACT": f"{relative}/exact.json",
+                    "MOCK_FOREIGN": f"{relative}/foreign.json",
+                }
+            )
+            return subprocess.run(
+                [ExistingImageShellPathTests.bash_executable(), "-c", prelude + "\n" + block],
+                cwd=ROOT,
+                env=environment,
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                timeout=30,
+            )
+
+    def test_exact_response_loss_retry_and_concurrent_retarget_paths(self):
+        body = b'{"mediaType":"application/vnd.oci.image.index.v1+json","schemaVersion":2}'
+        expected = "sha256:" + hashlib.sha256(body).hexdigest()
+        for alias in (
+            "ghcr.io/owner/site:v0.1.10",
+            "ghcr.io/owner/charts/site:0.1.10",
+        ):
+            with self.subTest(alias=alias):
+                exact = self.execute("exact", alias, expected)
+                self.assertEqual(exact.returncode, 0, exact.stdout + exact.stderr)
+                self.assertEqual(exact.stdout.strip(), expected)
+                recovered = self.execute("response-loss", alias, expected)
+                self.assertEqual(recovered.returncode, 0, recovered.stdout + recovered.stderr)
+                self.assertIn("response was lost", recovered.stderr)
+
+        retargeted = self.execute(
+            "retarget", "ghcr.io/owner/site:v0.1.10", expected
+        )
+        self.assertNotEqual(retargeted.returncode, 0)
+        self.assertIn(
+            "DENY: registry alias was absent or retargeted after publication",
+            retargeted.stderr,
+        )
+        absent = self.execute("absent", "ghcr.io/owner/site:v0.1.10", expected)
+        self.assertNotEqual(absent.returncode, 0)
+        self.assertIn("unexpected HTTP 404", absent.stderr)
+        lost = self.execute("all-loss", "ghcr.io/owner/site:v0.1.10", expected)
+        self.assertNotEqual(lost.returncode, 0)
+        self.assertIn("remained unavailable after five observations", lost.stderr)
 
 
 class PublicationShellTransactionTests(unittest.TestCase):
@@ -2054,7 +2706,7 @@ gh() {
                     "TEST_PYTHON": ExistingImageShellPathTests.bash_path(sys.executable),
                     "RUNNER_TEMP": relative,
                     "GITHUB_API_URL": "https://api.github.test",
-                    "GITHUB_REPOSITORY": "owner/site",
+                    "GITHUB_REPOSITORY": RC.EXPECTED_REPOSITORY,
                     "GH_TOKEN": "mutation-token",
                     "SOURCE_SHA": self.SOURCE,
                     "TAG": self.TAG,
@@ -2134,6 +2786,13 @@ gh() {
             prelude = r'''
 python3() { "${TEST_PYTHON}" "$@"; }
 sleep() { :; }
+bash() {
+  if [ "$1" = scripts/ci/verify-registry-alias.sh ]; then
+    printf '%s\n' "$3"
+    return 0
+  fi
+  command bash "$@"
+}
 curl() {
   local output='' url=''
   while [ "$#" -gt 0 ]; do
@@ -2180,8 +2839,16 @@ gh() {
                     "TEST_PYTHON": ExistingImageShellPathTests.bash_path(sys.executable),
                     "RUNNER_TEMP": relative,
                     "GITHUB_API_URL": "https://api.github.test",
-                    "GITHUB_REPOSITORY": "owner/site",
                     "GH_TOKEN": "mutation-token",
+                    "GHCR_PASSWORD": "mutation-token",
+                    "GITHUB_ACTOR": "release-fixture",
+                    "GITHUB_REPOSITORY": RC.EXPECTED_REPOSITORY,
+                    "IMAGE": RC.EXPECTED_IMAGE,
+                    "CHART": RC.EXPECTED_CHART,
+                    "TAG": self.TAG,
+                    "VERSION": "0.1.10",
+                    "IMAGE_DIGEST": "sha256:" + "d" * 64,
+                    "CHART_DIGEST": "sha256:" + "e" * 64,
                     "MOCK_MODE": mode,
                     "MOCK_STATE": f"{relative}/state",
                     "MOCK_CALLS": f"{relative}/calls",
@@ -2279,8 +2946,95 @@ class WorkflowStructureTests(unittest.TestCase):
         if 'helm package chart --version "${TAG}"' in publisher or '--version "v${version}"' in publisher:
             raise ValueError("Helm package version must not gain a v or double-v prefix")
 
+    @classmethod
+    def require_releasable_main_job_definitions(cls, gate: str, codeql: str) -> None:
+        for name, following in (
+            ("security", "dependency-review"),
+            ("application", "chart"),
+            ("chart", "container"),
+            ("container", "coverage-badges"),
+        ):
+            job = cls.job(gate, name, following)
+            if re.search(r"(?m)^    if:", job):
+                raise ValueError(f"required main PR-gate job gained a skip condition: {name}")
+        dependency = cls.job(gate, "dependency-review", "application")
+        if "if: github.event_name == 'pull_request'" not in dependency:
+            raise ValueError("dependency-review event-specific skip is not exact")
+        coverage = cls.job(gate, "coverage-badges")
+        if "if: github.event_name == 'push' && github.ref == 'refs/heads/main'" not in coverage:
+            raise ValueError("coverage-badges main-only conclusion is not exact")
+        analyze = cls.job(codeql, "analyze")
+        if re.search(r"(?m)^    if:", analyze):
+            raise ValueError("CodeQL analyze job gained a skip condition")
+
+    @classmethod
+    def require_badge_shell_strictness(cls, gate: str) -> None:
+        coverage = cls.job(gate, "coverage-badges")
+        for required in (
+            "set -euo pipefail",
+            "pushd frontend >/dev/null",
+            "popd >/dev/null",
+            'pushd "${work}" >/dev/null',
+        ):
+            if required not in coverage:
+                raise ValueError(f"coverage-badges shell strictness lost: {required}")
+        if coverage.count("set -euo pipefail") < 2 or coverage.count("popd >/dev/null") < 2:
+            raise ValueError("both coverage-badge shell blocks must fail closed")
+        if "cd frontend" in coverage or 'mkdir -p "${work}" && cd' in coverage:
+            raise ValueError("coverage-badges retained fail-open directory changes")
+
+    @staticmethod
+    def require_trivy_source_gate(gate: str) -> None:
+        for required in (
+            "trivy fs --scanners vuln --include-dev-deps --list-all-pkgs",
+            "--severity HIGH,CRITICAL --exit-code 1 --format json",
+            "release_contract.py trivy-source",
+            "--package-json frontend/package.json",
+        ):
+            if required not in gate:
+                raise ValueError(f"Trivy frontend source gate lost: {required}")
+
+    @staticmethod
+    def require_alias_and_sbom_closure(publisher: str) -> None:
+        for required in (
+            "registry-manifest",
+            "scripts/ci/verify-registry-alias.sh",
+            "Re-resolve both intended aliases before manifest staging",
+            '"${IMAGE}:${TAG}" "${IMAGE_DIGEST}"',
+            '"${CHART}:${VERSION}" "${CHART_DIGEST}"',
+            "verify_publication_aliases",
+            "sbom: true",
+            "sbom-platforms",
+            "sbom-statement",
+            "sbom-set",
+            "cosign verify-attestation --type spdxjson --output json",
+            "${{ env.IMAGE }}:${{ steps.release.outputs.tag }}",
+            'helm push "${RUNNER_TEMP}/${chart_name}-${version}.tgz" "oci://${CHART%/*}"',
+        ):
+            if required not in publisher:
+                raise ValueError(f"publisher alias/SBOM closure lost: {required}")
+        if publisher.count("scripts/ci/verify-registry-alias.sh") < 6:
+            raise ValueError("both aliases must be rebound after push, before staging, and before immutable publication")
+        if publisher.count("sbom-platforms") < 2 or publisher.count("sbom-set") < 2:
+            raise ValueError("new and reused images must validate exact SBOM platform and signed sets")
+        if publisher.count("verify_publication_aliases") < 3:
+            raise ValueError("Release create/retry and immutable edit must recheck both aliases")
+        resolve = publisher.index("Re-resolve both intended aliases before manifest staging")
+        manifest = publisher.index("Generate the deterministic release manifest")
+        release = publisher.index("Create the draft, upload the manifest, and publish immutably")
+        if not resolve < manifest < release:
+            raise ValueError("alias re-resolution must immediately precede manifest and Release staging")
+        pre_manifest = publisher[resolve:manifest]
+        for exact_binding in (
+            '"${IMAGE}:${TAG}" "${IMAGE_DIGEST}"',
+            '"${CHART}:${VERSION}" "${CHART_DIGEST}"',
+        ):
+            if exact_binding not in pre_manifest:
+                raise ValueError(f"pre-manifest alias binding lost: {exact_binding}")
+
     @staticmethod
     def require_exact_release_wiring(orchestrator: str, publisher: str) -> None:
+        WorkflowStructureTests.require_alias_and_sbom_closure(publisher)
         for required in (
             "fetch-depth: 0",
             "release-window",
@@ -2319,6 +3073,9 @@ class WorkflowStructureTests(unittest.TestCase):
             "attestation-statement",
             "attestation-set",
             "cosign verify-attestation --type slsaprovenance1 --output json",
+            "sbom-statement",
+            "sbom-set",
+            "cosign verify-attestation --type spdxjson --output json",
         ):
             if publisher.count(repeated) < 2:
                 raise ValueError(f"publisher must use {repeated} for both existing and new images")
@@ -2347,11 +3104,22 @@ class WorkflowStructureTests(unittest.TestCase):
     def require_successful_main_privilege_boundary(orchestrator: str, publisher: str) -> None:
         authorize = WorkflowStructureTests.job(publisher, "authorize", "immutable_settings")
         publish = WorkflowStructureTests.job(publisher, "publish")
+        for exact_destination in (
+            f"IMAGE: {RC.EXPECTED_IMAGE}",
+            f"CHART: {RC.EXPECTED_CHART}",
+        ):
+            if exact_destination not in publisher:
+                raise ValueError(
+                    f"publisher package destination is not exact: {exact_destination}"
+                )
         for required in (
             "actions: read",
             "contents: read",
             "main-run-record",
+            "codeql-run-record",
+            "workflow-jobs",
             'actions/runs/${MAIN_RUN_ID}',
+            'actions/runs/${CODEQL_RUN_ID}',
             "authority/scripts/ci/release_contract.py",
             "ref: ${{ github.sha }}",
             "path: authority",
@@ -2359,6 +3127,9 @@ class WorkflowStructureTests(unittest.TestCase):
             '--repository "${GITHUB_REPOSITORY}"',
             '--source-sha "${SOURCE_SHA}"',
             'test "${authorized_sha}" = "${SOURCE_SHA}"',
+            'test "${authorized_codeql_sha}" = "${SOURCE_SHA}"',
+            '--workflow pr-gate --run-id "${MAIN_RUN_ID}"',
+            '--workflow codeql --run-id "${CODEQL_RUN_ID}"',
             'source_sha=%s\\n',
         ):
             if required not in authorize:
@@ -2373,21 +3144,57 @@ class WorkflowStructureTests(unittest.TestCase):
             "fetch-depth: 0",
             "persist-credentials: false",
             "SOURCE_SHA: ${{ needs.authorize.outputs.source_sha }}",
-            'workflow-ref "${GITHUB_WORKFLOW_REF}"',
             "@refs/heads/main",
         ):
             if required not in publish:
                 raise ValueError(f"privileged publication lost main-run dependency: {required}")
+        package_bind = publish.index(
+            "Bind protected workflow, authorized checkout, and committed locks"
+        )
+        first_registry_read = publish.index(
+            "Classify an absent, complete, or burned image tag"
+        )
+        if package_bind > first_registry_read:
+            raise ValueError("package identities must bind before registry side effects")
+        binding_step = publish.split(
+            "- name: Bind protected workflow, authorized checkout, and committed locks",
+            1,
+        )[1].split("- name: Install checksum-verified tools", 1)[0]
+        for required in (
+            'workflow-ref "${GITHUB_WORKFLOW_REF}"',
+            '--image "${IMAGE}"',
+            '--chart "${CHART}"',
+        ):
+            if required not in binding_step:
+                raise ValueError(
+                    f"pre-side-effect package identity binding lost: {required}"
+                )
         for required in (
             "MAIN_RUN_ID: ${{ github.event.workflow_run.id }}",
+            "CODEQL_RUN_ID: ${{ steps.main_ci.outputs.codeql_run_id }}",
+            "codeql-run-list",
+            "codeql-run-record",
+            "workflow-jobs",
+            "actions/workflows/codeql.yml/runs?branch=main&event=push&head_sha=${SOURCE_SHA}",
+            "for _ in $(seq 1 30)",
             "--ref main",
             '-f main_run_id="${MAIN_RUN_ID}"',
+            '-f codeql_run_id="${CODEQL_RUN_ID}"',
         ):
             if required not in orchestrator:
                 raise ValueError(f"orchestrator lost exact main-run dispatch binding: {required}")
         if '--ref "${TAG}"' in orchestrator:
             raise ValueError("publisher workflow must never be selected from a mutable tag ref")
-        for required in ("main_run_id:", "source_sha:", "release-${{ inputs.source_sha }}"):
+        if orchestrator.index("Authorize exact successful PR-gate and CodeQL main jobs") > orchestrator.index(
+            "Create or verify the exact immutable annotated tag"
+        ):
+            raise ValueError("exact main job inventories must authorize before any tag side effect")
+        for required in (
+            "main_run_id:",
+            "codeql_run_id:",
+            "source_sha:",
+            "release-${{ inputs.source_sha }}",
+        ):
             if required not in publisher:
                 raise ValueError(f"publisher dispatch interface lost: {required}")
         for forbidden in ("GITHUB_SHA", "GITHUB_REF_NAME", "@${GITHUB_REF}"):
@@ -2467,8 +3274,13 @@ class WorkflowStructureTests(unittest.TestCase):
             "tag-record",
             "Audit mutable registry aliases against immutable manifest digests",
             'test "${observed}" = "${expected}"',
+            "registry-manifest",
             "attestation-set",
             "json-keys",
+            "sbom-platforms",
+            "sbom-statement",
+            "sbom-set",
+            "cosign verify-attestation --type spdxjson --output json",
             "audit-sbom.json",
             "CHART_DIGEST",
             "Rescan the immutable image digest at HIGH and CRITICAL",
@@ -2479,6 +3291,8 @@ class WorkflowStructureTests(unittest.TestCase):
                 raise ValueError(f"scheduled release-integrity audit lost: {required}")
         if audit.count("cosign verify --certificate-identity") < 2:
             raise ValueError("scheduled audit must verify both image and chart signatures")
+        if audit.count("sbom-statement") < 1 or audit.count("sbom-set") < 1:
+            raise ValueError("scheduled audit must bind exact signed per-platform SPDX payloads")
         for forbidden in (
             "contents: write",
             "packages: write",
@@ -2499,6 +3313,31 @@ class WorkflowStructureTests(unittest.TestCase):
         orchestrator = (ROOT / ".github/workflows/release-after-main.yml").read_text(encoding="utf-8")
         publisher = (ROOT / ".github/workflows/release-publisher.yml").read_text(encoding="utf-8")
         audit = (ROOT / ".github/workflows/release-integrity-audit.yml").read_text(encoding="utf-8")
+        self.require_releasable_main_job_definitions(gate, codeql)
+        self.require_badge_shell_strictness(gate)
+        for changed_gate, changed_codeql in (
+            (
+                gate.replace("  security:\n    runs-on:", "  security:\n    if: false\n    runs-on:", 1),
+                codeql,
+            ),
+            (
+                gate,
+                codeql.replace("  analyze:\n    runs-on:", "  analyze:\n    if: false\n    runs-on:", 1),
+            ),
+        ):
+            with self.assertRaises(ValueError):
+                self.require_releasable_main_job_definitions(changed_gate, changed_codeql)
+        for mutant in (
+            gate.replace(
+                "          set -euo pipefail\n          pushd frontend",
+                "          set -o pipefail\n          pushd frontend",
+                1,
+            ),
+            gate.replace("pushd frontend >/dev/null", "cd frontend", 1),
+            gate.replace('pushd "${work}" >/dev/null', 'cd "${work}"', 1),
+        ):
+            with self.assertRaises(ValueError):
+                self.require_badge_shell_strictness(mutant)
         for workflow in (gate, codeql):
             self.assertIn("github.event.pull_request.number || github.sha", workflow)
             self.assertIn("cancel-in-progress: ${{ github.event_name == 'pull_request' }}", workflow)
@@ -2515,13 +3354,58 @@ class WorkflowStructureTests(unittest.TestCase):
         self.assertIn("source_sha:", publisher)
         self.assertNotRegex(publisher, r"(?ms)^\s+push:\s*\n\s+tags:")
         self.require_successful_main_privilege_boundary(orchestrator, publisher)
+        for package_mutant in (
+            publisher.replace(
+                f"IMAGE: {RC.EXPECTED_IMAGE}",
+                "IMAGE: ghcr.io/snaraj/lidersea.com",
+                1,
+            ),
+            publisher.replace(
+                f"CHART: {RC.EXPECTED_CHART}",
+                "CHART: ghcr.io/snaraj/charts/lidersea.com",
+                1,
+            ),
+            publisher.replace('--image "${IMAGE}"', "", 1),
+            publisher.replace('--chart "${CHART}"', "", 1),
+        ):
+            with self.assertRaises(ValueError):
+                self.require_successful_main_privilege_boundary(
+                    orchestrator, package_mutant
+                )
         self.require_settings_token_isolation(orchestrator, publisher)
         self.assertGreaterEqual(publisher.count("registry-state --http-status"), 2)
         self.assertGreaterEqual(publisher.count("--data-urlencode \"scope=repository:"), 2)
-        self.assertGreaterEqual(publisher.count("docker-content-digest:"), 2)
+        self.assertGreaterEqual(publisher.count("registry-manifest"), 2)
+        self.assertGreaterEqual(publisher.count("scripts/ci/verify-registry-alias.sh"), 6)
         self.assertNotIn("if ! docker buildx imagetools inspect \"${IMAGE}:${TAG}\"", publisher)
         self.assertNotIn("if ! helm show chart", publisher)
         self.require_tag_partition(publisher)
+        self.require_alias_and_sbom_closure(publisher)
+        for mutant in (
+            publisher.replace(
+                "${{ env.IMAGE }}:${{ steps.release.outputs.tag }}",
+                "${{ env.IMAGE }}:wrong-${{ steps.release.outputs.tag }}",
+                1,
+            ),
+            publisher.replace(
+                'helm push "${RUNNER_TEMP}/${chart_name}-${version}.tgz" "oci://${CHART%/*}"',
+                'helm push "${RUNNER_TEMP}/${chart_name}-${version}.tgz" "oci://ghcr.io/owner/wrong"',
+                1,
+            ),
+            publisher.replace("          sbom: true", "          sbom: false", 1),
+            publisher.replace(
+                '"${IMAGE}:${TAG}" "${IMAGE_DIGEST}"',
+                '"${IMAGE}:${TAG}" "sha256:${IMAGE_DIGEST#sha256:0}"',
+                1,
+            ),
+            publisher.replace(
+                '"${CHART}:${VERSION}" "${CHART_DIGEST}"',
+                '"${CHART}:${VERSION}" "sha256:${CHART_DIGEST#sha256:0}"',
+                1,
+            ),
+        ):
+            with self.assertRaises(ValueError):
+                self.require_alias_and_sbom_closure(mutant)
         for mutation in (
             publisher.replace('manifests/${VERSION}', 'manifests/${TAG}'),
             publisher.replace('manifests/${VERSION}', 'manifests/v${VERSION}'),
@@ -2535,19 +3419,30 @@ class WorkflowStructureTests(unittest.TestCase):
         self.require_exact_release_wiring(orchestrator, publisher)
         for owner, token in (
             ("orchestrator", "MAIN_RUN_ID: ${{ github.event.workflow_run.id }}"),
+            ("orchestrator", "CODEQL_RUN_ID: ${{ steps.main_ci.outputs.codeql_run_id }}"),
+            ("orchestrator", "codeql-run-list"),
+            ("orchestrator", "workflow-jobs"),
+            ("orchestrator", "for _ in $(seq 1 30)"),
             ("orchestrator", "--ref main"),
             ("orchestrator", '-f main_run_id="${MAIN_RUN_ID}"'),
+            ("orchestrator", '-f codeql_run_id="${CODEQL_RUN_ID}"'),
             ("publisher", "actions: read"),
             ("publisher", "main-run-record"),
+            ("publisher", "codeql-run-record"),
+            ("publisher", "workflow-jobs"),
             ("publisher", 'actions/runs/${MAIN_RUN_ID}'),
+            ("publisher", 'actions/runs/${CODEQL_RUN_ID}'),
             ("publisher", '--run-id "${MAIN_RUN_ID}"'),
             ("publisher", '--repository "${GITHUB_REPOSITORY}"'),
             ("publisher", '--source-sha "${SOURCE_SHA}"'),
             ("publisher", 'test "${authorized_sha}" = "${SOURCE_SHA}"'),
+            ("publisher", 'test "${authorized_codeql_sha}" = "${SOURCE_SHA}"'),
             ("publisher", "needs: [authorize, immutable_settings]"),
             ("publisher", "needs.immutable_settings.result == 'success'"),
             ("publisher", "ref: ${{ needs.authorize.outputs.source_sha }}"),
             ("publisher", 'workflow-ref "${GITHUB_WORKFLOW_REF}"'),
+            ("publisher", '--image "${IMAGE}"'),
+            ("publisher", '--chart "${CHART}"'),
         ):
             changed_orchestrator = orchestrator.replace(token, "") if owner == "orchestrator" else orchestrator
             changed_publisher = publisher.replace(token, "") if owner == "publisher" else publisher
@@ -2584,6 +3479,10 @@ class WorkflowStructureTests(unittest.TestCase):
             ("publisher", "Terminally rebind the REST tag ref and annotated object"),
             ("publisher", "attestation-statement"),
             ("publisher", "attestation-set"),
+            ("publisher", "sbom-statement"),
+            ("publisher", "sbom-set"),
+            ("publisher", "scripts/ci/verify-registry-alias.sh"),
+            ("publisher", "Re-resolve both intended aliases before manifest staging"),
         ):
             changed_orchestrator = orchestrator.replace(token, "") if owner == "orchestrator" else orchestrator
             changed_publisher = publisher.replace(token, "") if owner == "publisher" else publisher
@@ -2665,7 +3564,14 @@ class WorkflowStructureTests(unittest.TestCase):
         gate = (ROOT / ".github/workflows/pr-gate.yml").read_text(encoding="utf-8")
         publisher = (ROOT / ".github/workflows/release-publisher.yml").read_text(encoding="utf-8")
         audit = (ROOT / ".github/workflows/release-integrity-audit.yml").read_text(encoding="utf-8")
-        self.assertIn("trivy fs --scanners vuln --severity HIGH,CRITICAL --exit-code 1", gate)
+        self.require_trivy_source_gate(gate)
+        for token in (
+            "--include-dev-deps",
+            "--list-all-pkgs",
+            "release_contract.py trivy-source",
+        ):
+            with self.subTest(source_scan_mutant=token), self.assertRaises(ValueError):
+                self.require_trivy_source_gate(gate.replace(token, "", 1))
         self.assertIn("trivy config --severity HIGH,CRITICAL --exit-code 1", gate)
         scan = publisher.index("Gate the final image digest at HIGH and CRITICAL")
         sign = publisher.index("Sign the immutable image digest")
@@ -2676,7 +3582,11 @@ class WorkflowStructureTests(unittest.TestCase):
             "--require exact",
             'test "${observed}" = "${expected}"',
             "cosign verify --certificate-identity",
+            "registry-manifest",
             "attestation-set",
+            "sbom-platforms",
+            "sbom-statement",
+            "sbom-set",
             "audit-sbom.json",
             "trivy image --scanners vuln --severity HIGH,CRITICAL --exit-code 1",
         ):

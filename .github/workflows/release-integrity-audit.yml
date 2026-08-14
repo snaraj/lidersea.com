@@ -109,7 +109,7 @@ jobs:
           set -euo pipefail
           audit_alias() {
             local alias="$1" expected="$2" accept="$3" label="$4"
-            local reference repository version credentials token_file token body headers status observed computed
+            local reference repository version credentials token_file token body headers status observed
             reference="${alias#ghcr.io/}"
             test "${reference}" != "${alias}"
             repository="${reference%:*}"
@@ -137,11 +137,9 @@ jobs:
               "https://ghcr.io/v2/${repository}/manifests/${version}")"
             test "$(python3 -I -B scripts/ci/release_contract.py registry-state \
               --http-status "${status}")" = present
-            observed="$(awk 'tolower($1) == "docker-content-digest:" {gsub("\\r", "", $2); print $2}' \
-              "${headers}" | tail -n 1)"
-            [[ "${observed}" =~ ^sha256:[0-9a-f]{64}$ ]]
-            computed="sha256:$(sha256sum "${body}" | awk '{print $1}')"
-            test "${computed}" = "${observed}"
+            observed="$(python3 -I -B scripts/ci/release_contract.py registry-manifest \
+              --http-status "${status}" --body "${body}" --headers "${headers}" \
+              --expected-digest "${expected}")"
             test "${observed}" = "${expected}"
           }
           audit_alias "${IMAGE_ALIAS}" "${IMAGE_DIGEST}" \
@@ -178,16 +176,19 @@ jobs:
             --format '{{ json .SBOM }}' > "${sbom}"
           python3 -I -B scripts/ci/release_contract.py json-keys \
             --json "${provenance}" > "${provenance_keys}"
-          python3 -I -B scripts/ci/release_contract.py json-keys \
+          python3 -I -B scripts/ci/release_contract.py sbom-platforms \
             --json "${sbom}" > "${sbom_keys}"
           test "$(paste -sd ' ' "${provenance_keys}")" = "${expected_platforms}"
           test "$(paste -sd ' ' "${sbom_keys}")" = "${expected_platforms}"
 
           source="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
           expected_attestations=()
+          expected_sboms=()
           for platform in "${required_platforms[@]}"; do
             predicate="${RUNNER_TEMP}/audit-${platform//\//-}.json"
             statement="${RUNNER_TEMP}/audit-${platform//\//-}.statement.json"
+            spdx="${RUNNER_TEMP}/audit-${platform//\//-}.spdx.json"
+            sbom_statement="${RUNNER_TEMP}/audit-${platform//\//-}.sbom.statement.json"
             docker buildx imagetools inspect "${image}@${IMAGE_DIGEST}" \
               --format "{{ json (index .Provenance \"${platform}\").SLSA }}" > "${predicate}"
             python3 -I -B scripts/ci/release_contract.py attestation-statement \
@@ -195,6 +196,12 @@ jobs:
               --image "${image}" --digest "${IMAGE_DIGEST}" --source "${source}" \
               --revision "${SOURCE_SHA}" --platform "${platform}"
             expected_attestations+=(--expected "${platform}=${statement}")
+            docker buildx imagetools inspect "${image}@${IMAGE_DIGEST}" \
+              --format "{{ json (index .SBOM \"${platform}\").SPDX }}" > "${spdx}"
+            python3 -I -B scripts/ci/release_contract.py sbom-statement \
+              --spdx "${spdx}" --output "${sbom_statement}" \
+              --image "${image}" --digest "${IMAGE_DIGEST}" --platform "${platform}"
+            expected_sboms+=(--expected "${platform}=${sbom_statement}")
           done
           verified="${RUNNER_TEMP}/audit-verified-attestations.json"
           cosign verify-attestation --type slsaprovenance1 --output json \
@@ -203,6 +210,13 @@ jobs:
             "${image}@${IMAGE_DIGEST}" > "${verified}"
           test "$(python3 -I -B scripts/ci/release_contract.py attestation-set \
             --verified "${verified}" "${expected_attestations[@]}")" = 2
+          verified_sboms="${RUNNER_TEMP}/audit-verified-sboms.json"
+          cosign verify-attestation --type spdxjson --output json \
+            --certificate-identity "${WORKFLOW_IDENTITY}" \
+            --certificate-oidc-issuer "${issuer}" \
+            "${image}@${IMAGE_DIGEST}" > "${verified_sboms}"
+          test "$(python3 -I -B scripts/ci/release_contract.py sbom-set \
+            --verified "${verified_sboms}" "${expected_sboms[@]}")" = 2
       - name: Rescan the immutable image digest at HIGH and CRITICAL
         env:
           IMAGE_ALIAS: ${{ steps.release.outputs.image_alias }}

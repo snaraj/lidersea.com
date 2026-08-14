@@ -2,7 +2,7 @@ name: Release publisher
 
 # Publishes ONLY when the successful-main orchestrator explicitly dispatches
 # the workflow definition on protected main with its exact source SHA and
-# completed PR-gate run ID. A token-created tag does not recursively trigger
+# completed PR-gate and CodeQL run IDs. A token-created tag does not recursively trigger
 # push workflows, so workflow_dispatch is the explicit handoff, but an ordinary
 # manual dispatch cannot cross the read-only successful-main authorization job.
 # There is no skip flag, force path, or way to reassign a tag.
@@ -15,6 +15,10 @@ on:
         type: string
       main_run_id:
         description: Authoritative successful PR-gate push run on main
+        required: true
+        type: string
+      codeql_run_id:
+        description: Authoritative successful CodeQL push run on the same main SHA
         required: true
         type: string
 
@@ -44,16 +48,19 @@ jobs:
           ref: ${{ github.sha }}
           path: authority
           persist-credentials: false
-      - name: Bind dispatch to one successful protected-main PR gate
+      - name: Bind dispatch to exact successful protected-main job inventories
         id: main_run
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           MAIN_RUN_ID: ${{ inputs.main_run_id }}
+          CODEQL_RUN_ID: ${{ inputs.codeql_run_id }}
           SOURCE_SHA: ${{ inputs.source_sha }}
         run: |
           set -euo pipefail
           [[ "${MAIN_RUN_ID}" =~ ^[1-9][0-9]*$ ]]
+          [[ "${CODEQL_RUN_ID}" =~ ^[1-9][0-9]*$ ]]
           run_json="${RUNNER_TEMP}/publisher-main-run.json"
+          jobs_json="${RUNNER_TEMP}/publisher-main-jobs.json"
           gh api --method GET \
             --header 'Accept: application/vnd.github+json' \
             --header 'X-GitHub-Api-Version: 2026-03-10' \
@@ -63,6 +70,32 @@ jobs:
             --run-id "${MAIN_RUN_ID}" --repository "${GITHUB_REPOSITORY}" \
             --source-sha "${SOURCE_SHA}")"
           test "${authorized_sha}" = "${SOURCE_SHA}"
+          gh api --method GET --paginate --slurp \
+            --header 'Accept: application/vnd.github+json' \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/${GITHUB_REPOSITORY}/actions/runs/${MAIN_RUN_ID}/jobs?filter=latest&per_page=100" \
+            > "${jobs_json}"
+          test "$(python3 -I -B authority/scripts/ci/release_contract.py workflow-jobs \
+            --jobs-json "${jobs_json}" --workflow pr-gate --run-id "${MAIN_RUN_ID}")" = 6
+
+          codeql_run_json="${RUNNER_TEMP}/publisher-codeql-run.json"
+          codeql_jobs_json="${RUNNER_TEMP}/publisher-codeql-jobs.json"
+          gh api --method GET \
+            --header 'Accept: application/vnd.github+json' \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/${GITHUB_REPOSITORY}/actions/runs/${CODEQL_RUN_ID}" > "${codeql_run_json}"
+          authorized_codeql_sha="$(python3 -I -B authority/scripts/ci/release_contract.py \
+            codeql-run-record --run-json "${codeql_run_json}" \
+            --run-id "${CODEQL_RUN_ID}" --repository "${GITHUB_REPOSITORY}" \
+            --source-sha "${SOURCE_SHA}")"
+          test "${authorized_codeql_sha}" = "${SOURCE_SHA}"
+          gh api --method GET --paginate --slurp \
+            --header 'Accept: application/vnd.github+json' \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/${GITHUB_REPOSITORY}/actions/runs/${CODEQL_RUN_ID}/jobs?filter=latest&per_page=100" \
+            > "${codeql_jobs_json}"
+          test "$(python3 -I -B authority/scripts/ci/release_contract.py workflow-jobs \
+            --jobs-json "${codeql_jobs_json}" --workflow codeql --run-id "${CODEQL_RUN_ID}")" = 2
           printf 'source_sha=%s\n' "${authorized_sha}" >> "${GITHUB_OUTPUT}"
 
   immutable_settings:
@@ -130,7 +163,9 @@ jobs:
             --ref "${GITHUB_REF}" \
             --event-name "${GITHUB_EVENT_NAME}" \
             --repository "${GITHUB_REPOSITORY}" \
-            --workflow-ref "${GITHUB_WORKFLOW_REF}"
+            --workflow-ref "${GITHUB_WORKFLOW_REF}" \
+            --image "${IMAGE}" \
+            --chart "${CHART}"
       - name: Install checksum-verified tools
         run: ./scripts/ci/install-tools.sh
       - name: Enforce numeric VERSION and plain-v release locks
@@ -197,7 +232,7 @@ jobs:
           token_file="${RUNNER_TEMP}/image-registry-token.json"
           credentials="${RUNNER_TEMP}/ghcr.netrc"
           required_platforms=(linux/amd64 linux/arm64)
-          expected_evidence="${#required_platforms[@]}"
+          expected_evidence="$((2 * ${#required_platforms[@]}))"
           trap 'rm -f -- "${token_file}" "${credentials}"' EXIT
           umask 077
           printf 'machine ghcr.io\nlogin %s\npassword %s\n' \
@@ -226,10 +261,8 @@ jobs:
             exit 0
           fi
 
-          digest="$(awk 'tolower($1) == "docker-content-digest:" {gsub("\\r", "", $2); print $2}' "${headers}" | tail -n 1)"
-          [[ "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]
-          computed="sha256:$(sha256sum "${manifest}" | awk '{print $1}')"
-          test "${computed}" = "${digest}"
+          digest="$(python3 -I -B scripts/ci/release_contract.py registry-manifest \
+            --http-status "${status}" --body "${manifest}" --headers "${headers}")"
           source_match=true
           expected_platforms="${required_platforms[*]}"
           source="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
@@ -250,7 +283,7 @@ jobs:
             source_match=false
             : > "${provenance_keys}"
           fi
-          if ! python3 -I -B scripts/ci/release_contract.py json-keys \
+          if ! python3 -I -B scripts/ci/release_contract.py sbom-platforms \
             --json "${sbom}" > "${sbom_keys}"; then
             source_match=false
             : > "${sbom_keys}"
@@ -262,9 +295,12 @@ jobs:
             source_match=false
           fi
           expected_attestations=()
+          expected_sboms=()
           for platform in "${required_platforms[@]}"; do
             predicate="${RUNNER_TEMP}/existing-${platform//\//-}.json"
             statement="${RUNNER_TEMP}/existing-${platform//\//-}.statement.json"
+            spdx="${RUNNER_TEMP}/existing-${platform//\//-}.spdx.json"
+            sbom_statement="${RUNNER_TEMP}/existing-${platform//\//-}.sbom.statement.json"
             if ! docker buildx imagetools inspect "${IMAGE}@${digest}" \
               --format "{{ json (index .Provenance \"${platform}\").SLSA }}" > "${predicate}"; then
               source_match=false
@@ -278,26 +314,51 @@ jobs:
               continue
             fi
             expected_attestations+=(--expected "${platform}=${statement}")
+            if ! docker buildx imagetools inspect "${IMAGE}@${digest}" \
+              --format "{{ json (index .SBOM \"${platform}\").SPDX }}" > "${spdx}"; then
+              source_match=false
+              continue
+            fi
+            if ! python3 -I -B scripts/ci/release_contract.py sbom-statement \
+              --spdx "${spdx}" --output "${sbom_statement}" \
+              --image "${IMAGE}" --digest "${digest}" --platform "${platform}"; then
+              source_match=false
+              continue
+            fi
+            expected_sboms+=(--expected "${platform}=${sbom_statement}")
           done
 
           signature_match=false
           verified_count=0
           verified="${RUNNER_TEMP}/verified-existing-attestations.json"
+          verified_sboms="${RUNNER_TEMP}/verified-existing-sboms.json"
           identity="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/.github/workflows/release-publisher.yml@refs/heads/main"
-          if [ "${source_match}" = true ] && \
-             cosign verify \
+          issuer="https://token.actions.githubusercontent.com"
+          verify_existing_evidence() {
+            cosign verify \
               --certificate-identity "${identity}" \
-              --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
-              "${IMAGE}@${digest}" >/dev/null 2>&1 && \
-             cosign verify-attestation --type slsaprovenance1 --output json \
+              --certificate-oidc-issuer "${issuer}" \
+              "${IMAGE}@${digest}" >/dev/null 2>&1 || return 1
+            cosign verify-attestation --type slsaprovenance1 --output json \
               --certificate-identity "${identity}" \
-              --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
-              "${IMAGE}@${digest}" > "${verified}" 2>/dev/null && \
-             python3 -I -B scripts/ci/release_contract.py attestation-set \
-              --verified "${verified}" "${expected_attestations[@]}" > "${RUNNER_TEMP}/verified-attestation-count.txt"; then
+              --certificate-oidc-issuer "${issuer}" \
+              "${IMAGE}@${digest}" > "${verified}" 2>/dev/null || return 1
+            python3 -I -B scripts/ci/release_contract.py attestation-set \
+              --verified "${verified}" "${expected_attestations[@]}" \
+              > "${RUNNER_TEMP}/verified-attestation-count.txt" || return 1
+            cosign verify-attestation --type spdxjson --output json \
+              --certificate-identity "${identity}" \
+              --certificate-oidc-issuer "${issuer}" \
+              "${IMAGE}@${digest}" > "${verified_sboms}" 2>/dev/null || return 1
+            python3 -I -B scripts/ci/release_contract.py sbom-set \
+              --verified "${verified_sboms}" "${expected_sboms[@]}" \
+              > "${RUNNER_TEMP}/verified-sbom-count.txt" || return 1
+          }
+          if [ "${source_match}" = true ] && verify_existing_evidence; then
             validated_count="$(<"${RUNNER_TEMP}/verified-attestation-count.txt")"
+            validated_sbom_count="$(<"${RUNNER_TEMP}/verified-sbom-count.txt")"
             signature_match=true
-            verified_count="${validated_count}"
+            verified_count="$((validated_count + validated_sbom_count))"
           fi
           set +e
           state="$(python3 -I -B scripts/ci/release_contract.py artifact-state \
@@ -340,17 +401,30 @@ jobs:
           EXISTING_DIGEST: ${{ steps.image_state.outputs.digest }}
           BUILT_DIGEST: ${{ steps.build.outputs.digest }}
           IMAGE_STATE: ${{ steps.image_state.outputs.state }}
+          GHCR_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.release.outputs.tag }}
         run: |
           set -euo pipefail
           if [ "${IMAGE_STATE}" = complete ]; then
-            digest="${EXISTING_DIGEST}"
+            expected="${EXISTING_DIGEST}"
           elif [ "${IMAGE_STATE}" = absent ]; then
-            digest="${BUILT_DIGEST}"
+            expected="${BUILT_DIGEST}"
+            # A successful registry push with a lost action output is
+            # recoverable only from the authenticated intended alias.
+            if [ -z "${expected}" ]; then
+              expected=-
+            fi
           else
             printf 'unpublishable image state %s\n' "${IMAGE_STATE}" >&2
             exit 1
           fi
-          [[ "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          if [ "${expected}" != - ]; then
+            [[ "${expected}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          fi
+          digest="$(bash scripts/ci/verify-registry-alias.sh \
+            "${IMAGE}:${TAG}" "${expected}" \
+            'application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json' \
+            post-push-image)"
           printf 'digest=%s\n' "${digest}" >> "${GITHUB_OUTPUT}"
       - name: Gate the final image digest at HIGH and CRITICAL
         run: >-
@@ -359,7 +433,7 @@ jobs:
       - name: Sign the immutable image digest
         if: steps.image_state.outputs.state == 'absent'
         run: cosign sign --yes "${IMAGE}@${{ steps.image.outputs.digest }}"
-      - name: Attach the BuildKit SLSA provenance as cosign attestations
+      - name: Attach and verify exact BuildKit SLSA and SPDX SBOM attestations
         # Buildx embeds one SLSA v1 predicate per platform. Preserve each
         # complete predicate inside an exact in-toto statement, add a
         # release binding that cosign's --statement path retains verbatim,
@@ -378,18 +452,30 @@ jobs:
           expected_platforms='linux/amd64 linux/arm64'
           provenance="${RUNNER_TEMP}/new-image-provenance.json"
           provenance_keys="${RUNNER_TEMP}/new-image-provenance.keys"
+          sbom="${RUNNER_TEMP}/new-image-sbom.json"
+          sbom_keys="${RUNNER_TEMP}/new-image-sbom.keys"
           docker buildx imagetools inspect "${IMAGE}@${DIGEST}" \
             --format '{{ json .Provenance }}' > "${provenance}"
+          docker buildx imagetools inspect "${IMAGE}@${DIGEST}" \
+            --format '{{ json .SBOM }}' > "${sbom}"
           python3 -I -B scripts/ci/release_contract.py json-keys \
             --json "${provenance}" > "${provenance_keys}"
+          python3 -I -B scripts/ci/release_contract.py sbom-platforms \
+            --json "${sbom}" > "${sbom_keys}"
           mapfile -t platforms < "${provenance_keys}"
+          mapfile -t sbom_platforms < "${sbom_keys}"
           test "${platforms[*]}" = "${expected_platforms}"
+          test "${sbom_platforms[*]}" = "${expected_platforms}"
           source="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
           statements=()
           expected_attestations=()
+          sbom_statements=()
+          expected_sboms=()
           for platform in "${platforms[@]}"; do
             predicate="${RUNNER_TEMP}/slsa-${platform//\//-}.json"
             statement="${RUNNER_TEMP}/slsa-${platform//\//-}.statement.json"
+            spdx="${RUNNER_TEMP}/sbom-${platform//\//-}.spdx.json"
+            sbom_statement="${RUNNER_TEMP}/sbom-${platform//\//-}.statement.json"
             docker buildx imagetools inspect "${IMAGE}@${DIGEST}" \
               --format "{{ json (index .Provenance \"${platform}\").SLSA }}" \
               > "${predicate}"
@@ -399,10 +485,22 @@ jobs:
               --revision "${SOURCE_SHA}" --platform "${platform}"
             statements+=("${statement}")
             expected_attestations+=(--expected "${platform}=${statement}")
+            docker buildx imagetools inspect "${IMAGE}@${DIGEST}" \
+              --format "{{ json (index .SBOM \"${platform}\").SPDX }}" > "${spdx}"
+            python3 -I -B scripts/ci/release_contract.py sbom-statement \
+              --spdx "${spdx}" --output "${sbom_statement}" \
+              --image "${IMAGE}" --digest "${DIGEST}" --platform "${platform}"
+            sbom_statements+=("${sbom_statement}")
+            expected_sboms+=(--expected "${platform}=${sbom_statement}")
           done
           test "$(sha256sum "${statements[@]}" | awk '{print $1}' | sort -u | wc -l)" \
             -eq "${#statements[@]}"
           for statement in "${statements[@]}"; do
+            cosign attest --yes --statement "${statement}" "${IMAGE}@${DIGEST}"
+          done
+          test "$(sha256sum "${sbom_statements[@]}" | awk '{print $1}' | sort -u | wc -l)" \
+            -eq "${#sbom_statements[@]}"
+          for statement in "${sbom_statements[@]}"; do
             cosign attest --yes --statement "${statement}" "${IMAGE}@${DIGEST}"
           done
           identity="${source}/.github/workflows/release-publisher.yml@refs/heads/main"
@@ -417,6 +515,13 @@ jobs:
             "${IMAGE}@${DIGEST}" > "${verified}"
           python3 -I -B scripts/ci/release_contract.py attestation-set \
             --verified "${verified}" "${expected_attestations[@]}"
+          verified_sboms="${RUNNER_TEMP}/verified-new-sboms.json"
+          cosign verify-attestation --type spdxjson --output json \
+            --certificate-identity "${identity}" \
+            --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+            "${IMAGE}@${DIGEST}" > "${verified_sboms}"
+          python3 -I -B scripts/ci/release_contract.py sbom-set \
+            --verified "${verified_sboms}" "${expected_sboms[@]}"
       - name: Classify an absent, complete, or burned chart version
         id: chart_state
         env:
@@ -470,10 +575,8 @@ jobs:
             source_match=false
           fi
 
-          digest="$(awk 'tolower($1) == "docker-content-digest:" {gsub("\\r", "", $2); print $2}' "${headers}" | tail -n 1)"
-          [[ "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]
-          computed="sha256:$(sha256sum "${manifest}" | awk '{print $1}')"
-          test "${computed}" = "${digest}"
+          digest="$(python3 -I -B scripts/ci/release_contract.py registry-manifest \
+            --http-status "${status}" --body "${manifest}" --headers "${headers}")"
           signature_match=false
           identity="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/.github/workflows/release-publisher.yml@refs/heads/main"
           if cosign verify \
@@ -495,6 +598,8 @@ jobs:
       - name: Publish and sign an absent chart version
         if: steps.chart_state.outputs.state == 'absent'
         id: chart_publish
+        env:
+          GHCR_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           version="${{ steps.release.outputs.version }}"
@@ -502,9 +607,34 @@ jobs:
           helm package chart --version "${version}" --app-version "${version}" -d "${RUNNER_TEMP}"
           printf '%s' "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
           push_log="${RUNNER_TEMP}/chart-push.log"
+          set +e
           helm push "${RUNNER_TEMP}/${chart_name}-${version}.tgz" "oci://${CHART%/*}" 2>&1 | tee "${push_log}"
-          chart_digest="$(awk '/^Digest:/{print $2}' "${push_log}")"
-          [[ "${chart_digest}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          push_status=${PIPESTATUS[0]}
+          set -e
+          mapfile -t reported_digests < <(awk '/^Digest:/{print $2}' "${push_log}")
+          expected=-
+          if [ "${#reported_digests[@]}" -eq 1 ] && \
+             [[ "${reported_digests[0]}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            expected="${reported_digests[0]}"
+          elif [ "${#reported_digests[@]}" -ne 0 ]; then
+            printf 'DENY: Helm push returned malformed or duplicate digests\n' >&2
+            exit 1
+          fi
+          if [ "${push_status}" -ne 0 ]; then
+            printf 'Helm push response was lost; requiring exact intended-alias recovery\n' >&2
+          fi
+          chart_digest="$(bash scripts/ci/verify-registry-alias.sh \
+            "${CHART}:${version}" "${expected}" \
+            'application/vnd.oci.image.manifest.v1+json' post-push-chart)"
+          expected_tree="${RUNNER_TEMP}/post-push-expected-chart"
+          published_archives="${RUNNER_TEMP}/post-push-chart-archive"
+          published_tree="${RUNNER_TEMP}/post-push-chart-tree"
+          mkdir -p "${expected_tree}" "${published_archives}" "${published_tree}"
+          tar -xzf "${RUNNER_TEMP}/${chart_name}-${version}.tgz" -C "${expected_tree}"
+          helm pull "oci://${CHART}" --version "${version}" -d "${published_archives}"
+          tar -xzf "${published_archives}/${chart_name}-${version}.tgz" -C "${published_tree}"
+          diff -ru --no-dereference \
+            "${expected_tree}/${chart_name}" "${published_tree}/${chart_name}" >/dev/null
           cosign sign --yes "${CHART}@${chart_digest}"
           printf 'digest=%s\n' "${chart_digest}" >> "${GITHUB_OUTPUT}"
       - name: Resolve the one chart digest for the release manifest
@@ -525,6 +655,23 @@ jobs:
           fi
           [[ "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]
           printf 'digest=%s\n' "${digest}" >> "${GITHUB_OUTPUT}"
+      - name: Re-resolve both intended aliases before manifest staging
+        env:
+          GHCR_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.release.outputs.tag }}
+          VERSION: ${{ steps.release.outputs.version }}
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+          CHART_DIGEST: ${{ steps.chart.outputs.digest }}
+        run: |
+          set -euo pipefail
+          test "$(bash scripts/ci/verify-registry-alias.sh \
+            "${IMAGE}:${TAG}" "${IMAGE_DIGEST}" \
+            'application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json' \
+            pre-manifest-image)" = "${IMAGE_DIGEST}"
+          test "$(bash scripts/ci/verify-registry-alias.sh \
+            "${CHART}:${VERSION}" "${CHART_DIGEST}" \
+            'application/vnd.oci.image.manifest.v1+json' pre-manifest-chart)" \
+            = "${CHART_DIGEST}"
       - name: Generate the deterministic release manifest and informational notes
         id: manifest
         run: |
@@ -556,6 +703,11 @@ jobs:
       - name: Create the draft, upload the manifest, and publish immutably
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.release.outputs.tag }}
+          VERSION: ${{ steps.release.outputs.version }}
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+          CHART_DIGEST: ${{ steps.chart.outputs.digest }}
         run: |
           set -euo pipefail
           tag="${{ steps.release.outputs.tag }}"
@@ -563,6 +715,16 @@ jobs:
           existing="${RUNNER_TEMP}/existing-release.json"
           downloaded="${RUNNER_TEMP}/downloaded-release-manifest.json"
           api="${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/releases/tags/${tag}"
+          verify_publication_aliases() {
+            test "$(bash scripts/ci/verify-registry-alias.sh \
+              "${IMAGE}:${TAG}" "${IMAGE_DIGEST}" \
+              'application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json' \
+              release-image)" = "${IMAGE_DIGEST}"
+            test "$(bash scripts/ci/verify-registry-alias.sh \
+              "${CHART}:${VERSION}" "${CHART_DIGEST}" \
+              'application/vnd.oci.image.manifest.v1+json' release-chart)" \
+              = "${CHART_DIGEST}"
+          }
           observe_release() {
             local status asset_id
             local -a record_args=()
@@ -591,6 +753,7 @@ jobs:
               --http-status "${status}" "${record_args[@]}" \
               --manifest "${manifest}" --repository "${GITHUB_REPOSITORY}"
           }
+          verify_publication_aliases
           state="$(observe_release)"
           if [ "${state}" = absent ]; then
             if ! gh release create "${tag}" --verify-tag --draft \
@@ -627,6 +790,9 @@ jobs:
             fi
           fi
           if [ "${state}" = draft-ready ]; then
+            # This is the final alias observation before the irreversible
+            # immutable transition; any concurrent retarget is fatal.
+            verify_publication_aliases
             if ! gh release edit "${tag}" --draft=false; then
               printf 'draft publish did not succeed; checking for an exact concurrent winner\n' >&2
             fi

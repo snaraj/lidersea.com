@@ -29,9 +29,9 @@ Closes #<!-- same-repository issue number -->
 | Command or check | Result |
 | --- | --- |
 | Release transition and hostile event/state suite | |
-| Successful-main run binding and manual/unmerged dispatch denial | |
+| Successful-main run binding and manual/unmerged dispatch denial; exact PR-gate/CodeQL jobs | |
 | Settings-token isolation and exact settings receipt | |
-| Manifest draft/upload/publish and terminal tag rebind | |
+| Exact production packages and aliases; signed SBOMs; bot-owned manifest draft/upload/publish and terminal tag rebind | |
 | Final-digest vulnerability gate and scheduled integrity audit | |
 | Required CI, coverage, security, and quality checks | |
 

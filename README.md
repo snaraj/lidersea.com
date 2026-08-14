@@ -52,14 +52,24 @@ CI is authoritative.
 
 ## Releases
 
-Every protected-main merge publishes exactly one patch release after the
-merged SHA's PR gate succeeds. The merged source carries numeric `X.Y.Z` in
+Every protected-main merge publishes exactly one patch release only after the
+merged SHA's exact main CI succeeds. The orchestrator paginates the PR-gate
+jobs and requires `security`, `application`, `chart`, `container`, and
+main-only `coverage-badges` to succeed while `dependency-review` is explicitly
+skipped on a push. It separately waits for the same-SHA main CodeQL run and
+requires both analyze jobs to succeed. The merged source carries numeric `X.Y.Z` in
 `VERSION`, chart `version`, `appVersion`, and the dated changelog heading, and
 exact plain `vX.Y.Z` in the image tag. Automation creates that plain tag at the
 exact SHA and explicitly dispatches the publisher definition from protected
-`main` with the authoritative successful-run ID. A separate read-only job
-validates that exact PR-gate push run before the write/packages/OIDC job can
-start; a manual dispatch for an unmerged branch fails before publication. A
+`main` with both authoritative successful-run IDs. A separate read-only job
+revalidates both aggregate records and both exact job inventories before the
+write/packages/OIDC job can start; absent, pending, skipped, failed, duplicate,
+foreign, and wrong-SHA evidence fails closed. A manual dispatch for an
+unmerged branch fails before publication. Before its first registry read or
+write, the publisher binds the dotted repository `snaraj/lidersea.com` to the
+explicit, non-derived package identities `ghcr.io/snaraj/lidersea-com` and
+`ghcr.io/snaraj/charts/lidersea-com`; an implicit dotted or renamed package is
+denied. A
 second isolated job mints a repository-scoped, Administration-read-only App
 token and rechecks the immutable-release, Actions, ruleset, signing, and
 security controls before any tag or artifact side effect. The ordinary
@@ -71,14 +81,17 @@ reversions, transient future values, and multiple release boundaries in one
 integration are denied. The publisher builds or verifies:
 
 - `ghcr.io/snaraj/lidersea-com:vX.Y.Z` — multi-arch image, keyless-signed
-  (Cosign), with SBOM and SLSA provenance; deployment consumes the digest.
+  (Cosign), with exact signed amd64/arm64 SPDX SBOM payloads and SLSA
+  provenance; deployment consumes the digest.
 - `ghcr.io/snaraj/charts/lidersea-com:X.Y.Z` — the Helm chart as a signed OCI
   artifact. This is the one narrow tag exception: Helm requires the registry
   tag to equal valid chart SemVer, and `vX.Y.Z` is not SemVerV2.
 - A GitHub Release whose sole machine-identity asset is canonical
   `release-manifest.json`, binding the exact source, image digest, chart digest,
   signature identity, SBOM set, and provenance set. Human-readable Release
-  title and notes are informational.
+  title and notes are informational. The Release author and sole manifest-asset
+  uploader must both be the canonical `github-actions[bot]` account with
+  numeric ID `41898282`.
 
 The annotated Git tag is never reassigned, and the GitHub Release is accepted
 only when REST reports it immutable. Image and chart version tags are mutable
@@ -88,6 +101,10 @@ state; partial or conflicting state is reported as burned and requires a new
 patch. The manifest is created mode `0600`, uploaded while the Release is
 Draft, and verified byte-for-byte before publication. The publisher then ends
 with an unconditional REST rebind of both the annotated tag ref and object.
+Both intended registry aliases are authenticated from exact response bytes and
+digest headers after push, immediately before manifest staging, and again
+before the immutable Release transition; a wrong destination, lost response
+without authoritative recovery, or concurrent retarget cannot publish.
 Before this automatic path may leave Draft, the repository owner's GET-only
 receipt must prove the full server contract; see
 [release governance](docs/release-governance.md). Release publication is
@@ -100,8 +117,11 @@ An OCI reference such as `image:vX.Y.Z@sha256:<digest>` or
 string is a reference, never a tag. Publication scans the final image digest for
 HIGH/CRITICAL vulnerabilities before signing. A scheduled read-only audit
 rescans that digest and rechecks registry-alias bindings, signatures, exact
-two-platform SBOM/provenance attestations, the chart digest, the manifest, and
+two-platform signed SPDX SBOM payloads and provenance attestations, the chart digest, the manifest, and
 the annotated Git tag.
+The recurring filesystem gate uses Trivy's `--include-dev-deps` mode and
+validates that every direct frontend `devDependency` in the lock-backed
+production build graph entered the report before accepting a clean result.
 
 ## Media
 

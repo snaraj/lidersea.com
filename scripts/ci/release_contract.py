@@ -28,9 +28,12 @@ SEMVER_RE = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 EXPECTED_WORKFLOW = "PR gate"
 EXPECTED_WORKFLOW_PATH = ".github/workflows/pr-gate.yml"
+EXPECTED_CODEQL_WORKFLOW = "CodeQL"
+EXPECTED_CODEQL_WORKFLOW_PATH = ".github/workflows/codeql.yml"
 EXPECTED_PUBLISHER_PATH = ".github/workflows/release-publisher.yml"
 INTOTO_STATEMENT_TYPE = "https://in-toto.io/Statement/v1"
 SLSA_PREDICATE_TYPE = "https://slsa.dev/provenance/v1"
+SPDX_PREDICATE_TYPE = "https://spdx.dev/Document"
 DIGEST_RE = re.compile(r"^sha256:([0-9a-f]{64})$")
 GITHUB_API_VERSION = "2026-03-10"
 EXPECTED_MAIN_RULESET = "Protect-Main"
@@ -46,8 +49,25 @@ REQUIRED_STATUS_CHECKS = (
 )
 RELEASE_MANIFEST_SCHEMA = "lidersea.release-manifest/v1"
 RELEASE_MANIFEST_NAME = "release-manifest.json"
+EXPECTED_REPOSITORY = "snaraj/lidersea.com"
+EXPECTED_IMAGE = "ghcr.io/snaraj/lidersea-com"
+EXPECTED_CHART = "ghcr.io/snaraj/charts/lidersea-com"
+GITHUB_ACTIONS_BOT_LOGIN = "github-actions[bot]"
+GITHUB_ACTIONS_BOT_ID = 41898282
 COSIGN_ISSUER = "https://token.actions.githubusercontent.com"
 RELEASE_PLATFORMS = ("linux/amd64", "linux/arm64")
+PR_GATE_MAIN_JOBS = {
+    "application": "success",
+    "chart": "success",
+    "container": "success",
+    "coverage-badges": "success",
+    "dependency-review": "skipped",
+    "security": "success",
+}
+CODEQL_MAIN_JOBS = {
+    "analyze (go, manual)": "success",
+    "analyze (javascript-typescript, none)": "success",
+}
 MAIN_WORKER_SCOPE = (
     "architecture,merge-order,authority,settings,base-freshness,required-checks"
 )
@@ -399,14 +419,22 @@ def validate_review_receipt(text: str, *, expected_head: str, role: str) -> str:
     raise ContractError("receipt role must be adversarial or main-worker")
 
 
-def validate_main_run_record(
+def _positive_actions_id(value: object, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ContractError(f"{field} must be a positive integer")
+    return value
+
+
+def _validate_actions_run_identity(
     run: Mapping[str, object],
     *,
     expected_repository: str,
     expected_run_id: int,
     expected_source_sha: str,
+    expected_name: str,
+    expected_path: str,
 ) -> str:
-    """Bind a publisher request to one authoritative successful main run."""
+    """Bind an Actions record to one exact workflow, repository, and main SHA."""
     if (
         isinstance(expected_run_id, bool)
         or not isinstance(expected_run_id, int)
@@ -421,11 +449,9 @@ def validate_main_run_record(
     if head_repository.get("full_name") != expected_repository:
         raise ContractError("Actions run head repository identity mismatch")
     exact = {
-        "name": EXPECTED_WORKFLOW,
-        "path": EXPECTED_WORKFLOW_PATH,
+        "name": expected_name,
+        "path": expected_path,
         "event": "push",
-        "status": "completed",
-        "conclusion": "success",
         "head_branch": "main",
     }
     for key, expected in exact.items():
@@ -437,6 +463,142 @@ def validate_main_run_record(
     return source_sha
 
 
+def _require_completed_success(run: Mapping[str, object], label: str) -> None:
+    if run.get("status") != "completed":
+        raise ContractError(f"{label} status must equal 'completed'")
+    if run.get("conclusion") != "success":
+        raise ContractError(f"{label} conclusion must equal 'success'")
+
+
+def validate_main_run_record(
+    run: Mapping[str, object],
+    *,
+    expected_repository: str,
+    expected_run_id: int,
+    expected_source_sha: str,
+) -> str:
+    """Bind a publisher request to one authoritative successful PR-gate run."""
+    source_sha = _validate_actions_run_identity(
+        run,
+        expected_repository=expected_repository,
+        expected_run_id=expected_run_id,
+        expected_source_sha=expected_source_sha,
+        expected_name=EXPECTED_WORKFLOW,
+        expected_path=EXPECTED_WORKFLOW_PATH,
+    )
+    _require_completed_success(run, "PR-gate main run")
+    return source_sha
+
+
+def validate_codeql_run_record(
+    run: Mapping[str, object],
+    *,
+    expected_repository: str,
+    expected_run_id: int,
+    expected_source_sha: str,
+) -> str:
+    """Bind publication to one completed successful exact-SHA CodeQL main run."""
+    source_sha = _validate_actions_run_identity(
+        run,
+        expected_repository=expected_repository,
+        expected_run_id=expected_run_id,
+        expected_source_sha=expected_source_sha,
+        expected_name=EXPECTED_CODEQL_WORKFLOW,
+        expected_path=EXPECTED_CODEQL_WORKFLOW_PATH,
+    )
+    _require_completed_success(run, "CodeQL main run")
+    return source_sha
+
+
+def _paginated_records(value: object, member: str, field: str) -> list[Mapping[str, object]]:
+    """Flatten a complete ``gh api --paginate --slurp`` response exactly."""
+    pages = _array(value, f"{field} pages")
+    records: list[Mapping[str, object]] = []
+    total_counts: list[int] = []
+    for index, raw_page in enumerate(pages):
+        page = _object(raw_page, f"{field} page {index}")
+        total = page.get("total_count")
+        if isinstance(total, bool) or not isinstance(total, int) or total < 0:
+            raise ContractError(f"{field} page total_count is malformed")
+        total_counts.append(total)
+        for item in _array(page.get(member), f"{field} page {member}"):
+            records.append(_object(item, f"{field} record"))
+    if total_counts and (
+        len(set(total_counts)) != 1 or total_counts[0] != len(records)
+    ):
+        raise ContractError(f"{field} pagination is incomplete or inconsistent")
+    return records
+
+
+def validate_workflow_job_inventory(
+    value: object, *, workflow: str, expected_run_id: int
+) -> int:
+    """Require the exact latest-attempt job names and event-specific conclusions."""
+    expected_by_name = {
+        "pr-gate": PR_GATE_MAIN_JOBS,
+        "codeql": CODEQL_MAIN_JOBS,
+    }.get(workflow)
+    if expected_by_name is None:
+        raise ContractError("job inventory workflow must be pr-gate or codeql")
+    expected_run_id = _positive_actions_id(expected_run_id, "job inventory run ID")
+    records = _paginated_records(value, "jobs", f"{workflow} job inventory")
+    if len(records) != len(expected_by_name):
+        raise ContractError(f"{workflow} job count does not equal the exact main inventory")
+    actual: dict[str, str] = {}
+    for job in records:
+        _positive_actions_id(job.get("id"), f"{workflow} job ID")
+        if job.get("run_id") != expected_run_id:
+            raise ContractError(f"{workflow} job belongs to a foreign Actions run")
+        name = job.get("name")
+        if not isinstance(name, str) or name not in expected_by_name:
+            raise ContractError(f"{workflow} job name is absent or foreign")
+        if name in actual:
+            raise ContractError(f"{workflow} job name is duplicated")
+        if job.get("status") != "completed":
+            raise ContractError(f"{workflow} job {name!r} is not completed")
+        conclusion = job.get("conclusion")
+        if conclusion != expected_by_name[name]:
+            raise ContractError(
+                f"{workflow} job {name!r} conclusion must equal {expected_by_name[name]!r}"
+            )
+        actual[name] = str(conclusion)
+    if actual != expected_by_name:
+        raise ContractError(f"{workflow} job inventory is missing or foreign")
+    return len(actual)
+
+
+def select_codeql_main_run(
+    value: object, *, expected_repository: str, expected_source_sha: str
+) -> tuple[str, int | None]:
+    """Classify one bounded-poll CodeQL list response without ignoring mutants."""
+    records = _paginated_records(value, "workflow_runs", "CodeQL run list")
+    if not records:
+        return "absent", None
+    if len(records) != 1:
+        raise ContractError("CodeQL exact-SHA main run is duplicated")
+    run = records[0]
+    run_id = _positive_actions_id(run.get("id"), "CodeQL run ID")
+    _validate_actions_run_identity(
+        run,
+        expected_repository=expected_repository,
+        expected_run_id=run_id,
+        expected_source_sha=expected_source_sha,
+        expected_name=EXPECTED_CODEQL_WORKFLOW,
+        expected_path=EXPECTED_CODEQL_WORKFLOW_PATH,
+    )
+    status = run.get("status")
+    conclusion = run.get("conclusion")
+    if status == "completed":
+        if conclusion != "success":
+            raise ContractError("CodeQL main run conclusion must equal 'success'")
+        return "success", run_id
+    if status in {"queued", "in_progress", "pending", "requested", "waiting"}:
+        if conclusion is not None:
+            raise ContractError("pending CodeQL main run carries a conclusion")
+        return "pending", run_id
+    raise ContractError("CodeQL main run status is malformed")
+
+
 def validate_publisher(
     root: Path,
     source_sha: str,
@@ -445,6 +607,8 @@ def validate_publisher(
     event_name: str,
     repository: str,
     workflow_ref: str,
+    image: str,
+    chart: str,
 ) -> ReleaseIntent:
     source_sha = require_sha(source_sha, "publisher source SHA")
     checkout_sha = require_sha(checkout_sha, "publisher checkout SHA")
@@ -455,6 +619,7 @@ def validate_publisher(
     expected_workflow_ref = f"{repository}/{EXPECTED_PUBLISHER_PATH}@refs/heads/main"
     if workflow_ref != expected_workflow_ref:
         raise ContractError("publisher workflow identity is not protected main")
+    validate_release_destinations(repository, image, chart)
     if source_sha != checkout_sha:
         raise ContractError("publisher source SHA does not equal the authorized checkout")
     files = {path: (root / path).read_text(encoding="utf-8") for path in ("VERSION", "chart/Chart.yaml", "chart/values.yaml", "CHANGELOG.md")}
@@ -984,6 +1149,51 @@ def require_digest(raw: object, field: str) -> str:
     return raw
 
 
+def validate_release_destinations(repository: str, image: str, chart: str) -> None:
+    """Bind dotted repository identity to explicit, non-derived GHCR packages."""
+    if repository != EXPECTED_REPOSITORY:
+        raise ContractError("release repository identity is not exact")
+    if image != EXPECTED_IMAGE:
+        raise ContractError("release image package identity is not exact")
+    if chart != EXPECTED_CHART:
+        raise ContractError("release chart package identity is not exact")
+
+
+def validate_registry_manifest_response(
+    http_status: int,
+    body: bytes,
+    headers: str,
+    *,
+    expected_digest: str | None = None,
+) -> str:
+    """Authenticate one exact registry representation by header and raw bytes."""
+    if http_status != 200:
+        raise ContractError(f"registry alias resolve returned unexpected HTTP {http_status}")
+    try:
+        body_text = body.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ContractError("registry manifest body is not UTF-8 JSON") from exc
+    _object(parse_json(body_text, "registry manifest body"), "registry manifest body")
+    observed_values: list[str] = []
+    for line in headers.splitlines():
+        match = re.fullmatch(
+            r"(?i)docker-content-digest:[ \t]*(\S+)[ \t]*", line
+        )
+        if match:
+            observed_values.append(match.group(1))
+    if len(observed_values) != 1:
+        raise ContractError("registry response must carry exactly one Docker-Content-Digest")
+    observed = require_digest(observed_values[0], "registry response digest")
+    computed = "sha256:" + hashlib.sha256(body).hexdigest()
+    if computed != observed:
+        raise ContractError("registry manifest body digest does not equal its response header")
+    if expected_digest is not None and observed != require_digest(
+        expected_digest, "expected registry alias digest"
+    ):
+        raise ContractError("registry alias was absent or retargeted after publication")
+    return observed
+
+
 def canonical_json_bytes(value: object) -> bytes:
     return (
         json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
@@ -1002,8 +1212,7 @@ def build_release_manifest(
     chart_digest: str,
 ) -> dict[str, object]:
     """Build the sole canonical machine identity for external release artifacts."""
-    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
-        raise ContractError("manifest repository must be an exact owner/name pair")
+    validate_release_destinations(repository, image, chart)
     source_sha = require_sha(source_sha, "manifest source SHA")
     image_digest = require_digest(image_digest, "manifest image digest")
     chart_digest = require_digest(chart_digest, "manifest chart digest")
@@ -1032,7 +1241,12 @@ def build_release_manifest(
                     "required": False,
                 },
                 "registry": chart,
-                "sbom": {"platforms": [], "required": False},
+                "sbom": {
+                    "platforms": [],
+                    "predicate_type": "",
+                    "required": False,
+                    "signed": False,
+                },
                 "signature": signature,
             },
             "image": {
@@ -1048,7 +1262,9 @@ def build_release_manifest(
                 "registry": image,
                 "sbom": {
                     "platforms": list(RELEASE_PLATFORMS),
+                    "predicate_type": SPDX_PREDICATE_TYPE,
                     "required": True,
+                    "signed": True,
                 },
                 "signature": signature,
             },
@@ -1154,6 +1370,12 @@ def _release_asset(release_record: Mapping[str, object]) -> Mapping[str, object]
         raise ContractError("GitHub Release manifest asset is not fully uploaded")
     if asset.get("content_type") != "application/json":
         raise ContractError("GitHub Release manifest asset content type is not exact")
+    uploader = _object(asset.get("uploader"), "GitHub Release manifest asset uploader")
+    if (
+        uploader.get("login") != GITHUB_ACTIONS_BOT_LOGIN
+        or uploader.get("id") != GITHUB_ACTIONS_BOT_ID
+    ):
+        raise ContractError("GitHub Release manifest asset uploader is not the workflow bot")
     size = asset.get("size")
     if isinstance(size, bool) or not isinstance(size, int) or size <= 0:
         raise ContractError("GitHub Release manifest asset size is not positive")
@@ -1177,7 +1399,10 @@ def validate_release_record(
     if release_record.get("tag_name") != expected["tag"]:
         raise ContractError("GitHub Release tag is not exact")
     author = _object(release_record.get("author"), "GitHub Release author")
-    if author.get("login") != "github-actions[bot]":
+    if (
+        author.get("login") != GITHUB_ACTIONS_BOT_LOGIN
+        or author.get("id") != GITHUB_ACTIONS_BOT_ID
+    ):
         raise ContractError("GitHub Release author is not the workflow bot")
     if release_record.get("prerelease") is not False:
         raise ContractError("GitHub Release must be non-prerelease")
@@ -1367,6 +1592,192 @@ def validate_attestation_set(
     return len(statements)
 
 
+def validate_spdx_document(value: object, field: str = "SPDX SBOM") -> dict[str, object]:
+    """Require a non-null, non-empty SPDX document rather than a platform key."""
+    document = _object(value, field)
+    if document.get("SPDXID") != "SPDXRef-DOCUMENT":
+        raise ContractError(f"{field} SPDXID is not SPDXRef-DOCUMENT")
+    if document.get("spdxVersion") not in {"SPDX-2.2", "SPDX-2.3"}:
+        raise ContractError(f"{field} SPDX version is not supported")
+    if document.get("dataLicense") != "CC0-1.0":
+        raise ContractError(f"{field} data license is not CC0-1.0")
+    for key in ("name", "documentNamespace"):
+        member = document.get(key)
+        if not isinstance(member, str) or not member.strip():
+            raise ContractError(f"{field} {key} is absent")
+    namespace = str(document["documentNamespace"])
+    if not namespace.startswith(("https://", "http://")):
+        raise ContractError(f"{field} documentNamespace is malformed")
+    creation = _object(document.get("creationInfo"), f"{field} creationInfo")
+    created = creation.get("created")
+    if not isinstance(created, str) or not created.strip():
+        raise ContractError(f"{field} creation timestamp is absent")
+    creators = _array(creation.get("creators"), f"{field} creators")
+    if not creators or any(not isinstance(item, str) or not item.strip() for item in creators):
+        raise ContractError(f"{field} creators are empty or malformed")
+    packages = _array(document.get("packages"), f"{field} packages")
+    if not packages:
+        raise ContractError(f"{field} package evidence is empty")
+    for index, raw_package in enumerate(packages):
+        package = _object(raw_package, f"{field} package {index}")
+        if not isinstance(package.get("name"), str) or not package["name"]:
+            raise ContractError(f"{field} package {index} name is absent")
+        spdx_id = package.get("SPDXID")
+        if not isinstance(spdx_id, str) or not spdx_id.startswith("SPDXRef-"):
+            raise ContractError(f"{field} package {index} SPDXID is malformed")
+    return copy.deepcopy(dict(document))
+
+
+def validate_sbom_platform_map(value: object) -> dict[str, dict[str, object]]:
+    """Require exactly one valid Buildx SPDX payload for each release platform."""
+    platform_map = _object(value, "Buildx SBOM platform map")
+    if set(platform_map) != set(RELEASE_PLATFORMS):
+        raise ContractError("Buildx SBOM platforms are missing, duplicated, or foreign")
+    documents: dict[str, dict[str, object]] = {}
+    for platform in RELEASE_PLATFORMS:
+        record = _object(platform_map.get(platform), f"Buildx SBOM {platform}")
+        if set(record) != {"SPDX"}:
+            raise ContractError(f"Buildx SBOM {platform} fields are missing or foreign")
+        documents[platform] = validate_spdx_document(
+            record.get("SPDX"), f"Buildx SBOM {platform} SPDX"
+        )
+    return documents
+
+
+def build_sbom_statement(
+    document: Mapping[str, object], *, image: str, digest: str, platform: str
+) -> dict[str, object]:
+    """Bind one exact SPDX payload to the immutable index digest and platform."""
+    match = DIGEST_RE.fullmatch(digest)
+    if not match:
+        raise ContractError("SBOM subject digest must be sha256:<64 lowercase hex>")
+    if not image or "@" in image or platform not in RELEASE_PLATFORMS:
+        raise ContractError("SBOM image or platform identity is malformed")
+    predicate = validate_spdx_document(document)
+    return {
+        "_type": INTOTO_STATEMENT_TYPE,
+        "subject": [
+            {
+                "name": f"{image}@{digest}?platform={platform}",
+                "digest": {"sha256": match.group(1)},
+            }
+        ],
+        "predicateType": SPDX_PREDICATE_TYPE,
+        "predicate": predicate,
+    }
+
+
+def validate_sbom_attestation_set(
+    verified_output: str, expected_by_platform: Mapping[str, Mapping[str, object]]
+) -> int:
+    """Accept only the exact authenticated two-platform SPDX statement set."""
+    if set(expected_by_platform) != set(RELEASE_PLATFORMS):
+        raise ContractError("expected SBOM platform set is missing or foreign")
+    statements = _verified_statements(verified_output)
+    if len(statements) != len(expected_by_platform):
+        raise ContractError("verified SBOM count does not equal the required platform set")
+    expected: dict[bytes, str] = {}
+    for platform, statement in expected_by_platform.items():
+        expected[canonical_json_bytes(statement)] = platform
+    if len(expected) != len(expected_by_platform):
+        raise ContractError("expected SBOM statements are duplicated")
+    seen: set[str] = set()
+    for statement in statements:
+        if statement.get("_type") != INTOTO_STATEMENT_TYPE:
+            raise ContractError("verified SBOM statement type is foreign")
+        if statement.get("predicateType") != SPDX_PREDICATE_TYPE:
+            raise ContractError("verified SBOM predicate type is foreign")
+        subjects = _array(statement.get("subject"), "verified SBOM subjects")
+        if len(subjects) != 1:
+            raise ContractError("verified SBOM must carry exactly one subject")
+        subject = _object(subjects[0], "verified SBOM subject")
+        digest = _object(subject.get("digest"), "verified SBOM subject digest")
+        require_digest(f"sha256:{digest.get('sha256')}", "verified SBOM subject digest")
+        validate_spdx_document(statement.get("predicate"), "verified SPDX predicate")
+        key = canonical_json_bytes(statement)
+        platform = expected.get(key)
+        if platform is None:
+            raise ContractError("verified SBOM subject, platform, or payload is not exact")
+        if platform in seen:
+            raise ContractError("verified SBOM platform is duplicated")
+        seen.add(platform)
+    if seen != set(expected_by_platform):
+        raise ContractError("verified SBOM platforms are missing or foreign")
+    return len(statements)
+
+
+def validate_trivy_source_report(
+    report: Mapping[str, object], package_document: Mapping[str, object]
+) -> int:
+    """Prove the frontend build graph entered the recurring HIGH/CRITICAL scan."""
+    # Trivy v0.72 identifies `trivy fs ... .` JSON as a repository artifact.
+    # Pin that real emitter identity so a synthetic or wrong scanner report
+    # cannot satisfy the frontend dependency-inventory proof.
+    if (
+        report.get("SchemaVersion") != 2
+        or report.get("ArtifactName") != "."
+        or report.get("ArtifactType") != "repository"
+    ):
+        raise ContractError("Trivy source report identity is malformed")
+    dev_dependencies = _object(
+        package_document.get("devDependencies"), "frontend devDependencies"
+    )
+    if not dev_dependencies:
+        raise ContractError("frontend devDependencies are empty")
+    expected: dict[str, str] = {}
+    for name, version in dev_dependencies.items():
+        if not isinstance(name, str) or not name or not isinstance(version, str) or not version:
+            raise ContractError("frontend devDependency identity is malformed")
+        expected[name] = version
+
+    results = _array(report.get("Results"), "Trivy source Results")
+    frontend_results: list[Mapping[str, object]] = []
+    findings: list[tuple[str, str, str]] = []
+    for raw_result in results:
+        result = _object(raw_result, "Trivy source result")
+        target = result.get("Target")
+        if isinstance(target, str) and target.replace("\\", "/") == "frontend/package-lock.json":
+            if result.get("Class") != "lang-pkgs" or result.get("Type") not in {
+                "npm",
+                "node-pkg",
+            }:
+                raise ContractError("Trivy frontend result class or type is malformed")
+            frontend_results.append(result)
+        vulnerabilities = result.get("Vulnerabilities", [])
+        if vulnerabilities is None:
+            vulnerabilities = []
+        for raw_vulnerability in _array(vulnerabilities, "Trivy vulnerabilities"):
+            vulnerability = _object(raw_vulnerability, "Trivy vulnerability")
+            severity = vulnerability.get("Severity")
+            if severity in {"HIGH", "CRITICAL"}:
+                identifier = vulnerability.get("VulnerabilityID")
+                package = vulnerability.get("PkgName")
+                if not isinstance(identifier, str) or not identifier or not isinstance(package, str) or not package:
+                    raise ContractError("Trivy HIGH/CRITICAL finding identity is malformed")
+                findings.append((str(severity), identifier, package))
+    if len(frontend_results) != 1:
+        raise ContractError("Trivy report must contain exactly one frontend/package-lock.json result")
+    packages = _array(frontend_results[0].get("Packages"), "Trivy frontend packages")
+    actual: dict[str, list[tuple[str, object]]] = {}
+    for raw_package in packages:
+        package = _object(raw_package, "Trivy frontend package")
+        name = package.get("Name")
+        version = package.get("Version")
+        if isinstance(name, str) and isinstance(version, str):
+            actual.setdefault(name, []).append((version, package.get("Relationship")))
+    for name, version in expected.items():
+        if actual.get(name) != [(version, "direct")]:
+            raise ContractError(
+                f"Trivy source scan omitted exact direct frontend devDependency {name}@{version}"
+            )
+    if findings:
+        severity, identifier, package = sorted(findings)[0]
+        raise ContractError(
+            f"Trivy source scan found {severity} {identifier} in frontend build dependency {package}"
+        )
+    return len(expected)
+
+
 def classify_artifact(*, present: bool, source_match: bool, signature_match: bool, evidence_count: int, expected_evidence: int) -> str:
     if expected_evidence < 0 or evidence_count < 0:
         raise ContractError("evidence counts cannot be negative")
@@ -1415,6 +1826,19 @@ def _parser() -> argparse.ArgumentParser:
     main_run.add_argument("--run-id", type=int, required=True)
     main_run.add_argument("--repository", required=True)
     main_run.add_argument("--source-sha", required=True)
+    codeql_run = commands.add_parser("codeql-run-record")
+    codeql_run.add_argument("--run-json", type=Path, required=True)
+    codeql_run.add_argument("--run-id", type=int, required=True)
+    codeql_run.add_argument("--repository", required=True)
+    codeql_run.add_argument("--source-sha", required=True)
+    codeql_list = commands.add_parser("codeql-run-list")
+    codeql_list.add_argument("--runs-json", type=Path, required=True)
+    codeql_list.add_argument("--repository", required=True)
+    codeql_list.add_argument("--source-sha", required=True)
+    workflow_jobs = commands.add_parser("workflow-jobs")
+    workflow_jobs.add_argument("--jobs-json", type=Path, required=True)
+    workflow_jobs.add_argument("--workflow", choices=("pr-gate", "codeql"), required=True)
+    workflow_jobs.add_argument("--run-id", type=int, required=True)
     publisher = commands.add_parser("publisher")
     publisher.add_argument("--root", type=Path, required=True)
     publisher.add_argument("--source-sha", required=True)
@@ -1423,6 +1847,8 @@ def _parser() -> argparse.ArgumentParser:
     publisher.add_argument("--event-name", required=True)
     publisher.add_argument("--repository", required=True)
     publisher.add_argument("--workflow-ref", required=True)
+    publisher.add_argument("--image", required=True)
+    publisher.add_argument("--chart", required=True)
     settings_receipt = commands.add_parser("settings-receipt")
     settings_receipt.add_argument("--receipt", type=Path, required=True)
     settings_receipt.add_argument("--repository", required=True)
@@ -1490,6 +1916,11 @@ def _parser() -> argparse.ArgumentParser:
     manifest_record.add_argument("--github-output", type=Path)
     registry_token = commands.add_parser("registry-token")
     registry_token.add_argument("--token-json", type=Path, required=True)
+    registry_manifest = commands.add_parser("registry-manifest")
+    registry_manifest.add_argument("--http-status", type=int, required=True)
+    registry_manifest.add_argument("--body", type=Path, required=True)
+    registry_manifest.add_argument("--headers", type=Path, required=True)
+    registry_manifest.add_argument("--expected-digest")
     json_keys = commands.add_parser("json-keys")
     json_keys.add_argument("--json", type=Path, required=True)
     statement = commands.add_parser("attestation-statement")
@@ -1503,6 +1934,20 @@ def _parser() -> argparse.ArgumentParser:
     attestations = commands.add_parser("attestation-set")
     attestations.add_argument("--verified", type=Path, required=True)
     attestations.add_argument("--expected", action="append", required=True)
+    sbom_platforms = commands.add_parser("sbom-platforms")
+    sbom_platforms.add_argument("--json", type=Path, required=True)
+    sbom_statement = commands.add_parser("sbom-statement")
+    sbom_statement.add_argument("--spdx", type=Path, required=True)
+    sbom_statement.add_argument("--output", type=Path, required=True)
+    sbom_statement.add_argument("--image", required=True)
+    sbom_statement.add_argument("--digest", required=True)
+    sbom_statement.add_argument("--platform", required=True)
+    sbom_set = commands.add_parser("sbom-set")
+    sbom_set.add_argument("--verified", type=Path, required=True)
+    sbom_set.add_argument("--expected", action="append", required=True)
+    trivy_source = commands.add_parser("trivy-source")
+    trivy_source.add_argument("--report", type=Path, required=True)
+    trivy_source.add_argument("--package-json", type=Path, required=True)
     artifact = commands.add_parser("artifact-state")
     artifact.add_argument("--present", choices=("true", "false"), required=True)
     artifact.add_argument("--source-match", choices=("true", "false"), required=True)
@@ -1544,6 +1989,30 @@ def main(argv: list[str] | None = None) -> int:
                     expected_source_sha=args.source_sha,
                 )
             )
+        elif args.command == "codeql-run-record":
+            print(
+                validate_codeql_run_record(
+                    _read_object(args.run_json),
+                    expected_repository=args.repository,
+                    expected_run_id=args.run_id,
+                    expected_source_sha=args.source_sha,
+                )
+            )
+        elif args.command == "codeql-run-list":
+            state, run_id = select_codeql_main_run(
+                parse_json(args.runs_json.read_text(encoding="utf-8"), str(args.runs_json)),
+                expected_repository=args.repository,
+                expected_source_sha=args.source_sha,
+            )
+            print(json.dumps({"run_id": run_id, "state": state}, sort_keys=True))
+        elif args.command == "workflow-jobs":
+            print(
+                validate_workflow_job_inventory(
+                    parse_json(args.jobs_json.read_text(encoding="utf-8"), str(args.jobs_json)),
+                    workflow=args.workflow,
+                    expected_run_id=args.run_id,
+                )
+            )
         elif args.command == "publisher":
             _emit(
                 validate_publisher(
@@ -1554,6 +2023,8 @@ def main(argv: list[str] | None = None) -> int:
                     args.event_name,
                     args.repository,
                     args.workflow_ref,
+                    args.image,
+                    args.chart,
                 )
             )
         elif args.command == "settings-receipt":
@@ -1680,6 +2151,15 @@ def main(argv: list[str] | None = None) -> int:
             if len(candidates) != 1:
                 raise ContractError("registry token response must carry exactly one token")
             print(candidates[0])
+        elif args.command == "registry-manifest":
+            print(
+                validate_registry_manifest_response(
+                    args.http_status,
+                    args.body.read_bytes(),
+                    args.headers.read_text(encoding="utf-8"),
+                    expected_digest=args.expected_digest,
+                )
+            )
         elif args.command == "json-keys":
             # Security evidence emitted by Buildx is still untrusted input.
             # _read_object applies the same recursive duplicate-member and
@@ -1704,6 +2184,41 @@ def main(argv: list[str] | None = None) -> int:
                     raise ContractError("expected attestation arguments must be unique platform=path pairs")
                 expected[platform] = _read_object(Path(raw_path))
             print(validate_attestation_set(args.verified.read_text(encoding="utf-8"), expected))
+        elif args.command == "sbom-platforms":
+            documents = validate_sbom_platform_map(_read_object(args.json))
+            sys.stdout.buffer.write(
+                "".join(f"{platform}\n" for platform in documents).encode("utf-8")
+            )
+        elif args.command == "sbom-statement":
+            statement = build_sbom_statement(
+                _read_object(args.spdx),
+                image=args.image,
+                digest=args.digest,
+                platform=args.platform,
+            )
+            args.output.write_text(
+                json.dumps(statement, sort_keys=True) + "\n", encoding="utf-8"
+            )
+        elif args.command == "sbom-set":
+            expected_sboms: dict[str, Mapping[str, object]] = {}
+            for item in args.expected:
+                platform, separator, raw_path = item.partition("=")
+                if not separator or not platform or platform in expected_sboms:
+                    raise ContractError(
+                        "expected SBOM arguments must be unique platform=path pairs"
+                    )
+                expected_sboms[platform] = _read_object(Path(raw_path))
+            print(
+                validate_sbom_attestation_set(
+                    args.verified.read_text(encoding="utf-8"), expected_sboms
+                )
+            )
+        elif args.command == "trivy-source":
+            print(
+                validate_trivy_source_report(
+                    _read_object(args.report), _read_object(args.package_json)
+                )
+            )
         elif args.command == "artifact-state":
             state = classify_artifact(
                 present=args.present == "true",

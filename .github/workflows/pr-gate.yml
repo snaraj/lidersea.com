@@ -9,12 +9,16 @@ on:
 permissions: {}
 
 concurrency:
-  group: pr-gate-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  # PR synchronizations may cancel an older run for the same PR. Every main
+  # push uses its exact source SHA and cannot be canceled, so a later merge can
+  # never erase the successful-CI event that publishes an earlier merge.
+  group: pr-gate-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   security:
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     permissions:
       contents: read
     steps:
@@ -23,6 +27,33 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
+      - name: Test hostile release event and state transitions
+        run: python3 -I -B -m unittest discover -s scripts/ci -p 'test_release_contract.py' -v
+      - name: Enforce one exact patch from the protected base
+        if: github.event_name != 'workflow_dispatch'
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BASE_SHA: ${{ github.event.before }}
+          PUSH_HEAD_SHA: ${{ github.event.after }}
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_EVENT_NAME}" = pull_request ]; then
+            base_sha="${PR_BASE_SHA}"
+            head_sha="${PR_HEAD_SHA}"
+            first_parent=()
+          elif [ "${GITHUB_EVENT_NAME}" = push ] && [ "${GITHUB_REF}" = refs/heads/main ]; then
+            base_sha="${PUSH_BASE_SHA}"
+            head_sha="${PUSH_HEAD_SHA}"
+            test "${head_sha}" = "${GITHUB_SHA}"
+            first_parent=(--first-parent)
+          else
+            printf 'unsupported release-gate event %s on %s\n' "${GITHUB_EVENT_NAME}" "${GITHUB_REF}" >&2
+            exit 1
+          fi
+          python3 -I -B scripts/ci/release_contract.py transition \
+            --repository . --base "${base_sha}" --head "${head_sha}" \
+            "${first_parent[@]}"
       - name: Install checksum-verified tools
         run: ./scripts/ci/install-tools.sh
       - name: Validate workflows
@@ -39,10 +70,29 @@ jobs:
         run: gitleaks git --no-banner --redact --max-target-megabytes=2 .
       - name: Scan working tree for secrets
         run: gitleaks dir --no-banner --redact .
+      - name: Gate source dependencies at HIGH and CRITICAL
+        run: |
+          set -euo pipefail
+          report="${RUNNER_TEMP}/trivy-source.json"
+          set +e
+          trivy fs --scanners vuln --include-dev-deps --list-all-pkgs \
+            --severity HIGH,CRITICAL --exit-code 1 --format json \
+            --output "${report}" .
+          scan_status=$?
+          set -e
+          python3 -I -B scripts/ci/release_contract.py trivy-source \
+            --report "${report}" --package-json frontend/package.json >/dev/null
+          if [ "${scan_status}" -ne 0 ]; then
+            printf 'DENY: Trivy source scan did not complete cleanly\n' >&2
+            exit 1
+          fi
+      - name: Gate repository configuration at HIGH and CRITICAL
+        run: trivy config --severity HIGH,CRITICAL --exit-code 1 .
 
   dependency-review:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     permissions:
       contents: read
     steps:
@@ -57,6 +107,7 @@ jobs:
 
   application:
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     permissions:
       contents: read
     steps:
@@ -146,6 +197,7 @@ jobs:
 
   chart:
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     permissions:
       contents: read
     steps:
@@ -187,6 +239,7 @@ jobs:
 
   container:
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     permissions:
       contents: read
     steps:
@@ -213,6 +266,7 @@ jobs:
     # services or accounts.
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
+    timeout-minutes: 25
     permissions:
       contents: write
     steps:
@@ -240,8 +294,8 @@ jobs:
           # exiting nonzero fails this step and publishes nothing, instead of
           # the pipeline silently taking awk's exit status and letting a
           # partially failing suite publish a green count on a main push.
-          set -o pipefail
-          cd frontend
+          set -euo pipefail
+          pushd frontend >/dev/null
           npm ci --ignore-scripts --no-audit --no-fund
           npm run build
           # The frontend badge reports the passing-test count, not a coverage
@@ -258,7 +312,7 @@ jobs:
           # exit status - without the self-inflicted SIGPIPE.
           front="$(node --test --test-reporter=tap tests/*.test.mjs 2>&1 \
             | awk '/^# pass /{count=$3} END{print count}')"
-          cd ..
+          popd >/dev/null
           CGO_ENABLED=0 go test -covermode=atomic -coverprofile="${RUNNER_TEMP}/cp.out" ./...
           # Same scaffolding exclusion as the enforcement step, so the badge
           # publishes the identical production-statement number the gate holds.
@@ -273,11 +327,13 @@ jobs:
           GO_PCT: ${{ steps.cov.outputs.go }}
           FRONT_PASS: ${{ steps.cov.outputs.front }}
         run: |
+          set -euo pipefail
           color() {
             awk -v p="$1" 'BEGIN{ if (p>=90) print "brightgreen"; else if (p>=75) print "green"; else if (p>=60) print "yellow"; else print "orange" }'
           }
           work="${RUNNER_TEMP}/badges"
-          mkdir -p "${work}" && cd "${work}"
+          mkdir -p "${work}"
+          pushd "${work}" >/dev/null
           git init -q -b badges .
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
@@ -287,5 +343,7 @@ jobs:
           # a published count is by construction a fully passing suite.
           printf '{"schemaVersion":1,"label":"frontend tests","message":"%s passing","color":"brightgreen"}\n' \
             "${FRONT_PASS}" > frontend-tests.json
-          git add . && git commit -qm "coverage badges for ${GITHUB_SHA}"
+          git add .
+          git commit -qm "coverage badges for ${GITHUB_SHA}"
           git push -q --force "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" badges
+          popd >/dev/null

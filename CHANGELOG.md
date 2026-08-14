@@ -1,12 +1,53 @@
 # Changelog
 
 All notable changes to lidersea.com. The format follows
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
-SemVer and match image/chart tags exactly.
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/). `VERSION`, chart
+metadata, these headings, and Helm's strict OCI chart tag use numeric SemVer.
+Git, image, and GitHub Release tags use the exact plain `vX.Y.Z` form.
 
 ## [Unreleased]
 
+## [0.1.10] - 2026-08-13
+
 ### Added
+
+- Every protected-main merge now carries and publishes its own semantic patch
+  release. Pull requests (including docs and dependency updates) must advance
+  the four committed source locks by exactly one patch from their protected
+  base. The PR, protected-main, and recovery paths share one intermediate-state
+  machine: each commit retains `VERSION` or advances one patch; skips,
+  reversions, transient future values, and collapsed multiple boundaries fail.
+  Successful main CI binds the exact final SHA, creates its annotated plain-v
+  Git tag, and explicitly dispatches the publisher definition from protected
+  `main` with the authoritative completed-run ID.
+
+  A read-only run-authorization job rejects manual/unmerged dispatches. Before
+  tag, registry, signing, attestation, or Release effects, structurally separate
+  environment-gated jobs mint a current-repository Administration-read-only App
+  token and authoritatively recheck immutable Releases, SHA-pinned Actions,
+  signed-commit/main rules, strict checks, and repository security. The token is
+  step-local and never crosses into a mutation job; ordinary `GITHUB_TOKEN` is
+  the sole mutation credential.
+
+  Rapid merges have exact-SHA, noncancelling paths. Real shell create, verify,
+  conflict, race, and bounded retry paths are hostile-tested. Complete image
+  reuse authenticates the exact `linux/amd64` and `linux/arm64` SBOM/provenance
+  set. The final image digest is HIGH/CRITICAL vulnerability-gated before
+  signing. New Releases are created Draft with exactly one canonical mode-0600
+  `release-manifest.json` machine asset binding source, image digest, chart
+  digest, signature, SBOM, and provenance expectations. Asset name/count/size,
+  SHA-256, canonical content, draft/upload/publish state, and final immutable
+  state are exact; human title/notes are informational. The workflow then ends
+  with an unconditional REST rebind of both annotated tag records.
+
+  Image `vX.Y.Z` and Helm `X.Y.Z` registry tags are explicitly mutable aliases;
+  only their recorded digests are immutable artifact identities. A scheduled
+  read-only audit revalidates the Release/manifest/tag, alias-to-digest
+  bindings, image/chart signatures, exact SBOM/provenance set, chart digest, and
+  an immutable-digest vulnerability rescan. Recursive duplicate JSON members
+  are rejected at every event, REST, registry, Buildx, manifest, and Cosign
+  boundary. Repository server controls remain an external Ready gate proven by
+  the closed GET-only settings receipt.
 - A deployed Pod now states which release it is. The shared labels helper
   emits `app.kubernetes.io/version` on every rendered object, taken from the
   chart's own `appVersion` rather than from values, and the container image

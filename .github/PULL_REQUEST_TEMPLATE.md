@@ -26,6 +26,7 @@ Closes #<!-- same-repository issue number -->
 | Command or check | Result |
 | --- | --- |
 | Release transition and hostile event/state suite | |
+| Successful-main run binding and manual/unmerged dispatch denial | |
 | Required CI, coverage, security, and quality checks | |
 
 ## Exact-head review

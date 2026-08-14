@@ -10,7 +10,10 @@ owner; you should normally hear back within a week.
 ## Supported versions
 
 Only the latest released version (the newest `vX.Y.Z` tag) is supported.
-Releases are immutable; fixes ship as new versions, never as re-tags.
+Fixes ship as new versions, never as re-tags. Existing Releases that predate
+GitHub's immutable-release control are not retroactively described as
+immutable; the next automatic release is blocked until the control is enabled
+and the repository owner's read-only settings receipt proves it.
 
 ## Posture (what you can rely on)
 
@@ -19,9 +22,14 @@ Releases are immutable; fixes ship as new versions, never as re-tags.
   port 8080 with no runtime dependencies and no outbound calls.
 - Images and charts are published only after successful main CI by an
   exact-SHA orchestrator that creates the immutable version tag and explicitly
-  dispatches the publisher on that tag. The publisher remains multi-arch,
-  keyless-signed (Cosign), with SBOM and SLSA provenance. Deployment consumes
-  immutable digests.
+  dispatches the protected-main publisher with that completed run's ID. A
+  read-only job validates the authoritative Actions record before the
+  privileged publisher can start, so a manual/unmerged dispatch cannot mint
+  artifacts. Readiness requires strict current-base checks, no ruleset bypass
+  actor, and GitHub immutable releases enabled; the publisher then refuses a
+  Release unless REST reports `immutable: true`. The publisher remains
+  multi-arch, keyless-signed (Cosign), with SBOM and SLSA provenance.
+  Deployment consumes immutable digests.
 - CI is secretless on pull requests; all third-party actions are pinned to
   full commit SHAs; scanners are checksum-pinned; secret scanning covers
   full history on every PR.

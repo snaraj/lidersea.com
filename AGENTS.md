@@ -80,13 +80,24 @@ Numbered for citation, repo-scoped, none negotiable in code:
    yes.
 9. **Dependency-free Go.** The Go module stays standard-library only.
    Adding a dependency is an owner decision, not a convenience.
-10. **Every merge releases; deploy remains separate.** Every PR, including
+10. **Every merge releases after the server gate; deploy remains separate.** Every PR, including
     docs and Dependabot, advances exactly one patch from its current protected
     base: numeric `VERSION`, chart `version`, `appVersion`, and changelog
     `X.Y.Z`, plus plain `vX.Y.Z` image tag. Successful main CI publishes that exact SHA as one
-    immutable plain `vX.Y.Z` release. The machine-only workflow dispatch is
-    the explicit handoff required after a token-created tag; it is not an
-    operator bypass. There is no skip or force path. Images deploy by digest;
+    server-locked plain `vX.Y.Z` release. The explicit workflow dispatch after
+    a token-created tag selects the publisher definition from protected `main`
+    and carries the completed main-run ID. A separate read-only job verifies
+    the authoritative Actions record before the privileged job can start, so
+    an ordinary manual dispatch cannot publish unmerged source. Squash and
+    rebase are both supported: the protected-main push must be one merge-free
+    linear base-to-head range whose final snapshot is the exact next patch, and
+    that complete final SHA gets one release. There is no skip or force path.
+    The automatic-release PR remains Draft until the repository owner's GET-only
+    receipt proves GitHub immutable releases enabled and exact
+    GitHub-Actions-bound required checks enforced against the current base with
+    no bypass actor or update restriction; see
+    `docs/release-governance.md`. Every created or reused GitHub Release must
+    also report authoritative `immutable: true`. Images deploy by digest;
     `vX.Y.Z@sha256:<digest>` is a reference, never a tag, and publication is
     never deployment or promotion.
 11. **No secrets, no personal data.** No credential, token, private host
@@ -178,14 +189,21 @@ Build and test, in this order (the same gate CI enforces):
 Releases: every PR advances numeric `VERSION`, chart `version`, `appVersion`,
 and changelog `X.Y.Z`, plus plain `vX.Y.Z` `image.tag`, by exactly one patch
 from its current protected base. Successful main CI creates the plain git tag at the
-exact merged SHA and explicitly dispatches the tag-bound publisher; a
-token-created tag is never assumed to trigger another push workflow. The
+exact merged SHA and explicitly dispatches the protected-main publisher with
+that successful run's ID; a token-created tag is never assumed to trigger
+another push workflow. The publisher's read-only authorization job verifies
+the exact run, repository, workflow path, push event, successful conclusion,
+main branch, and source SHA before its write/packages/OIDC job can start. The
 publisher emits the signed multi-arch image, signed OCI chart, and GitHub
 Release. Histories and tags are append-only; stale concurrent PRs must resync
 and take the new next patch. Deployment RESOLVES digests, never tags. The
 Helm chart/OCI tag is the documented numeric `X.Y.Z` exception because Helm
 requires its registry tag to equal valid chart SemVer; Git/image/Release tags
 remain plain `vX.Y.Z`.
+Before the first Release governed by this path, the repository owner must make
+the release-control settings receipt exact. The receipt is a required Ready
+gate, never permission for an agent to change settings or merge. A failed or
+unknown preflight leaves the PR Draft.
 The rendered image reference carries both —
 `repository:vX.Y.Z@sha256:<hex>` — so a Pod states which release
 it is, while only the digest selects the bytes and only the digest is signed,
@@ -357,9 +375,10 @@ authority: the owner alone merges.
 - **Assignee.** The owner is assignee on every PR and issue (authorship is
   already the owner's account by token identity).
 - **Linear history.** Merge commits are disabled in repository settings;
-  the owner merges by squash (or rebase). Branches auto-delete on merge;
-  stale local branches are pruned as work lands. History is append-only
-  and never rewritten.
+  the owner merges by squash or rebase. The release contract accepts either
+  the one-commit squash range or a multi-commit rebase range and binds one
+  release to its exact final tree. Branches auto-delete on merge; stale local
+  branches are pruned as work lands. History is append-only and never rewritten.
 - **Commits.** Detailed bodies to the review protocol's evidence standard —
   problem, mechanism, enumerated changes, evidence — signed per lane.
 - **Dependabot.** Dependency PRs obey the same issue/milestone/assignee,
@@ -370,8 +389,10 @@ authority: the owner alone merges.
 - **Merge readiness.** Draft remains Draft until every check is successful at
   the exact head, the base equals current protected `main`, all discussions and
   findings are resolved, a fresh exact-head APPROVE receipt exists, the next
-  patch still follows that base, and the automatic release consequence is
-  proven. Only the coordinator flips Ready. The author and reviewer never do.
+  patch still follows that base, the automatic release consequence is proven,
+  and the owner-observed release-control receipt proves immutable releases plus
+  strict exact required checks with no bypass. Only the coordinator flips
+  Ready. The author and reviewer never do.
 
 ## Working a change end to end
 
@@ -402,8 +423,12 @@ The complete delivery loop, each step gated by the sections around it:
 6. **Adversarial review** per the protocol above; findings are fixed on
    the same branch by the same writer and delta re-reviewed before the
    flip to ready.
-7. **Owner comments** are handled per the owner review protocol below.
-8. **The owner merges.** Nothing you can do — approval, green checks,
+7. **Prove server release controls.** For an automatic-release change, the
+   repository owner runs the GET-only preflight in
+   `docs/release-governance.md`; immutable releases, strict current-base
+   required checks, and the no-bypass ruleset must be exact before Ready.
+8. **Owner comments** are handled per the owner review protocol below.
+9. **The owner merges.** Nothing you can do — approval, green checks,
    ready state — substitutes for that.
 
 ## Commit identity mechanics
@@ -536,16 +561,21 @@ included; it is the same battery CI enforces:
 - **codeql.yml** — pull requests, `main` pushes, weekly cron.
 - **release-after-main.yml** — success-only exact-SHA main-CI completion;
   creates or verifies the annotated tag and explicitly dispatches the
-  publisher on that tag. Distinct main SHAs share no cancellation group.
-- **release-publisher.yml** — machine-dispatch on an immutable version-tag
-  ref only; exact source/tag/lock checks, no operator bypass, skip flag, or
-  force path (requirement 10).
+  publisher definition on protected `main` with the exact completed-run ID.
+  The release boundary is recovered for both squash and multi-commit rebase
+  pushes. Distinct main SHAs share no cancellation group.
+- **release-publisher.yml** — explicit dispatch on protected `main`; a
+  read-only authorization job GETs and validates the exact successful PR-gate
+  push run before the source checkout and privileged publication job. Exact
+  source/tag/lock checks and authoritative immutable Release state remain; an
+  ordinary manual/unmerged dispatch, skip flag, or force path cannot publish
+  (requirement 10).
 - **GitHub event basis.** GitHub documents that `GITHUB_TOKEN`-created refs
   suppress recursive workflow events except explicit dispatch, that
   `workflow_run` fires regardless of conclusion and uses default-branch
   context, and that concurrency ordering is not a release ledger. Therefore
-  the success check, payload `head_sha`, tag-ref dispatch, and independent
-  per-SHA paths are load-bearing. See
+  the success check, payload `head_sha`, protected-main dispatch with the
+  completed-run ID, and independent per-SHA paths are load-bearing. See
   <https://docs.github.com/en/actions/concepts/security/github_token>,
   <https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#workflow_run>,
   and <https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency>.

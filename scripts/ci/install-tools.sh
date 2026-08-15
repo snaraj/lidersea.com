@@ -8,6 +8,8 @@ GITLEAKS_VERSION=v8.30.1
 GITLEAKS_SHA256=551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
 HELM_VERSION=v3.19.2
 HELM_SHA256=2114c9dea2844dce6d0ee2d792a9aae846be8cf53d5b19dc2988b5a0e8fec26e
+TRIVY_VERSION=v0.73.0
+TRIVY_SHA256=2edd39da482bb4e9831962487b68f68e3928ec3137794757f54d00383d79547b
 
 : "${RUNNER_TEMP:?GitHub Actions must provide RUNNER_TEMP}"
 install_root="$(mktemp -d "${RUNNER_TEMP%/}/site-ci-tools.XXXXXX")"
@@ -32,6 +34,13 @@ fetch_verify \
 tar -xzf "${download_root}/helm.tar.gz" -C "${download_root}" linux-amd64/helm
 install -m 0755 "${download_root}/linux-amd64/helm" "${install_root}/helm"
 
+fetch_verify \
+  "https://github.com/aquasecurity/trivy/releases/download/${TRIVY_VERSION}/trivy_${TRIVY_VERSION#v}_Linux-64bit.tar.gz" \
+  "${TRIVY_SHA256}" "${download_root}/trivy.tar.gz"
+tar -xzf "${download_root}/trivy.tar.gz" -C "${download_root}" trivy
+install -m 0755 "${download_root}/trivy" "${install_root}/trivy"
+
 echo "${install_root}" >> "${GITHUB_PATH}"
 "${install_root}/gitleaks" version
 "${install_root}/helm" version --short
+"${install_root}/trivy" --version

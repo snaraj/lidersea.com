@@ -1,17 +1,31 @@
 name: Release publisher
 
-# Publishes ONLY from an explicit semantic version tag. There is deliberately
-# no manual dispatch, no skip flag, no force path, and no way to reassign an
-# existing tag: security behaviors here have no off switch.
+# Publishes ONLY when the successful-main orchestrator explicitly dispatches
+# the workflow definition on protected main with its exact source SHA and
+# completed PR-gate and CodeQL run IDs. A token-created tag does not recursively trigger
+# push workflows, so workflow_dispatch is the explicit handoff, but an ordinary
+# manual dispatch cannot cross the read-only successful-main authorization job.
+# There is no skip flag, force path, or way to reassign a tag.
 on:
-  push:
-    tags:
-      - 'v[0-9]+.[0-9]+.[0-9]+'
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact successful main-CI commit bound to this tag
+        required: true
+        type: string
+      main_run_id:
+        description: Authoritative successful PR-gate push run on main
+        required: true
+        type: string
+      codeql_run_id:
+        description: Authoritative successful CodeQL push run on the same main SHA
+        required: true
+        type: string
 
 permissions: {}
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ inputs.source_sha }}
   cancel-in-progress: false
 
 env:
@@ -19,26 +33,147 @@ env:
   CHART: ghcr.io/snaraj/charts/lidersea-com
 
 jobs:
-  publish:
+  authorize:
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      source_sha: ${{ steps.main_run.outputs.source_sha }}
+    steps:
+      - name: Check out protected publisher authority
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          path: authority
+          persist-credentials: false
+      - name: Bind dispatch to exact successful protected-main job inventories
+        id: main_run
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MAIN_RUN_ID: ${{ inputs.main_run_id }}
+          CODEQL_RUN_ID: ${{ inputs.codeql_run_id }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          [[ "${MAIN_RUN_ID}" =~ ^[1-9][0-9]*$ ]]
+          [[ "${CODEQL_RUN_ID}" =~ ^[1-9][0-9]*$ ]]
+          run_json="${RUNNER_TEMP}/publisher-main-run.json"
+          jobs_json="${RUNNER_TEMP}/publisher-main-jobs.json"
+          gh api --method GET \
+            --header 'Accept: application/vnd.github+json' \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/${GITHUB_REPOSITORY}/actions/runs/${MAIN_RUN_ID}" > "${run_json}"
+          authorized_sha="$(python3 -I -B authority/scripts/ci/release_contract.py \
+            main-run-record --run-json "${run_json}" \
+            --run-id "${MAIN_RUN_ID}" --repository "${GITHUB_REPOSITORY}" \
+            --source-sha "${SOURCE_SHA}")"
+          test "${authorized_sha}" = "${SOURCE_SHA}"
+          gh api --method GET --paginate --slurp \
+            --header 'Accept: application/vnd.github+json' \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/${GITHUB_REPOSITORY}/actions/runs/${MAIN_RUN_ID}/jobs?filter=latest&per_page=100" \
+            > "${jobs_json}"
+          test "$(python3 -I -B authority/scripts/ci/release_contract.py workflow-jobs \
+            --jobs-json "${jobs_json}" --workflow pr-gate --run-id "${MAIN_RUN_ID}")" = 6
+
+          codeql_run_json="${RUNNER_TEMP}/publisher-codeql-run.json"
+          codeql_jobs_json="${RUNNER_TEMP}/publisher-codeql-jobs.json"
+          gh api --method GET \
+            --header 'Accept: application/vnd.github+json' \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/${GITHUB_REPOSITORY}/actions/runs/${CODEQL_RUN_ID}" > "${codeql_run_json}"
+          authorized_codeql_sha="$(python3 -I -B authority/scripts/ci/release_contract.py \
+            codeql-run-record --run-json "${codeql_run_json}" \
+            --run-id "${CODEQL_RUN_ID}" --repository "${GITHUB_REPOSITORY}" \
+            --source-sha "${SOURCE_SHA}")"
+          test "${authorized_codeql_sha}" = "${SOURCE_SHA}"
+          gh api --method GET --paginate --slurp \
+            --header 'Accept: application/vnd.github+json' \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/${GITHUB_REPOSITORY}/actions/runs/${CODEQL_RUN_ID}/jobs?filter=latest&per_page=100" \
+            > "${codeql_jobs_json}"
+          test "$(python3 -I -B authority/scripts/ci/release_contract.py workflow-jobs \
+            --jobs-json "${codeql_jobs_json}" --workflow codeql --run-id "${CODEQL_RUN_ID}")" = 2
+          printf 'source_sha=%s\n' "${authorized_sha}" >> "${GITHUB_OUTPUT}"
+
+  immutable_settings:
+    needs: authorize
+    if: needs.authorize.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: platform-release
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the authorized settings contract
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.authorize.outputs.source_sha }}
+          persist-credentials: false
+      - name: Mint the isolated Admin-read settings token
+        id: immutable_settings
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ vars.PLATFORM_RELEASE_APP_ID }}
+          private-key: ${{ secrets.PLATFORM_RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-administration: read
+          skip-token-revoke: false
+      - name: Recheck authoritative immutable publication settings
+        env:
+          IMMUTABLE_SETTINGS_TOKEN: ${{ steps.immutable_settings.outputs.token }}
+        run: |
+          set -euo pipefail
+          test -n "${IMMUTABLE_SETTINGS_TOKEN}"
+          GH_TOKEN="${IMMUTABLE_SETTINGS_TOKEN}" \
+            python3 -I -B scripts/ci/release_contract.py settings-preflight \
+              --repository "${GITHUB_REPOSITORY}" >/dev/null
+
+  publish:
+    needs: [authorize, immutable_settings]
+    if: >-
+      needs.authorize.result == 'success' &&
+      needs.immutable_settings.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
     permissions:
       contents: write
       packages: write
       id-token: write
+    env:
+      SOURCE_SHA: ${{ needs.authorize.outputs.source_sha }}
     steps:
-      - name: Check out repository
+      - name: Check out the authorized successful-main source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ needs.authorize.outputs.source_sha }}
           persist-credentials: false
           fetch-depth: 0
+      - name: Bind protected workflow, authorized checkout, and committed locks
+        run: |
+          set -euo pipefail
+          checkout_sha="$(git rev-parse HEAD)"
+          python3 -I -B scripts/ci/release_contract.py publisher \
+            --root . \
+            --source-sha "${SOURCE_SHA}" \
+            --checkout-sha "${checkout_sha}" \
+            --ref "${GITHUB_REF}" \
+            --event-name "${GITHUB_EVENT_NAME}" \
+            --repository "${GITHUB_REPOSITORY}" \
+            --workflow-ref "${GITHUB_WORKFLOW_REF}" \
+            --image "${IMAGE}" \
+            --chart "${CHART}"
       - name: Install checksum-verified tools
         run: ./scripts/ci/install-tools.sh
-      - name: Enforce the three-way version lock (tag == VERSION == chart)
+      - name: Enforce numeric VERSION and plain-v release locks
         id: release
         run: |
           set -euo pipefail
-          tag="${GITHUB_REF_NAME}"
           IFS= read -r version < VERSION
+          tag="v${version}"
           chart_version="$(awk '/^version:/{print $2; exit}' chart/Chart.yaml)"
           app_version="$(awk '/^appVersion:/{gsub(/"/,"",$2); print $2; exit}' chart/Chart.yaml)"
           test "${tag}" = "v${version}"
@@ -46,27 +181,205 @@ jobs:
           test "${app_version}" = "${version}"
           printf 'version=%s\n' "${version}" >> "${GITHUB_OUTPUT}"
           printf 'tag=%s\n' "${tag}" >> "${GITHUB_OUTPUT}"
-      - name: Refuse to reuse an existing image tag
+      - name: Verify the complete annotated tag identity
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.release.outputs.tag }}
         run: |
           set -euo pipefail
-          if docker buildx imagetools inspect "${IMAGE}:${{ steps.release.outputs.tag }}" >/dev/null 2>&1; then
-            printf 'immutable tag %s already exists; bump the version instead\n' \
-              "${{ steps.release.outputs.tag }}" >&2
-            exit 1
-          fi
+          ref_json="${RUNNER_TEMP}/publisher-tag-ref.json"
+          tag_json="${RUNNER_TEMP}/publisher-tag-object.json"
+          api="${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}"
+          status="$(curl --silent --show-error --location \
+            --proto '=https' --tlsv1.2 --output "${ref_json}" --write-out '%{http_code}' \
+           --header 'Accept: application/vnd.github+json' \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            "${api}/git/ref/tags/${TAG}")"
+          test "${status}" = 200
+          tag_object="$(python3 -I -B scripts/ci/release_contract.py tag-ref-object \
+            --ref-json "${ref_json}" --tag "${TAG}")"
+          status="$(curl --silent --show-error --location \
+            --proto '=https' --tlsv1.2 --output "${tag_json}" --write-out '%{http_code}' \
+            --header 'Accept: application/vnd.github+json' \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            "${api}/git/tags/${tag_object}")"
+          test "${status}" = 200
+          python3 -I -B scripts/ci/release_contract.py tag-record \
+            --ref-json "${ref_json}" --tag-json "${tag_json}" \
+            --tag "${TAG}" --source-sha "${SOURCE_SHA}" \
+            --message "Release ${TAG} from ${SOURCE_SHA}" \
+            --tagger-name 'github-actions[bot]' \
+            --tagger-email '41898282+github-actions[bot]@users.noreply.github.com' \
+            --tagger-date "$(git show -s --format=%cI "${SOURCE_SHA}")"
       - name: Set up QEMU
         uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
       - name: Set up Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.1.3
+      - name: Classify an absent, complete, or burned image tag
+        id: image_state
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+          GHCR_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          repository="${IMAGE#ghcr.io/}"
+          token_file="${RUNNER_TEMP}/image-registry-token.json"
+          credentials="${RUNNER_TEMP}/ghcr.netrc"
+          required_platforms=(linux/amd64 linux/arm64)
+          expected_evidence="$((2 * ${#required_platforms[@]}))"
+          trap 'rm -f -- "${token_file}" "${credentials}"' EXIT
+          umask 077
+          printf 'machine ghcr.io\nlogin %s\npassword %s\n' \
+            "${GITHUB_ACTOR}" "${GHCR_PASSWORD}" > "${credentials}"
+          curl --fail-with-body --silent --show-error --location \
+            --proto '=https' --tlsv1.2 --netrc-file "${credentials}" \
+            --get --data-urlencode "scope=repository:${repository}:pull" \
+            'https://ghcr.io/token' > "${token_file}"
+          token="$(python3 -I -B scripts/ci/release_contract.py registry-token \
+            --token-json "${token_file}")"
+          rm -f -- "${token_file}" "${credentials}"
+          manifest="${RUNNER_TEMP}/existing-image-manifest.json"
+          headers="${RUNNER_TEMP}/existing-image-headers.txt"
+          status="$(curl --silent --show-error --location \
+            --proto '=https' --tlsv1.2 --output "${manifest}" \
+            --dump-header "${headers}" --write-out '%{http_code}' \
+            --header "Authorization: Bearer ${token}" \
+            --header 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json' \
+            "https://ghcr.io/v2/${repository}/manifests/${TAG}")"
+          registry_state="$(python3 -I -B scripts/ci/release_contract.py registry-state --http-status "${status}")"
+          if [ "${registry_state}" = absent ]; then
+            state="$(python3 -I -B scripts/ci/release_contract.py artifact-state \
+              --present false --source-match false --signature-match false \
+              --evidence-count 0 --expected-evidence "${expected_evidence}")"
+            printf 'state=%s\ndigest=\n' "${state}" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          digest="$(python3 -I -B scripts/ci/release_contract.py registry-manifest \
+            --http-status "${status}" --body "${manifest}" --headers "${headers}")"
+          source_match=true
+          expected_platforms="${required_platforms[*]}"
+          source="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
+          provenance="${RUNNER_TEMP}/existing-image-provenance.json"
+          sbom="${RUNNER_TEMP}/existing-image-sbom.json"
+          if ! docker buildx imagetools inspect "${IMAGE}@${digest}" \
+            --format '{{ json .Provenance }}' > "${provenance}"; then
+            source_match=false
+          fi
+          if ! docker buildx imagetools inspect "${IMAGE}@${digest}" \
+            --format '{{ json .SBOM }}' > "${sbom}"; then
+            source_match=false
+          fi
+          provenance_keys="${RUNNER_TEMP}/existing-image-provenance.keys"
+          sbom_keys="${RUNNER_TEMP}/existing-image-sbom.keys"
+          if ! python3 -I -B scripts/ci/release_contract.py json-keys \
+            --json "${provenance}" > "${provenance_keys}"; then
+            source_match=false
+            : > "${provenance_keys}"
+          fi
+          if ! python3 -I -B scripts/ci/release_contract.py sbom-platforms \
+            --json "${sbom}" > "${sbom_keys}"; then
+            source_match=false
+            : > "${sbom_keys}"
+          fi
+          provenance_platforms="$(paste -sd ' ' "${provenance_keys}")"
+          sbom_platforms="$(paste -sd ' ' "${sbom_keys}")"
+          if [ "${provenance_platforms}" != "${expected_platforms}" ] || \
+             [ "${sbom_platforms}" != "${expected_platforms}" ]; then
+            source_match=false
+          fi
+          expected_attestations=()
+          expected_sboms=()
+          for platform in "${required_platforms[@]}"; do
+            predicate="${RUNNER_TEMP}/existing-${platform//\//-}.json"
+            statement="${RUNNER_TEMP}/existing-${platform//\//-}.statement.json"
+            spdx="${RUNNER_TEMP}/existing-${platform//\//-}.spdx.json"
+            sbom_statement="${RUNNER_TEMP}/existing-${platform//\//-}.sbom.statement.json"
+            if ! docker buildx imagetools inspect "${IMAGE}@${digest}" \
+              --format "{{ json (index .Provenance \"${platform}\").SLSA }}" > "${predicate}"; then
+              source_match=false
+              continue
+            fi
+            if ! python3 -I -B scripts/ci/release_contract.py attestation-statement \
+              --predicate "${predicate}" --output "${statement}" \
+              --image "${IMAGE}" --digest "${digest}" --source "${source}" \
+              --revision "${SOURCE_SHA}" --platform "${platform}"; then
+              source_match=false
+              continue
+            fi
+            expected_attestations+=(--expected "${platform}=${statement}")
+            if ! docker buildx imagetools inspect "${IMAGE}@${digest}" \
+              --format "{{ json (index .SBOM \"${platform}\").SPDX }}" > "${spdx}"; then
+              source_match=false
+              continue
+            fi
+            if ! python3 -I -B scripts/ci/release_contract.py sbom-statement \
+              --spdx "${spdx}" --output "${sbom_statement}" \
+              --image "${IMAGE}" --digest "${digest}" --platform "${platform}"; then
+              source_match=false
+              continue
+            fi
+            expected_sboms+=(--expected "${platform}=${sbom_statement}")
+          done
+
+          signature_match=false
+          verified_count=0
+          verified="${RUNNER_TEMP}/verified-existing-attestations.json"
+          verified_sboms="${RUNNER_TEMP}/verified-existing-sboms.json"
+          identity="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/.github/workflows/release-publisher.yml@refs/heads/main"
+          issuer="https://token.actions.githubusercontent.com"
+          verify_existing_evidence() {
+            cosign verify \
+              --certificate-identity "${identity}" \
+              --certificate-oidc-issuer "${issuer}" \
+              "${IMAGE}@${digest}" >/dev/null 2>&1 || return 1
+            cosign verify-attestation --type slsaprovenance1 --output json \
+              --certificate-identity "${identity}" \
+              --certificate-oidc-issuer "${issuer}" \
+              "${IMAGE}@${digest}" > "${verified}" 2>/dev/null || return 1
+            python3 -I -B scripts/ci/release_contract.py attestation-set \
+              --verified "${verified}" "${expected_attestations[@]}" \
+              > "${RUNNER_TEMP}/verified-attestation-count.txt" || return 1
+            cosign verify-attestation --type spdxjson --output json \
+              --certificate-identity "${identity}" \
+              --certificate-oidc-issuer "${issuer}" \
+              "${IMAGE}@${digest}" > "${verified_sboms}" 2>/dev/null || return 1
+            python3 -I -B scripts/ci/release_contract.py sbom-set \
+              --verified "${verified_sboms}" "${expected_sboms[@]}" \
+              > "${RUNNER_TEMP}/verified-sbom-count.txt" || return 1
+          }
+          if [ "${source_match}" = true ] && verify_existing_evidence; then
+            validated_count="$(<"${RUNNER_TEMP}/verified-attestation-count.txt")"
+            validated_sbom_count="$(<"${RUNNER_TEMP}/verified-sbom-count.txt")"
+            signature_match=true
+            verified_count="$((validated_count + validated_sbom_count))"
+          fi
+          set +e
+          state="$(python3 -I -B scripts/ci/release_contract.py artifact-state \
+            --present true --source-match "${source_match}" \
+            --signature-match "${signature_match}" \
+            --evidence-count "${verified_count}" \
+            --expected-evidence "${expected_evidence}")"
+          classifier_status=$?
+          set -e
+          printf 'existing image state: %s\n' "${state}"
+          test "${classifier_status}" -eq 0
+          printf 'state=%s\ndigest=%s\n' "${state}" "${digest}" >> "${GITHUB_OUTPUT}"
       - name: Log in to GHCR
+        if: steps.image_state.outputs.state == 'absent'
         run: printf '%s' "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
       - name: Build and publish both production architectures
+        if: steps.image_state.outputs.state == 'absent'
         id: build
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
-          # The attestation step asserts the index carries provenance for
-          # exactly this set; change the two together or the release fails.
           platforms: linux/amd64,linux/arm64
           push: true
           # Semantic version only: the commit SHA lives in labels, never as a
@@ -78,173 +391,453 @@ jobs:
             org.opencontainers.image.description=Go service embedding the built Svelte frontend for lidersea.com
             org.opencontainers.image.source=https://github.com/snaraj/lidersea.com
             org.opencontainers.image.version=${{ steps.release.outputs.version }}
-            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.revision=${{ needs.authorize.outputs.source_sha }}
             org.opencontainers.image.licenses=MIT
           provenance: mode=max
           sbom: true
-      - name: Install Cosign
-        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
-        with:
-          cosign-release: v3.1.3
-      - name: Sign the immutable image digest
-        run: cosign sign --yes "${IMAGE}@${{ steps.build.outputs.digest }}"
-      - name: Attach the BuildKit SLSA provenance as cosign attestations
-        # Buildx (provenance: mode=max above) embeds one SLSA v1 provenance
-        # statement per platform inside the pushed index. Read each predicate
-        # back from the immutable digest just signed, bind it to THIS release
-        # (builder run, vcs source, vcs revision), and attach it as a keyless
-        # cosign attestation (slsaprovenance1) on that same digest, so
-        # verifiers that require cosign-attached attestations — the platform
-        # promotion ratchet, website-infrastructure#58 — can demand them from
-        # this release onward. Same identity and no-skip discipline as the
-        # signing step; keyless signing needs only id-token + packages.
-        #
-        # The attestation is a LOSSY, SUBJECT-REBOUND copy of the embedded
-        # provenance, and is not a replacement for it:
-        #   - cosign v3.1.3 normalizes the predicate as it attaches, dropping
-        #     runDetails.metadata.buildkit_metadata (including vcs source and
-        #     revision), buildkit_completeness, and sibling BuildKit extension
-        #     subtrees, and emits the statement as in-toto v0.1 with a bare
-        #     image-name subject;
-        #   - each per-platform predicate is re-asserted about the INDEX
-        #     digest (what the promotion ratchet checks), not about the
-        #     per-platform manifest it describes.
-        # The index-embedded provenance therefore remains the authoritative
-        # content evidence: the downstream promote verification must never be
-        # "simplified" to read the attestation instead of it. The binding
-        # asserted below is checked HERE, against the embedded source, before
-        # anything is attached. cosign v3.1.3 `attest` has no annotation flag
-        # (`-a` and `--annotations` are both rejected), so the two same-subject
-        # statements are distinguishable only by predicate content.
-        #
-        # Added failure surface, accepted deliberately: this step inserts GHCR
-        # reads plus Fulcio and Rekor between image signing and chart
-        # publishing, and any failure here burns the version tag (tags are
-        # immutable and never reassigned — requirement 10). The two closing
-        # checks are why that trade is worth taking. GHCR serves no Referrers
-        # API, so discovery rides cosign's `sha256-<hex>` fallback tag (this
-        # cosign writes the suffixless tag; no `.sig`/`.att` siblings) — the
-        # same tag that already holds the signature bundle and that each
-        # `cosign attest` read-modify-writes — so the risk is not only that
-        # nothing is discoverable, but that the second attestation replaces
-        # the first while the step still exits 0 and the release notes promise
-        # one per architecture. `verify-attestation` settles discoverability
-        # and verifiability through the same `--type` path the promotion
-        # ratchet uses; the download-and-count settles that BOTH survived.
-        # The count decodes the predicate type out of the SIGNED STATEMENT,
-        # which is producer-independent and less spoofable than cosign's own
-        # `--predicate-type` / `--type` filtering: that path reads the signed
-        # statement for modern bundles too, but falls back to layer metadata
-        # for legacy forms, where an attestation attached by an older cosign
-        # filters to zero on both `download --predicate-type` and
-        # `verify-attestation --type`.
-        # Both run inside the run that created the attestations, instead of
-        # the failure surfacing days later at promotion.
-        #
-        # No retry loop, deliberately: a transient registry or Sigstore blip
-        # burning a version tag is the accepted trade, argued above, and a
-        # security check that quietly retries is a security check that
-        # quietly hides state.
+      - name: Resolve the one image digest for later stages
+        id: image
         env:
-          DIGEST: ${{ steps.build.outputs.digest }}
+          EXISTING_DIGEST: ${{ steps.image_state.outputs.digest }}
+          BUILT_DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE_STATE: ${{ steps.image_state.outputs.state }}
+          GHCR_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.release.outputs.tag }}
         run: |
           set -euo pipefail
-          src="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
-          # The build step's platforms:, sorted. Update both together. This
-          # guard is also the ONLY thing that catches a failed inspect: the
-          # process substitution below hides its exit status from `set -e`
-          # and `pipefail`, so a failure arrives as an empty array and is
-          # caught here. Never "simplify" it away.
-          expected_platforms='linux/amd64 linux/arm64'
-          mapfile -t platforms < <(
-            docker buildx imagetools inspect "${IMAGE}@${DIGEST}" \
-              --format '{{ json .Provenance }}' | jq -r 'keys[]'
-          )
-          if [ "${platforms[*]}" != "${expected_platforms}" ]; then
-            printf 'index provenance covers [%s]; the build publishes [%s]\n' \
-              "${platforms[*]}" "${expected_platforms}" >&2
+          if [ "${IMAGE_STATE}" = complete ]; then
+            expected="${EXISTING_DIGEST}"
+          elif [ "${IMAGE_STATE}" = absent ]; then
+            expected="${BUILT_DIGEST}"
+            # A successful registry push with a lost action output is
+            # recoverable only from the authenticated intended alias.
+            if [ -z "${expected}" ]; then
+              expected=-
+            fi
+          else
+            printf 'unpublishable image state %s\n' "${IMAGE_STATE}" >&2
             exit 1
           fi
-          predicates=()
+          if [ "${expected}" != - ]; then
+            [[ "${expected}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          fi
+          digest="$(bash scripts/ci/verify-registry-alias.sh \
+            "${IMAGE}:${TAG}" "${expected}" \
+            'application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json' \
+            post-push-image)"
+          printf 'digest=%s\n' "${digest}" >> "${GITHUB_OUTPUT}"
+      - name: Gate the final image digest at HIGH and CRITICAL
+        run: >-
+          trivy image --scanners vuln --severity HIGH,CRITICAL --exit-code 1
+          "${IMAGE}@${{ steps.image.outputs.digest }}"
+      - name: Sign the immutable image digest
+        if: steps.image_state.outputs.state == 'absent'
+        run: cosign sign --yes "${IMAGE}@${{ steps.image.outputs.digest }}"
+      - name: Attach and verify exact BuildKit SLSA and SPDX SBOM attestations
+        # Buildx embeds one SLSA v1 predicate per platform. Preserve each
+        # complete predicate inside an exact in-toto statement, add a
+        # release binding that cosign's --statement path retains verbatim,
+        # and sign both statements about the immutable index digest. The
+        # final decision is made only from cosign's cryptographically
+        # verified output, never from an unauthenticated download count.
+        env:
+          DIGEST: ${{ steps.image.outputs.digest }}
+        if: steps.image_state.outputs.state == 'absent'
+        run: |
+          set -euo pipefail
+          # The platform set is derived from the index itself and then
+          # asserted to be EXACTLY the build step's platform list above, in
+          # Sorted strict-JSON key order: a third or missing platform fails the
+          # release. Update BOTH together.
+          expected_platforms='linux/amd64 linux/arm64'
+          provenance="${RUNNER_TEMP}/new-image-provenance.json"
+          provenance_keys="${RUNNER_TEMP}/new-image-provenance.keys"
+          sbom="${RUNNER_TEMP}/new-image-sbom.json"
+          sbom_keys="${RUNNER_TEMP}/new-image-sbom.keys"
+          docker buildx imagetools inspect "${IMAGE}@${DIGEST}" \
+            --format '{{ json .Provenance }}' > "${provenance}"
+          docker buildx imagetools inspect "${IMAGE}@${DIGEST}" \
+            --format '{{ json .SBOM }}' > "${sbom}"
+          python3 -I -B scripts/ci/release_contract.py json-keys \
+            --json "${provenance}" > "${provenance_keys}"
+          python3 -I -B scripts/ci/release_contract.py sbom-platforms \
+            --json "${sbom}" > "${sbom_keys}"
+          mapfile -t platforms < "${provenance_keys}"
+          mapfile -t sbom_platforms < "${sbom_keys}"
+          test "${platforms[*]}" = "${expected_platforms}"
+          test "${sbom_platforms[*]}" = "${expected_platforms}"
+          source="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
+          statements=()
+          expected_attestations=()
+          sbom_statements=()
+          expected_sboms=()
           for platform in "${platforms[@]}"; do
             predicate="${RUNNER_TEMP}/slsa-${platform//\//-}.json"
+            statement="${RUNNER_TEMP}/slsa-${platform//\//-}.statement.json"
+            spdx="${RUNNER_TEMP}/sbom-${platform//\//-}.spdx.json"
+            sbom_statement="${RUNNER_TEMP}/sbom-${platform//\//-}.statement.json"
             docker buildx imagetools inspect "${IMAGE}@${DIGEST}" \
               --format "{{ json (index .Provenance \"${platform}\").SLSA }}" \
               > "${predicate}"
-            jq -e --arg src "${src}" --arg rev "${GITHUB_SHA}" '
-              (.buildDefinition | type == "object") and
-              (.runDetails.builder.id | startswith($src + "/actions/runs/")) and
-              (.runDetails.metadata.buildkit_metadata.vcs.source == $src) and
-              (.runDetails.metadata.buildkit_metadata.vcs.revision == $rev)
-            ' "${predicate}" >/dev/null
-            predicates+=("${predicate}")
+            python3 -I -B scripts/ci/release_contract.py attestation-statement \
+              --predicate "${predicate}" --output "${statement}" \
+              --image "${IMAGE}" --digest "${DIGEST}" --source "${source}" \
+              --revision "${SOURCE_SHA}" --platform "${platform}"
+            statements+=("${statement}")
+            expected_attestations+=(--expected "${platform}=${statement}")
+            docker buildx imagetools inspect "${IMAGE}@${DIGEST}" \
+              --format "{{ json (index .SBOM \"${platform}\").SPDX }}" > "${spdx}"
+            python3 -I -B scripts/ci/release_contract.py sbom-statement \
+              --spdx "${spdx}" --output "${sbom_statement}" \
+              --image "${IMAGE}" --digest "${DIGEST}" --platform "${platform}"
+            sbom_statements+=("${sbom_statement}")
+            expected_sboms+=(--expected "${platform}=${sbom_statement}")
           done
-          # Set-based, so a third platform cannot slip past a pairwise check.
-          distinct="$(sha256sum "${predicates[@]}" | awk '{print $1}' | sort -u | wc -l | tr -d ' ')"
-          if [ "${distinct}" -ne "${#predicates[@]}" ]; then
-            printf 'per-platform predicates are not distinct (%s unique of %s); refusing to attach one build twice\n' \
-              "${distinct}" "${#predicates[@]}" >&2
-            exit 1
-          fi
-          for predicate in "${predicates[@]}"; do
-            cosign attest --yes --type slsaprovenance1 \
-              --predicate "${predicate}" "${IMAGE}@${DIGEST}"
+          test "$(sha256sum "${statements[@]}" | awk '{print $1}' | sort -u | wc -l)" \
+            -eq "${#statements[@]}"
+          for statement in "${statements[@]}"; do
+            cosign attest --yes --statement "${statement}" "${IMAGE}@${DIGEST}"
           done
-          cosign verify-attestation --type slsaprovenance1 \
-            --certificate-identity "${src}/.github/workflows/release-publisher.yml@${GITHUB_REF}" \
+          test "$(sha256sum "${sbom_statements[@]}" | awk '{print $1}' | sort -u | wc -l)" \
+            -eq "${#sbom_statements[@]}"
+          for statement in "${sbom_statements[@]}"; do
+            cosign attest --yes --statement "${statement}" "${IMAGE}@${DIGEST}"
+          done
+          identity="${source}/.github/workflows/release-publisher.yml@refs/heads/main"
+          verified="${RUNNER_TEMP}/verified-new-attestations.json"
+          cosign verify \
+            --certificate-identity "${identity}" \
             --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
             "${IMAGE}@${DIGEST}" >/dev/null
-          # cosign v3.1.3 attests with --new-bundle-format, so download emits
-          # newline-delimited Sigstore bundles whose statement sits at
-          # .dsseEnvelope.payload, and the set includes the image SIGNATURE
-          # bundle (the download filters on an empty artifactType) — three
-          # lines here, not two. A digest carrying NO attestations still
-          # returns that one signature bundle and exits 0, so a successful
-          # download proves nothing by itself; only this count does. Older
-          # cosign wrote the statement at .payload, so both shapes are read;
-          # anything else (messageSignature-only bundles, an unrecognised
-          # envelope shape, an empty payload, no output at all) contributes
-          # nothing and the comparison below fails closed.
-          attached="$(
-            cosign download attestation "${IMAGE}@${DIGEST}" \
-              | jq -s --arg type 'https://slsa.dev/provenance/v1' \
-                  '[.[] | ((.dsseEnvelope.payload // .payload // empty) | @base64d | fromjson?) | select(.predicateType == $type)] | length'
-          )"
-          if [ "${attached}" -ne "${#predicates[@]}" ]; then
-            printf 'the digest carries %s slsaprovenance1 attestations; %s were attached\n' \
-              "${attached}" "${#predicates[@]}" >&2
-            exit 1
+          cosign verify-attestation --type slsaprovenance1 --output json \
+            --certificate-identity "${identity}" \
+            --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+            "${IMAGE}@${DIGEST}" > "${verified}"
+          python3 -I -B scripts/ci/release_contract.py attestation-set \
+            --verified "${verified}" "${expected_attestations[@]}"
+          verified_sboms="${RUNNER_TEMP}/verified-new-sboms.json"
+          cosign verify-attestation --type spdxjson --output json \
+            --certificate-identity "${identity}" \
+            --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+            "${IMAGE}@${DIGEST}" > "${verified_sboms}"
+          python3 -I -B scripts/ci/release_contract.py sbom-set \
+            --verified "${verified_sboms}" "${expected_sboms[@]}"
+      - name: Classify an absent, complete, or burned chart version
+        id: chart_state
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+          GHCR_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          repository="${CHART#ghcr.io/}"
+          token_file="${RUNNER_TEMP}/chart-registry-token.json"
+          credentials="${RUNNER_TEMP}/ghcr.netrc"
+          trap 'rm -f -- "${token_file}" "${credentials}"' EXIT
+          umask 077
+          printf 'machine ghcr.io\nlogin %s\npassword %s\n' \
+            "${GITHUB_ACTOR}" "${GHCR_PASSWORD}" > "${credentials}"
+          curl --fail-with-body --silent --show-error --location \
+            --proto '=https' --tlsv1.2 --netrc-file "${credentials}" \
+            --get --data-urlencode "scope=repository:${repository}:pull" \
+            'https://ghcr.io/token' > "${token_file}"
+          token="$(python3 -I -B scripts/ci/release_contract.py registry-token \
+            --token-json "${token_file}")"
+          rm -f -- "${token_file}" "${credentials}"
+          manifest="${RUNNER_TEMP}/existing-chart-manifest.json"
+          headers="${RUNNER_TEMP}/existing-chart-headers.txt"
+          status="$(curl --silent --show-error --location \
+            --proto '=https' --tlsv1.2 --output "${manifest}" \
+            --dump-header "${headers}" --write-out '%{http_code}' \
+            --header "Authorization: Bearer ${token}" \
+            --header 'Accept: application/vnd.oci.image.manifest.v1+json' \
+            "https://ghcr.io/v2/${repository}/manifests/${VERSION}")"
+          registry_state="$(python3 -I -B scripts/ci/release_contract.py registry-state --http-status "${status}")"
+          if [ "${registry_state}" = absent ]; then
+            state="$(python3 -I -B scripts/ci/release_contract.py artifact-state \
+              --present false --source-match false --signature-match false \
+              --evidence-count 0 --expected-evidence 0)"
+            printf 'state=%s\ndigest=\n' "${state}" >> "${GITHUB_OUTPUT}"
+            exit 0
           fi
-      - name: Refuse to reuse an existing chart version, then publish and sign the chart
+
+          chart_name="$(awk '/^name:/{print $2; exit}' chart/Chart.yaml)"
+          expected_archives="${RUNNER_TEMP}/expected-chart"
+          published_archives="${RUNNER_TEMP}/published-chart"
+          expected_tree="${RUNNER_TEMP}/expected-chart-tree"
+          published_tree="${RUNNER_TEMP}/published-chart-tree"
+          mkdir -p "${expected_archives}" "${published_archives}" "${expected_tree}" "${published_tree}"
+          helm package chart --version "${VERSION}" --app-version "${VERSION}" -d "${expected_archives}"
+          helm pull "oci://${CHART}" --version "${VERSION}" -d "${published_archives}"
+          tar -xzf "${expected_archives}/${chart_name}-${VERSION}.tgz" -C "${expected_tree}"
+          tar -xzf "${published_archives}/${chart_name}-${VERSION}.tgz" -C "${published_tree}"
+          source_match=true
+          if ! diff -ru --no-dereference "${expected_tree}/${chart_name}" "${published_tree}/${chart_name}" >/dev/null; then
+            source_match=false
+          fi
+
+          digest="$(python3 -I -B scripts/ci/release_contract.py registry-manifest \
+            --http-status "${status}" --body "${manifest}" --headers "${headers}")"
+          signature_match=false
+          identity="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/.github/workflows/release-publisher.yml@refs/heads/main"
+          if cosign verify \
+              --certificate-identity "${identity}" \
+              --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+              "${CHART}@${digest}" >/dev/null 2>&1; then
+            signature_match=true
+          fi
+          set +e
+          state="$(python3 -I -B scripts/ci/release_contract.py artifact-state \
+            --present true --source-match "${source_match}" \
+            --signature-match "${signature_match}" \
+            --evidence-count 0 --expected-evidence 0)"
+          classifier_status=$?
+          set -e
+          printf 'existing chart state: %s\n' "${state}"
+          test "${classifier_status}" -eq 0
+          printf 'state=%s\ndigest=%s\n' "${state}" "${digest}" >> "${GITHUB_OUTPUT}"
+      - name: Publish and sign an absent chart version
+        if: steps.chart_state.outputs.state == 'absent'
+        id: chart_publish
+        env:
+          GHCR_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           version="${{ steps.release.outputs.version }}"
-          if helm show chart "oci://${CHART%/lidersea-com}/lidersea-com" --version "${version}" >/dev/null 2>&1; then
-            printf 'immutable chart version %s already exists; bump instead\n' "${version}" >&2
-            exit 1
-          fi
+          chart_name="$(awk '/^name:/{print $2; exit}' chart/Chart.yaml)"
           helm package chart --version "${version}" --app-version "${version}" -d "${RUNNER_TEMP}"
           printf '%s' "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
           push_log="${RUNNER_TEMP}/chart-push.log"
-          helm push "${RUNNER_TEMP}/lidersea-com-${version}.tgz" "oci://ghcr.io/snaraj/charts" 2>&1 | tee "${push_log}"
-          chart_digest="$(awk '/^Digest:/{print $2}' "${push_log}")"
-          test -n "${chart_digest}"
+          set +e
+          helm push "${RUNNER_TEMP}/${chart_name}-${version}.tgz" "oci://${CHART%/*}" 2>&1 | tee "${push_log}"
+          push_status=${PIPESTATUS[0]}
+          set -e
+          mapfile -t reported_digests < <(awk '/^Digest:/{print $2}' "${push_log}")
+          expected=-
+          if [ "${#reported_digests[@]}" -eq 1 ] && \
+             [[ "${reported_digests[0]}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            expected="${reported_digests[0]}"
+          elif [ "${#reported_digests[@]}" -ne 0 ]; then
+            printf 'DENY: Helm push returned malformed or duplicate digests\n' >&2
+            exit 1
+          fi
+          if [ "${push_status}" -ne 0 ]; then
+            printf 'Helm push response was lost; requiring exact intended-alias recovery\n' >&2
+          fi
+          chart_digest="$(bash scripts/ci/verify-registry-alias.sh \
+            "${CHART}:${version}" "${expected}" \
+            'application/vnd.oci.image.manifest.v1+json' post-push-chart)"
+          expected_tree="${RUNNER_TEMP}/post-push-expected-chart"
+          published_archives="${RUNNER_TEMP}/post-push-chart-archive"
+          published_tree="${RUNNER_TEMP}/post-push-chart-tree"
+          mkdir -p "${expected_tree}" "${published_archives}" "${published_tree}"
+          tar -xzf "${RUNNER_TEMP}/${chart_name}-${version}.tgz" -C "${expected_tree}"
+          helm pull "oci://${CHART}" --version "${version}" -d "${published_archives}"
+          tar -xzf "${published_archives}/${chart_name}-${version}.tgz" -C "${published_tree}"
+          diff -ru --no-dereference \
+            "${expected_tree}/${chart_name}" "${published_tree}/${chart_name}" >/dev/null
           cosign sign --yes "${CHART}@${chart_digest}"
-          printf 'CHART_DIGEST=%s\n' "${chart_digest}" >> "${GITHUB_ENV}"
-      - name: Create the GitHub release
+          printf 'digest=%s\n' "${chart_digest}" >> "${GITHUB_OUTPUT}"
+      - name: Resolve the one chart digest for the release manifest
+        id: chart
+        env:
+          EXISTING_DIGEST: ${{ steps.chart_state.outputs.digest }}
+          PUBLISHED_DIGEST: ${{ steps.chart_publish.outputs.digest }}
+          CHART_STATE: ${{ steps.chart_state.outputs.state }}
+        run: |
+          set -euo pipefail
+          if [ "${CHART_STATE}" = complete ]; then
+            digest="${EXISTING_DIGEST}"
+          elif [ "${CHART_STATE}" = absent ]; then
+            digest="${PUBLISHED_DIGEST}"
+          else
+            printf 'unpublishable chart state %s\n' "${CHART_STATE}" >&2
+            exit 1
+          fi
+          [[ "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]
+          printf 'digest=%s\n' "${digest}" >> "${GITHUB_OUTPUT}"
+      - name: Re-resolve both intended aliases before manifest staging
+        env:
+          GHCR_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.release.outputs.tag }}
+          VERSION: ${{ steps.release.outputs.version }}
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+          CHART_DIGEST: ${{ steps.chart.outputs.digest }}
+        run: |
+          set -euo pipefail
+          test "$(bash scripts/ci/verify-registry-alias.sh \
+            "${IMAGE}:${TAG}" "${IMAGE_DIGEST}" \
+            'application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json' \
+            pre-manifest-image)" = "${IMAGE_DIGEST}"
+          test "$(bash scripts/ci/verify-registry-alias.sh \
+            "${CHART}:${VERSION}" "${CHART_DIGEST}" \
+            'application/vnd.oci.image.manifest.v1+json' pre-manifest-chart)" \
+            = "${CHART_DIGEST}"
+      - name: Generate the deterministic release manifest and informational notes
+        id: manifest
+        run: |
+          set -euo pipefail
+          manifest="${RUNNER_TEMP}/release-manifest.json"
+          umask 077
+          python3 -I -B scripts/ci/release_contract.py release-manifest \
+            --output "${manifest}" --repository "${GITHUB_REPOSITORY}" \
+            --source-sha "${SOURCE_SHA}" \
+            --version "${{ steps.release.outputs.version }}" \
+            --image "${IMAGE}" --image-digest "${{ steps.image.outputs.digest }}" \
+            --chart "${CHART}" --chart-digest "${{ steps.chart.outputs.digest }}" \
+            >/dev/null
+          test "$(basename "${manifest}")" = release-manifest.json
+          test "$(stat -c '%a' "${manifest}")" = 600
+          python3 -I -B scripts/ci/release_contract.py manifest-record \
+            --manifest "${manifest}" --repository "${GITHUB_REPOSITORY}" \
+            --github-output "${GITHUB_OUTPUT}"
+          {
+            printf '## lidersea.com %s\n\n' "${{ steps.release.outputs.tag }}"
+            printf 'Digest-bound artifacts (registry tags remain verified mutable aliases):\n\n'
+            printf '| Artifact | Reference |\n| --- | --- |\n'
+            printf "| Image | \`%s:%s@%s\` |\n" "${IMAGE}" "${{ steps.release.outputs.tag }}" "${{ steps.image.outputs.digest }}"
+            printf "| Chart | \`%s:%s@%s\` |\n" "${CHART}" "${{ steps.release.outputs.version }}" "${{ steps.chart.outputs.digest }}"
+            printf '\nThe exact machine identity is the attached release-manifest.json asset; these notes are informational.\n'
+            printf 'The image digest is signed and carries exact per-platform SBOM and SLSA provenance expectations. The chart digest is signed.\n'
+            printf '\nSee CHANGELOG.md for human-readable changes.\n'
+          } > "${RUNNER_TEMP}/release-notes.md"
+      - name: Create the draft, upload the manifest, and publish immutably
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.release.outputs.tag }}
+          VERSION: ${{ steps.release.outputs.version }}
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+          CHART_DIGEST: ${{ steps.chart.outputs.digest }}
         run: |
           set -euo pipefail
           tag="${{ steps.release.outputs.tag }}"
-          {
-            printf '## lidersea.com %s\n\n' "${tag}"
-            printf 'Immutable artifacts (deploy by digest, never by tag):\n\n'
-            printf '| Artifact | Reference |\n| --- | --- |\n'
-            printf "| Image | \`%s@%s\` |\n" "${IMAGE}" "${{ steps.build.outputs.digest }}"
-            printf "| Chart | \`%s@%s\` |\n" "${CHART}" "${CHART_DIGEST}"
-            printf '\nSigned with keyless Cosign by this workflow identity; SBOM and SLSA provenance are embedded in the image index, and one keyless cosign attestation (slsaprovenance1) per build platform is attached to the index digest and verified by this run. Those attestations are a lossy normalized copy — cosign v3.1.3 drops the BuildKit metadata subtrees, including vcs source and revision, and rebinds each per-platform predicate to the index digest — so the index-embedded provenance stays the authoritative content evidence. See CHANGELOG.md for human-readable changes.\n'
-          } > "${RUNNER_TEMP}/release-notes.md"
-          gh release create "${tag}" --verify-tag \
-            --title "lidersea.com ${tag}" \
-            --notes-file "${RUNNER_TEMP}/release-notes.md"
+          manifest="${RUNNER_TEMP}/release-manifest.json"
+          existing="${RUNNER_TEMP}/existing-release.json"
+          downloaded="${RUNNER_TEMP}/downloaded-release-manifest.json"
+          api="${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/releases/tags/${tag}"
+          verify_publication_aliases() {
+            test "$(bash scripts/ci/verify-registry-alias.sh \
+              "${IMAGE}:${TAG}" "${IMAGE_DIGEST}" \
+              'application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json' \
+              release-image)" = "${IMAGE_DIGEST}"
+            test "$(bash scripts/ci/verify-registry-alias.sh \
+              "${CHART}:${VERSION}" "${CHART_DIGEST}" \
+              'application/vnd.oci.image.manifest.v1+json' release-chart)" \
+              = "${CHART_DIGEST}"
+          }
+          observe_release() {
+            local status asset_id
+            local -a record_args=()
+            rm -f -- "${downloaded}"
+            status="$(curl --silent --show-error --location \
+              --proto '=https' --tlsv1.2 --output "${existing}" --write-out '%{http_code}' \
+              --header 'Accept: application/vnd.github+json' \
+              --header 'X-GitHub-Api-Version: 2026-03-10' \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              "${api}")"
+            if [ "${status}" = 200 ]; then
+              record_args=(--release-json "${existing}")
+              if asset_id="$(python3 -I -B scripts/ci/release_contract.py release-asset-id \
+                --release-json "${existing}" 2>/dev/null)"; then
+                curl --fail-with-body --silent --show-error --location \
+                  --proto '=https' --tlsv1.2 --output "${downloaded}" \
+                  --header 'Accept: application/octet-stream' \
+                  --header 'X-GitHub-Api-Version: 2026-03-10' \
+                  --header "Authorization: Bearer ${GH_TOKEN}" \
+                  "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}"
+                chmod 0600 "${downloaded}"
+                record_args+=(--asset-content "${downloaded}")
+              fi
+            fi
+            python3 -I -B scripts/ci/release_contract.py release-state \
+              --http-status "${status}" "${record_args[@]}" \
+              --manifest "${manifest}" --repository "${GITHUB_REPOSITORY}"
+          }
+          verify_publication_aliases
+          state="$(observe_release)"
+          if [ "${state}" = absent ]; then
+            if ! gh release create "${tag}" --verify-tag --draft \
+              --title "lidersea.com ${tag}" \
+              --notes-file "${RUNNER_TEMP}/release-notes.md"; then
+              printf 'draft create did not succeed; checking for an exact concurrent winner\n' >&2
+            fi
+            for attempt in 1 2 3 4 5; do
+              state="$(observe_release)"
+              if [ "${state}" != absent ]; then
+                break
+              fi
+              sleep "${attempt}"
+            done
+            if [ "${state}" = absent ]; then
+              printf 'DENY: draft create did not reach a resumable or exact state\n' >&2
+              exit 1
+            fi
+          fi
+          if [ "${state}" = draft-empty ]; then
+            if ! gh release upload "${tag}" "${manifest}"; then
+              printf 'manifest upload did not succeed; checking for an exact concurrent winner\n' >&2
+            fi
+            for attempt in 1 2 3 4 5; do
+              state="$(observe_release)"
+              if [ "${state}" = draft-ready ] || [ "${state}" = exact ]; then
+                break
+              fi
+              sleep "${attempt}"
+            done
+            if [ "${state}" != draft-ready ] && [ "${state}" != exact ]; then
+              printf 'DENY: manifest upload did not reach draft-ready or exact state\n' >&2
+              exit 1
+            fi
+          fi
+          if [ "${state}" = draft-ready ]; then
+            # This is the final alias observation before the irreversible
+            # immutable transition; any concurrent retarget is fatal.
+            verify_publication_aliases
+            if ! gh release edit "${tag}" --draft=false; then
+              printf 'draft publish did not succeed; checking for an exact concurrent winner\n' >&2
+            fi
+            for attempt in 1 2 3 4 5; do
+              state="$(observe_release)"
+              if [ "${state}" = exact ]; then
+                break
+              fi
+              sleep "${attempt}"
+            done
+          fi
+          if [ "${state}" != exact ]; then
+            printf 'DENY: GitHub Release did not become authoritative immutable exact state\n' >&2
+            exit 1
+          fi
+          observe_release | grep -Fx exact >/dev/null
+      - name: Terminally rebind the REST tag ref and annotated object
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          ref_json="${RUNNER_TEMP}/terminal-tag-ref.json"
+          tag_json="${RUNNER_TEMP}/terminal-tag-object.json"
+          api="${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}"
+          status="$(curl --silent --show-error --location \
+            --proto '=https' --tlsv1.2 --output "${ref_json}" --write-out '%{http_code}' \
+            --header 'Accept: application/vnd.github+json' \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            "${api}/git/ref/tags/${TAG}")"
+          test "${status}" = 200
+          tag_object="$(python3 -I -B scripts/ci/release_contract.py tag-ref-object \
+            --ref-json "${ref_json}" --tag "${TAG}")"
+          status="$(curl --silent --show-error --location \
+            --proto '=https' --tlsv1.2 --output "${tag_json}" --write-out '%{http_code}' \
+            --header 'Accept: application/vnd.github+json' \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            "${api}/git/tags/${tag_object}")"
+          test "${status}" = 200
+          python3 -I -B scripts/ci/release_contract.py tag-record \
+            --ref-json "${ref_json}" --tag-json "${tag_json}" \
+            --tag "${TAG}" --source-sha "${SOURCE_SHA}" \
+            --message "Release ${TAG} from ${SOURCE_SHA}" \
+            --tagger-name 'github-actions[bot]' \
+            --tagger-email '41898282+github-actions[bot]@users.noreply.github.com' \
+            --tagger-date "$(git show -s --format=%cI "${SOURCE_SHA}")"

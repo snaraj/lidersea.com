@@ -1,0 +1,266 @@
+name: Release after main CI
+
+# GitHub does not recursively trigger a push workflow for a tag created with
+# GITHUB_TOKEN.  This success-only workflow_run verifies the completed main
+# SHA, creates its annotated tag for the server-locked Release, and explicitly
+# dispatches the protected-main publisher with the authoritative PR-gate and
+# separate CodeQL completed-run IDs. Distinct main SHAs share no concurrency
+# group: every
+# merge intent has an independent release path and a rapid later merge cannot
+# replace an earlier pending run. Squash produces one commit; an allowed rebase
+# may produce several. The contract validates the complete push base -> final
+# tree patch step and rediscovers that release boundary from the successful SHA.
+on:
+  workflow_run:
+    workflows: [PR gate]
+    types: [completed]
+
+permissions: {}
+
+concurrency:
+  group: release-after-main-${{ github.event.workflow_run.head_sha }}
+  cancel-in-progress: false
+
+jobs:
+  immutable_settings:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: platform-release
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the exact completed main SHA
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
+      - name: Mint the isolated Admin-read settings token
+        id: immutable_settings
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ vars.PLATFORM_RELEASE_APP_ID }}
+          private-key: ${{ secrets.PLATFORM_RELEASE_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-administration: read
+          skip-token-revoke: false
+      - name: Recheck authoritative immutable publication settings
+        env:
+          IMMUTABLE_SETTINGS_TOKEN: ${{ steps.immutable_settings.outputs.token }}
+        run: |
+          set -euo pipefail
+          test -n "${IMMUTABLE_SETTINGS_TOKEN}"
+          GH_TOKEN="${IMMUTABLE_SETTINGS_TOKEN}" \
+            python3 -I -B scripts/ci/release_contract.py settings-preflight \
+              --repository "${GITHUB_REPOSITORY}" >/dev/null
+
+  release:
+    needs: immutable_settings
+    if: >-
+      needs.immutable_settings.result == 'success' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      actions: write
+      contents: write
+    steps:
+      - name: Check out the exact completed main SHA
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Bind event, source, and exact next patch
+        id: release
+        env:
+          COMPLETED_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          event_sha="$(python3 -I -B scripts/ci/release_contract.py workflow-run \
+            --event "${GITHUB_EVENT_PATH}" --repository "${GITHUB_REPOSITORY}")"
+          test "${event_sha}" = "${COMPLETED_SHA}"
+          test "$(git rev-parse HEAD)" = "${COMPLETED_SHA}"
+          intent="$(python3 -I -B scripts/ci/release_contract.py release-window \
+            --repository . --head "${COMPLETED_SHA}")"
+          base_sha="$(jq -er '.base_sha' <<<"${intent}")"
+          source_sha="$(jq -er '.source_sha' <<<"${intent}")"
+          version="$(jq -er '.version' <<<"${intent}")"
+          tag="$(jq -er '.tag' <<<"${intent}")"
+          test "${source_sha}" = "${COMPLETED_SHA}"
+          test "${tag}" = "v${version}"
+          printf 'base_sha=%s\nsource_sha=%s\nversion=%s\ntag=%s\n' \
+            "${base_sha}" "${source_sha}" "${version}" "${tag}" >> "${GITHUB_OUTPUT}"
+      - name: Authorize exact successful PR-gate and CodeQL main jobs
+        id: main_ci
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MAIN_RUN_ID: ${{ github.event.workflow_run.id }}
+          SOURCE_SHA: ${{ steps.release.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          [[ "${MAIN_RUN_ID}" =~ ^[1-9][0-9]*$ ]]
+          pr_run="${RUNNER_TEMP}/orchestrator-pr-gate-run.json"
+          pr_jobs="${RUNNER_TEMP}/orchestrator-pr-gate-jobs.json"
+          gh api --method GET \
+            --header 'Accept: application/vnd.github+json' \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/${GITHUB_REPOSITORY}/actions/runs/${MAIN_RUN_ID}" > "${pr_run}"
+          test "$(python3 -I -B scripts/ci/release_contract.py main-run-record \
+            --run-json "${pr_run}" --run-id "${MAIN_RUN_ID}" \
+            --repository "${GITHUB_REPOSITORY}" --source-sha "${SOURCE_SHA}")" \
+            = "${SOURCE_SHA}"
+          gh api --method GET --paginate --slurp \
+            --header 'Accept: application/vnd.github+json' \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/${GITHUB_REPOSITORY}/actions/runs/${MAIN_RUN_ID}/jobs?filter=latest&per_page=100" \
+            > "${pr_jobs}"
+          test "$(python3 -I -B scripts/ci/release_contract.py workflow-jobs \
+            --jobs-json "${pr_jobs}" --workflow pr-gate --run-id "${MAIN_RUN_ID}")" = 6
+
+          codeql_runs="${RUNNER_TEMP}/orchestrator-codeql-runs.json"
+          codeql_state=absent
+          codeql_run_id=''
+          # CodeQL is a separate push workflow. Poll only the exact merged SHA
+          # and never infer its two conclusions from PR-gate aggregate success.
+          for _ in $(seq 1 30); do
+            gh api --method GET --paginate --slurp \
+              --header 'Accept: application/vnd.github+json' \
+              --header 'X-GitHub-Api-Version: 2026-03-10' \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows/codeql.yml/runs?branch=main&event=push&head_sha=${SOURCE_SHA}&per_page=100" \
+              > "${codeql_runs}"
+            selection="$(python3 -I -B scripts/ci/release_contract.py codeql-run-list \
+              --runs-json "${codeql_runs}" --repository "${GITHUB_REPOSITORY}" \
+              --source-sha "${SOURCE_SHA}")"
+            codeql_state="$(jq -er '.state' <<<"${selection}")"
+            if [ "${codeql_state}" = success ]; then
+              codeql_run_id="$(jq -er '.run_id' <<<"${selection}")"
+              break
+            fi
+            [[ "${codeql_state}" = absent || "${codeql_state}" = pending ]]
+            sleep 10
+          done
+          if [ "${codeql_state}" != success ]; then
+            printf 'DENY: exact-SHA CodeQL main run was absent or incomplete after 30 observations\n' >&2
+            exit 1
+          fi
+          [[ "${codeql_run_id}" =~ ^[1-9][0-9]*$ ]]
+          codeql_run="${RUNNER_TEMP}/orchestrator-codeql-run.json"
+          codeql_jobs="${RUNNER_TEMP}/orchestrator-codeql-jobs.json"
+          gh api --method GET \
+            --header 'Accept: application/vnd.github+json' \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/${GITHUB_REPOSITORY}/actions/runs/${codeql_run_id}" > "${codeql_run}"
+          test "$(python3 -I -B scripts/ci/release_contract.py codeql-run-record \
+            --run-json "${codeql_run}" --run-id "${codeql_run_id}" \
+            --repository "${GITHUB_REPOSITORY}" --source-sha "${SOURCE_SHA}")" \
+            = "${SOURCE_SHA}"
+          gh api --method GET --paginate --slurp \
+            --header 'Accept: application/vnd.github+json' \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/${GITHUB_REPOSITORY}/actions/runs/${codeql_run_id}/jobs?filter=latest&per_page=100" \
+            > "${codeql_jobs}"
+          test "$(python3 -I -B scripts/ci/release_contract.py workflow-jobs \
+            --jobs-json "${codeql_jobs}" --workflow codeql --run-id "${codeql_run_id}")" = 2
+          printf 'codeql_run_id=%s\n' "${codeql_run_id}" >> "${GITHUB_OUTPUT}"
+      - name: Create or verify the exact immutable annotated tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SOURCE_SHA: ${{ steps.release.outputs.source_sha }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          ref_json="${RUNNER_TEMP}/release-ref.json"
+          tag_json="${RUNNER_TEMP}/release-tag.json"
+          tagger_name='github-actions[bot]'
+          tagger_email='41898282+github-actions[bot]@users.noreply.github.com'
+          tagger_date="$(git show -s --format=%cI "${SOURCE_SHA}")"
+          message="Release ${TAG} from ${SOURCE_SHA}"
+          api="${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}"
+
+          get_json() {
+            local url="$1"
+            local output="$2"
+            curl --silent --show-error --location \
+              --proto '=https' --tlsv1.2 \
+              --output "${output}" --write-out '%{http_code}' \
+               --header 'Accept: application/vnd.github+json' \
+               --header 'X-GitHub-Api-Version: 2026-03-10' \
+               --header "Authorization: Bearer ${GH_TOKEN}" \
+              "${url}"
+          }
+
+          classify_tag() {
+            local object_status required="$1" status tag_object
+            local -a record_args=()
+            status="$(get_json "${api}/git/ref/tags/${TAG}" "${ref_json}")"
+            if [ "${status}" = 200 ]; then
+              tag_object="$(python3 -I -B scripts/ci/release_contract.py tag-ref-object \
+                --ref-json "${ref_json}" --tag "${TAG}")"
+              object_status="$(get_json "${api}/git/tags/${tag_object}" "${tag_json}")"
+              test "${object_status}" = 200
+              record_args=(--ref-json "${ref_json}" --tag-json "${tag_json}")
+            fi
+            python3 -I -B scripts/ci/release_contract.py tag-state \
+              --http-status "${status}" --require "${required}" "${record_args[@]}" \
+              --tag "${TAG}" --source-sha "${SOURCE_SHA}" \
+              --message "${message}" --tagger-name "${tagger_name}" \
+              --tagger-email "${tagger_email}" --tagger-date "${tagger_date}"
+          }
+
+          if classify_tag exact >/dev/null 2>&1; then
+            printf 'verified existing %s at %s\n' "${TAG}" "${SOURCE_SHA}"
+            exit 0
+          fi
+          classify_tag absent >/dev/null
+
+          created_tag="${RUNNER_TEMP}/created-release-tag.json"
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/git/tags" \
+            -f tag="${TAG}" \
+            -f message="${message}" \
+            -f object="${SOURCE_SHA}" \
+            -f type=commit \
+            -f "tagger[name]=${tagger_name}" \
+            -f "tagger[email]=${tagger_email}" \
+            -f "tagger[date]=${tagger_date}" \
+            > "${created_tag}"
+          tag_object="$(python3 -I -B scripts/ci/release_contract.py tag-created-object \
+            --tag-json "${created_tag}" --tag "${TAG}" \
+            --source-sha "${SOURCE_SHA}" --message "${message}" \
+            --tagger-name "${tagger_name}" --tagger-email "${tagger_email}" \
+            --tagger-date "${tagger_date}")"
+          if ! gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" \
+            -f ref="refs/tags/${TAG}" -f sha="${tag_object}" >/dev/null; then
+            # A same-SHA rerun may race us.  Only exact state is idempotent;
+            # a lightweight, moved, or foreign-target tag stays fatal.
+            race_verified=false
+            for attempt in 1 2 3 4 5; do
+              if classify_tag exact >/dev/null 2>&1; then
+                race_verified=true
+                break
+              fi
+              sleep "${attempt}"
+            done
+            test "${race_verified}" = true
+          fi
+          classify_tag exact >/dev/null
+      - name: Dispatch the successful-main-bound publisher explicitly
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SOURCE_SHA: ${{ steps.release.outputs.source_sha }}
+          MAIN_RUN_ID: ${{ github.event.workflow_run.id }}
+          CODEQL_RUN_ID: ${{ steps.main_ci.outputs.codeql_run_id }}
+        run: |
+          set -euo pipefail
+          gh workflow run release-publisher.yml \
+            --repo "${GITHUB_REPOSITORY}" \
+            --ref main \
+            -f source_sha="${SOURCE_SHA}" \
+            -f main_run_id="${MAIN_RUN_ID}" \
+            -f codeql_run_id="${CODEQL_RUN_ID}"

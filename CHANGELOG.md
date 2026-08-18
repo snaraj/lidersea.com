@@ -7,6 +7,20 @@ Git, image, and GitHub Release tags use the exact plain `vX.Y.Z` form.
 
 ## [Unreleased]
 
+## [0.1.12] - 2026-08-18
+
+### Changed
+
+- Frontend: `svelte` bumped from 5.56.8 to 5.56.9 and `svelte-check` from
+  4.7.5 to 4.7.6 together (`frontend/package.json`,
+  `frontend/package-lock.json`). Dependabot opened these as two separate
+  PRs (#48, #49) for a compatibility pair maintained in the same monorepo
+  release cadence; bundling them in one commit avoids a partially-upgraded
+  toolchain landing between merges. `.github/dependabot.yml` now groups
+  the `svelte`/`svelte-check` pattern under the npm ecosystem entry so
+  future coupled releases arrive as one PR, mirroring the existing
+  `github-actions` `codeql-action` group.
+
 ## [0.1.11] - 2026-08-18
 
 ### Changed

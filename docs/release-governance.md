@@ -101,7 +101,6 @@ The exact successful receipt is:
   "allow_deletions": false,
   "allow_force_pushes": false,
   "branch": "main",
-  "bypass_actors": [],
   "can_approve_pull_request_reviews": false,
   "code_coverage_max_drop": null,
   "code_coverage_minimum": 80,
@@ -152,6 +151,55 @@ coverage floor `80` with `max_coverage_drop: null`. Required checks use
 `do_not_enforce_on_create: false`; every context above is bound to GitHub
 Actions integration ID `15368`.
 
+## Which column proves which invariant
+
+The receipt above is built by the CI credential, and REST does not show that
+credential everything. Two invariants are therefore proven in the owner column
+instead, and this table is the authoritative statement of the split. CI asserts
+exactly what the enforcing surface exposes to the CI credential — never a
+conditional or best-effort check, because a control whose strength depends on
+who is holding the credential is not a fail-closed control.
+
+| Invariant | Proven by | Why |
+| --- | --- | --- |
+| Ruleset identity, active enforcement, `refs/heads/main`-only targeting | CI recheck | Visible to Administration read |
+| Exact rule-type set, strict required checks and their integration binding | CI recheck | Visible to Administration read |
+| Allowed merge methods are exactly squash and rebase | CI recheck | Read from the ruleset's `allowed_merge_methods` |
+| Immutable releases, Actions policy, workflow-token permissions, private vulnerability reporting, secret scanning | CI recheck | Visible to Administration read |
+| **`Protect-Main` has zero bypass actors** | **Owner preflight** | REST withholds `bypass_actors` from the CI credential |
+| Merge commits disabled in repository settings | Owner preflight | REST withholds the merge booleans from the CI credential |
+
+GitHub's [Get a repository ruleset](https://docs.github.com/en/rest/repos/rules)
+contract states: "To prevent leaking sensitive information, the `bypass_actors`
+property is only returned if the user making the API request has write access to
+the ruleset." The settings jobs mint an Administration-read-only App token, so
+the property is absent from every response they can observe; asserting on it
+denied every release rather than proving anything. The repository merge booleans
+were withheld from the same credential for the same class of reason and moved to
+the ruleset in the preceding change.
+
+The owner's credential does have write access to the ruleset, so the owner —
+and only the owner — can observe the property. Run this GET-only check as part
+of the preflight, under the owner's own `gh` credential, and require the exact
+empty array:
+
+```bash
+ruleset_id="$(gh api --method GET \
+  -H "X-GitHub-Api-Version: 2026-03-10" \
+  repos/snaraj/lidersea.com/rulesets \
+  --jq '.[] | select(.name == "Protect-Main") | .id')"
+gh api --method GET \
+  -H "X-GitHub-Api-Version: 2026-03-10" \
+  "repos/snaraj/lidersea.com/rulesets/${ruleset_id}" \
+  --jq '.bypass_actors'
+```
+
+It must print exactly `[]`. Any other output — a populated array, or `null`
+because the credential in use lacks ruleset write — leaves the pull request
+Draft. A zero-bypass state was observed live under the owner credential during
+the review of the preceding change; the observation is not durable and is
+repeated on every preflight, because nothing in CI will notice if it changes.
+
 ## Current external blockers
 
 A coordinator-owned read-only observation on 2026-08-14 confirmed immutable
@@ -168,8 +216,10 @@ Those are external Ready blockers, not invitations for a workflow, author, or
 reviewer to create credentials or change settings. Until all blockers are
 resolved, the App-backed recheck fails closed before publication side effects.
 
-Missing, extra, duplicated, name-only, foreign-integration, inverted, stale, or
-bypass-bearing state fails closed. A successful receipt is necessary but not
+Missing, extra, duplicated, name-only, foreign-integration, inverted, or stale
+state fails closed in the CI recheck; bypass-bearing state fails closed in the
+owner preflight, per the column table above. A successful receipt is necessary
+but not
 sufficient for Ready: exact-head CI, current base, issue/PR milestone parity,
 resolved findings, the bounded Main Worker receipt, and a fresh independent
 approval are still required. The coordinator alone changes Draft/Ready state,

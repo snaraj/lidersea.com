@@ -47,7 +47,7 @@ go vet ./... && go test ./...
 docker build .
 ```
 
-Toolchain pins live in CI (`node 24.19.0`, `npm 11.17.0`, `go 1.26.5`);
+Toolchain pins live in CI (`node 24.19.0`, `npm 11.17.0`, `go 1.26.6`);
 CI is authoritative.
 
 ## Releases

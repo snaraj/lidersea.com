@@ -7,6 +7,36 @@ Git, image, and GitHub Release tags use the exact plain `vX.Y.Z` form.
 
 ## [Unreleased]
 
+## [0.1.16] - 2026-08-18
+
+### Security
+
+- Go toolchain `1.26.5` -> `1.26.6`, closing 8 HIGH-severity standard-library
+  CVEs that the release vulnerability gate caught on the burned `v0.1.15` run
+  (32194317079) before that tag's image ever reached a signed Release: the
+  tag and an unsigned image exist, but no Release was published. Zero
+  CRITICAL findings. Named: CVE-2026-33818 (`encoding/asn1` denial of
+  service), CVE-2026-39821 (`net/http` IDNA punycode handling),
+  CVE-2026-46600 (`dns/dnsmessage` denial of service), CVE-2026-56853
+  (`net/http` h2c denial of service), CVE-2026-56858 (`html/template`
+  cross-site scripting), CVE-2026-56859 (`encoding/xml` denial of service),
+  CVE-2026-56860 (`net/url` denial of service), and CVE-2026-56862
+  (`crypto/tls` KeyUpdate denial of service). All eight are fixed upstream in
+  1.26.6; this release makes no application code change. The pin moves in
+  the same commit everywhere it is stated: `go.mod`'s `toolchain` directive
+  (module `go` directive stays `1.26.0`, unchanged), the Dockerfile's
+  `golang:1.26.6-trixie` build stage (digest updated to the matching
+  upstream manifest), and the `go-version`/`GOVERSION` pins in
+  `.github/workflows/codeql.yml` and `.github/workflows/pr-gate.yml`.
+
+### Release
+
+- VERSION, chart `version`/`appVersion`, chart `values.yaml` `image.tag`,
+  this CHANGELOG entry, and `scripts/ci/test_release_contract.py`'s
+  `GovernanceReceiptTests` live-snapshot pin all advance together per the
+  release-lock closure (five locations, one commit) — the exact-patch
+  discipline requirement 10 enforces.
+
 ## [0.1.15] - 2026-08-18
 
 ### Fixed

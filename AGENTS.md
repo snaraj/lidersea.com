@@ -18,7 +18,7 @@ the owner. In order:
    verify remote facts directly (`gh pr view`, `git ls-remote`).
 3. Verify identity and tooling: `gh auth status` shows the owner's
    account; commits carry the noreply identity per "Commit identity
-   mechanics"; know CI's pinned toolchain (Go 1.26.5, Node 24.19.0,
+   mechanics"; know CI's pinned toolchain (Go 1.26.6, Node 24.19.0,
    npm 11.17.0 — the gate verifies these exactly).
 4. Survey the live state yourself: `gh issue list`, `gh pr list` —
    including the open-agent-PR count against the PR budget below.
@@ -641,7 +641,7 @@ included; it is the same battery CI enforces:
   its report),
   `dependency-review` (PRs only; fails on high severity), `application`
   (toolchain pinned AND verified — Node 24.19.0, npm 11.17.0,
-  Go 1.26.5; frontend check/test/build; gofmt/vet/tests/race; the
+  Go 1.26.6; frontend check/test/build; gofmt/vet/tests/race; the
   coverage floor), `chart` (the ingress peer-identity pin,
   `scripts/ci/chart-ingress-pin.sh`; helm lint + render at
   `--kube-version v1.36.0`; the numeric VERSION ↔ numeric chart `version` ↔

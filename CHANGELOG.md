@@ -7,6 +7,35 @@ Git, image, and GitHub Release tags use the exact plain `vX.Y.Z` form.
 
 ## [Unreleased]
 
+## [0.1.15] - 2026-08-18
+
+### Fixed
+
+- Release publishing, second layer: the 0.1.14 fix let the settings recheck get
+  one step further and it denied again. Run 32188071417 — the first
+  `release-after-main` run on protected main carrying that fix — failed its
+  `immutable_settings` job with `DENY: Protect-Main bypass actors must be a
+  JSON array`. `build_settings_receipt` required `bypass_actors` to be an array
+  on the `Protect-Main` ruleset detail, but GitHub's "Get a repository ruleset"
+  contract states that "the `bypass_actors` property is only returned if the
+  user making the API request has write access to the ruleset", and the
+  settings jobs mint a repository-scoped App token whose only grant is
+  Administration read. The property was therefore absent from every response
+  this path can observe, and `_array(None, ...)` denied. As in 0.1.14 the
+  repository was configured correctly — the check was reading a field its own
+  credential is not entitled to see. The read and its assertion are removed
+  rather than made conditional: a control whose strength depends on who holds
+  the credential is not a fail-closed control.
+
+### Changed
+
+- The settings receipt no longer carries a `bypass_actors` field, and the
+  closed field set now rejects it as foreign so no dangling copy survives.
+- `docs/release-governance.md` gains a column table stating which invariants are
+  proven by the CI recheck and which by the owner preflight. Zero bypass actors
+  and disabled merge commits are in the owner column, each with the GET-only
+  command that proves it under a credential REST will answer.
+
 ## [0.1.14] - 2026-08-18
 
 ### Fixed

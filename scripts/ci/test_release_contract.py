@@ -265,7 +265,6 @@ def settings_receipt() -> dict[str, object]:
         "allow_force_pushes": False,
         "allow_deletions": False,
         "restrict_updates": False,
-        "bypass_actors": [],
         "immutable_releases": True,
         "private_vulnerability_reporting": True,
         "secret_scanning": True,
@@ -321,10 +320,13 @@ def settings_api() -> dict[str, object]:
             "source_type": "Repository",
             "source": "owner/site",
             "enforcement": "active",
+            # No bypass_actors key: REST withholds the property from every
+            # credential without write access to the ruleset, and the settings
+            # jobs hold Administration read alone. This fixture is the exact
+            # shape the CI credential observes.
             "conditions": {
                 "ref_name": {"exclude": [], "include": ["refs/heads/main"]},
             },
-            "bypass_actors": [],
             "rules": [
                 {"type": "creation"},
                 {"type": "deletion"},
@@ -800,7 +802,7 @@ class GovernanceReceiptTests(unittest.TestCase):
             path: (ROOT / path).read_text(encoding="utf-8")
             for path in ("VERSION", "chart/Chart.yaml", "chart/values.yaml", "CHANGELOG.md")
         }
-        self.assertEqual(RC.validate_snapshot(actual).tag, "v0.1.14")
+        self.assertEqual(RC.validate_snapshot(actual).tag, "v0.1.15")
 
 
 class MainRunBindingTests(unittest.TestCase):
@@ -1036,7 +1038,13 @@ class SettingsReceiptTests(unittest.TestCase):
             '"allow_force_pushes": false',
             '"allow_deletions": false',
             '"restrict_updates": false',
-            '"bypass_actors": []',
+            # bypass_actors left the receipt with the CI-credential fix; these
+            # tokens pin the replacement contract instead, so the owner column
+            # cannot be quietly dropped from the runbook.
+            "## Which column proves which invariant",
+            "**`Protect-Main` has zero bypass actors** | **Owner preflight**",
+            "only returned if the user making the API request has write access",
+            "It must print exactly `[]`",
             "settings-preflight",
             "settings-receipt",
             "platform-release",
@@ -1062,7 +1070,10 @@ class SettingsReceiptTests(unittest.TestCase):
             if token not in text:
                 raise ValueError(f"release settings contract lost: {token}")
 
-    def test_only_the_exact_immutable_no_bypass_receipt_is_ready(self):
+    # Renamed from test_only_the_exact_immutable_no_bypass_receipt_is_ready: the
+    # CI receipt no longer carries a bypass field, so a name claiming it proves
+    # no-bypass would overstate what this suite checks.
+    def test_only_the_exact_immutable_receipt_is_ready(self):
         exact = settings_receipt()
         RC.validate_settings_receipt(exact, "owner/site")
         mutations: list[dict[str, object]] = []
@@ -1096,6 +1107,10 @@ class SettingsReceiptTests(unittest.TestCase):
             ("allow_force_pushes", True),
             ("allow_deletions", True),
             ("restrict_updates", True),
+            # bypass_actors is no longer a receipt field, so this entry INSERTS a
+            # foreign key rather than mutating a value. It is retained because the
+            # closed field set must reject the removed field rather than tolerate
+            # a dangling copy of it.
             ("bypass_actors", ["present"]),
             ("immutable_releases", False),
             ("private_vulnerability_reporting", False),
@@ -1175,7 +1190,15 @@ class SettingsReceiptTests(unittest.TestCase):
             ("repos/owner/site/private-vulnerability-reporting", ("enabled",), False),
             ("repos/owner/site/rulesets/42", ("enforcement",), "disabled"),
             ("repos/owner/site/rulesets/42", ("conditions", "ref_name", "include"), ["~ALL"]),
-            ("repos/owner/site/rulesets/42", ("bypass_actors",), [{"actor_type": "RepositoryRole"}]),
+            # The ruleset's bypass_actors mutant is deliberately absent for the
+            # same reason as the repository merge booleans above: REST returns
+            # bypass_actors only to credentials with write access to the ruleset,
+            # and this path holds Administration read alone, so the mutant asserts
+            # a response shape the credential can never receive. It is a NARROW,
+            # NAMED removal, not a weakening — the invariant it expressed moved to
+            # the owner-preflight column in docs/release-governance.md, and
+            # test_bypass_actors_are_never_read_under_the_ci_credential pins that
+            # neither an empty nor a populated list can move the CI receipt.
         ):
             changed = copy.deepcopy(exact)
             parent = changed[endpoint]
@@ -1376,6 +1399,72 @@ class SettingsReceiptTests(unittest.TestCase):
             with self.subTest(receipt_merge_methods=receipt_value), self.assertRaises(RC.ContractError):
                 RC.validate_settings_receipt(changed, "owner/site")
 
+    def test_bypass_actors_are_never_read_under_the_ci_credential(self):
+        # REST documents the withholding in the "Get a repository ruleset"
+        # contract: "To prevent leaking sensitive information, the bypass_actors
+        # property is only returned if the user making the API request has write
+        # access to the ruleset."
+        # (https://docs.github.com/en/rest/repos/rules) The settings jobs mint a
+        # repository-scoped App token whose ONLY grant is Administration read, so
+        # the property is absent from every response this path can ever observe.
+        # The receipt must therefore build without it and must not carry it; the
+        # no-bypass invariant is proven by the owner preflight instead, and
+        # docs/release-governance.md records which column proves what.
+        credential_shape = settings_api()
+        self.assertNotIn(
+            "bypass_actors", credential_shape["repos/owner/site/rulesets/42"]
+        )
+        receipt = self.observe(copy.deepcopy(credential_shape))
+        self.assertEqual(receipt, settings_receipt())
+        self.assertNotIn("bypass_actors", receipt)
+
+        # An owner credential DOES receive the property. It must not influence the
+        # receipt in either direction: an empty list may not make the receipt
+        # stronger and a populated one may not make it weaker, so the control's
+        # strength never varies with who is holding the credential.
+        for actors in (
+            [],
+            [{"actor_type": "RepositoryRole", "actor_id": 5, "bypass_mode": "always"}],
+            [{"actor_type": "OrganizationAdmin", "actor_id": 1, "bypass_mode": "pull_request"}],
+            [{"actor_type": "Integration", "actor_id": 15368, "bypass_mode": "always"}],
+            "present",
+            None,
+            True,
+            {},
+        ):
+            visible = copy.deepcopy(settings_api())
+            visible["repos/owner/site/rulesets/42"]["bypass_actors"] = actors
+            with self.subTest(bypass_actors=actors):
+                observed = self.observe(visible)
+                self.assertEqual(observed, settings_receipt())
+                self.assertNotIn("bypass_actors", observed)
+
+        # The receipt field set stays closed, so a bypass_actors key is now
+        # foreign rather than silently tolerated. Without this the removal could
+        # leave a dangling field that no code writes and no check reads.
+        changed = settings_receipt()
+        changed["bypass_actors"] = []
+        with self.assertRaises(RC.ContractError):
+            RC.validate_settings_receipt(changed, "owner/site")
+
+        # Everything the ruleset detail DOES expose to this credential stays
+        # enforced: removing the bypass read must not have skipped the rules
+        # parsing that follows it. Each mutant below sits after the former bypass
+        # read in the ruleset record and must still deny.
+        for path, value in (
+            (("enforcement",), "disabled"),
+            (("conditions", "ref_name", "include"), ["~ALL"]),
+            (("rules",), []),
+            (("rules",), None),
+        ):
+            mutated = copy.deepcopy(settings_api())
+            parent = mutated["repos/owner/site/rulesets/42"]
+            for key in path[:-1]:
+                parent = parent[key]
+            parent[path[-1]] = value
+            with self.subTest(ruleset_mutant=path), self.assertRaises(RC.ContractError):
+                self.observe(mutated)
+
     def test_github_settings_reader_is_get_only_and_fails_closed(self):
         completed = subprocess.CompletedProcess([], 0, stdout='{"enabled": true}', stderr="")
         with mock.patch.object(RC.subprocess, "run", return_value=completed) as run:
@@ -1462,7 +1551,13 @@ class SettingsReceiptTests(unittest.TestCase):
             '"allow_force_pushes": false',
             '"allow_deletions": false',
             '"restrict_updates": false',
-            '"bypass_actors": []',
+            # bypass_actors left the receipt with the CI-credential fix; these
+            # tokens pin the replacement contract instead, so the owner column
+            # cannot be quietly dropped from the runbook.
+            "## Which column proves which invariant",
+            "**`Protect-Main` has zero bypass actors** | **Owner preflight**",
+            "only returned if the user making the API request has write access",
+            "It must print exactly `[]`",
             "settings-preflight",
             "settings-receipt",
             "platform-release",

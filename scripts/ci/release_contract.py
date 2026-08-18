@@ -684,7 +684,6 @@ def validate_settings_receipt(receipt: Mapping[str, object], repository: str) ->
         "allow_deletions",
         "allow_force_pushes",
         "branch",
-        "bypass_actors",
         "can_approve_pull_request_reviews",
         "code_coverage_max_drop",
         "code_coverage_minimum",
@@ -747,8 +746,10 @@ def validate_settings_receipt(receipt: Mapping[str, object], repository: str) ->
     ):
         if receipt.get(field) is not expected:
             raise ContractError(f"settings receipt {field} must be {expected}")
-    if receipt.get("bypass_actors") != []:
-        raise ContractError("protected-main rules must have no bypass actors")
+    # No bypass_actors assertion: the field is absent from the receipt because
+    # REST withholds it from the Administration-read-only credential that builds
+    # it (see build_settings_receipt). The closed field set above now rejects it
+    # as foreign, so no dangling value can be smuggled past this validator.
     if receipt.get("required_approving_review_count") != 0 or isinstance(
         receipt.get("required_approving_review_count"), bool
     ):
@@ -860,7 +861,17 @@ def build_settings_receipt(
     ) != ["refs/heads/main"]:
         raise ContractError("Protect-Main must target only refs/heads/main")
 
-    bypass = _array(ruleset_record.get("bypass_actors"), "Protect-Main bypass actors")
+    # bypass_actors is deliberately NOT read here. GitHub's "Get a repository
+    # ruleset" contract states: "To prevent leaking sensitive information, the
+    # bypass_actors property is only returned if the user making the API request
+    # has write access to the ruleset." The settings jobs mint a
+    # repository-scoped App token with Administration read as its ONLY
+    # permission, so the property is absent from every response this path can
+    # observe, exactly as the repository merge booleans are. A conditional or
+    # best-effort assertion would be a control whose strength depends on the
+    # caller, which is not a fail-closed control at all. The no-bypass invariant
+    # is not abandoned: it is proven in the owner preflight column recorded in
+    # docs/release-governance.md, under a credential REST will answer.
     rules_by_type: dict[str, Mapping[str, object]] = {}
     for value in _array(ruleset_record.get("rules"), "Protect-Main rules"):
         rule = _object(value, "Protect-Main rule")
@@ -999,9 +1010,6 @@ def build_settings_receipt(
         "allow_force_pushes": "non_fast_forward" not in rules_by_type,
         "allow_deletions": "deletion" not in rules_by_type,
         "restrict_updates": "update" in rules_by_type,
-        # Do not serialize actor details or ruleset IDs. Presence alone is the
-        # safety fact, and the only acceptable value is the empty set.
-        "bypass_actors": [] if not bypass else ["present"],
         "immutable_releases": immutable_record.get("enabled"),
         "private_vulnerability_reporting": private_reporting_record.get("enabled"),
         "secret_scanning": security_enabled("secret_scanning"),

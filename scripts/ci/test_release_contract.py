@@ -800,7 +800,7 @@ class GovernanceReceiptTests(unittest.TestCase):
             path: (ROOT / path).read_text(encoding="utf-8")
             for path in ("VERSION", "chart/Chart.yaml", "chart/values.yaml", "CHANGELOG.md")
         }
-        self.assertEqual(RC.validate_snapshot(actual).tag, "v0.1.13")
+        self.assertEqual(RC.validate_snapshot(actual).tag, "v0.1.14")
 
 
 class MainRunBindingTests(unittest.TestCase):
@@ -1158,10 +1158,13 @@ class SettingsReceiptTests(unittest.TestCase):
         exact = settings_api()
         self.assertEqual(self.observe(copy.deepcopy(exact)), settings_receipt())
 
+        # The repository record's merge-method booleans are deliberately absent
+        # from this matrix: REST withholds them from the Administration-read-only
+        # credential this path runs under, so no assertion may depend on them.
+        # test_merge_methods_come_from_the_ruleset_not_the_repository_record
+        # carries the merge-method mutants against their authoritative source.
         mutations: list[dict[str, object]] = []
         for endpoint, path, value in (
-            ("repos/owner/site", ("allow_merge_commit",), True),
-            ("repos/owner/site", ("allow_rebase_merge",), False),
             ("repos/owner/site", ("default_branch",), "release"),
             ("repos/owner/site", ("security_and_analysis", "secret_scanning", "status"), "disabled"),
             ("repos/owner/site", ("security_and_analysis", "secret_scanning_push_protection", "status"), "disabled"),
@@ -1303,6 +1306,75 @@ class SettingsReceiptTests(unittest.TestCase):
         for index, changed in enumerate(mutations):
             with self.subTest(raw_mutation=index), self.assertRaises(RC.ContractError):
                 self.observe(changed)
+
+    def test_merge_methods_come_from_the_ruleset_not_the_repository_record(self):
+        # The settings jobs mint a repository-scoped App token whose ONLY grant is
+        # Administration read, and REST returns allow_merge_commit /
+        # allow_rebase_merge / allow_squash_merge only to credentials that also
+        # hold Contents write. The receipt must therefore build from the
+        # Protect-Main ruleset's allowed_merge_methods alone — and must still fail
+        # closed on every shape and value that is not exactly squash plus rebase.
+        credential_shape = copy.deepcopy(settings_api())
+        for boolean in ("allow_merge_commit", "allow_rebase_merge", "allow_squash_merge"):
+            del credential_shape["repos/owner/site"][boolean]
+        self.assertEqual(self.observe(credential_shape), settings_receipt())
+
+        # The repository record cannot influence the receipt in either direction:
+        # booleans that disagree with the ruleset are ignored, not reconciled.
+        for booleans in (
+            {"allow_merge_commit": True, "allow_rebase_merge": True, "allow_squash_merge": True},
+            {"allow_merge_commit": False, "allow_rebase_merge": False, "allow_squash_merge": False},
+            {"allow_merge_commit": "yes", "allow_rebase_merge": None, "allow_squash_merge": 1},
+        ):
+            disagreeing = copy.deepcopy(settings_api())
+            disagreeing["repos/owner/site"].update(booleans)
+            with self.subTest(repository_booleans=booleans):
+                self.assertEqual(self.observe(disagreeing), settings_receipt())
+
+        for value in (
+            ["merge", "rebase", "squash"],
+            ["merge"],
+            ["squash"],
+            ["rebase"],
+            [],
+            ["rebase", "rebase", "squash"],
+            ["rebase", "squash", ""],
+            ["rebase", "squash", "merge_queue"],
+            ["rebase", 1],
+            ["rebase", None],
+            ["rebase", ["squash"]],
+            "rebase,squash",
+            {"rebase": True, "squash": True},
+            None,
+            True,
+        ):
+            changed = copy.deepcopy(settings_api())
+            pull = next(
+                rule
+                for rule in changed["repos/owner/site/rulesets/42"]["rules"]
+                if rule["type"] == "pull_request"
+            )
+            pull["parameters"]["allowed_merge_methods"] = value
+            with self.subTest(allowed_merge_methods=value), self.assertRaises(RC.ContractError):
+                self.observe(changed)
+
+        absent = copy.deepcopy(settings_api())
+        pull = next(
+            rule
+            for rule in absent["repos/owner/site/rulesets/42"]["rules"]
+            if rule["type"] == "pull_request"
+        )
+        del pull["parameters"]["allowed_merge_methods"]
+        with self.assertRaises(RC.ContractError):
+            self.observe(absent)
+
+        # The downstream receipt validator remains the exact-set gate regardless
+        # of how the receipt was produced.
+        for receipt_value in (["squash"], ["rebase"], ["merge", "rebase", "squash"], [], "rebase"):
+            changed = settings_receipt()
+            changed["merge_methods"] = receipt_value
+            with self.subTest(receipt_merge_methods=receipt_value), self.assertRaises(RC.ContractError):
+                RC.validate_settings_receipt(changed, "owner/site")
 
     def test_github_settings_reader_is_get_only_and_fails_closed(self):
         completed = subprocess.CompletedProcess([], 0, stdout='{"enabled": true}', stderr="")

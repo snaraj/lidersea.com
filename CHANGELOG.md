@@ -7,6 +7,35 @@ Git, image, and GitHub Release tags use the exact plain `vX.Y.Z` form.
 
 ## [Unreleased]
 
+## [0.1.14] - 2026-08-18
+
+### Fixed
+
+- Release publishing: the automatic publisher has been dead since 0.1.9. Every
+  `release-after-main` run since #47 failed in its `immutable_settings` job with
+  `DENY: repository setting allow_merge_commit is not boolean`, so no tag,
+  image, chart, or GitHub Release was produced for 0.1.10, 0.1.11, or 0.1.12.
+  `build_settings_receipt` derived the receipt's `merge_methods` from the
+  repository record's `allow_merge_commit` / `allow_rebase_merge` /
+  `allow_squash_merge` booleans, but REST returns those fields only to
+  credentials holding Contents write. The settings jobs mint a
+  repository-scoped GitHub App token whose only grant is Administration read,
+  so the booleans were absent from every authorized response and the assertion
+  could never pass in CI. The repository was configured correctly the whole
+  time — the check was reading a field its own credential is not entitled to
+  see (`scripts/ci/release_contract.py`).
+- The receipt's `merge_methods` now come from the active `Protect-Main`
+  ruleset's `pull_request` rule `allowed_merge_methods`, which the
+  Administration-read token does receive and which is what actually constrains
+  merges into protected `main`. The repository-record boolean loop is deleted
+  outright rather than made conditional: a credential-dependent assertion is
+  not a fail-closed control. The receipt's external shape is unchanged —
+  `merge_methods` is still a sorted list — and
+  `validate_settings_receipt`'s exact `{"rebase", "squash"}` gate is byte-for-byte
+  unchanged, so a ruleset that permits merge commits, permits only one method,
+  or reports a missing, non-array, non-string, empty, or duplicated value still
+  fails closed before any tag, registry, signing, or Release effect.
+
 ## [0.1.13] - 2026-08-18
 
 ### Changed

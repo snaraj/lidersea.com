@@ -12,7 +12,7 @@ image:
   # It is locked to this chart's appVersion by the release gate's four-way
   # lock (numeric VERSION/chart version/appVersion <-> plain-v image tag), so a chart
   # claiming one release can never ship the tag of another.
-  tag: v0.1.10
+  tag: v0.1.11
   digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
   pullPolicy: IfNotPresent
 

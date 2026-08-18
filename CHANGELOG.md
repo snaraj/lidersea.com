@@ -7,6 +7,29 @@ Git, image, and GitHub Release tags use the exact plain `vX.Y.Z` form.
 
 ## [Unreleased]
 
+## [0.1.13] - 2026-08-18
+
+### Changed
+
+- Docs: `AGENTS.md` aligned to owner directives the text predated (nine
+  fixes). Requirement 3's signature rule now matches the ACTING agent's
+  own label instead of a fixed `- Fable5`, superseding the 2026-08-10
+  single-signer decision per the owner's 2026-08-18 model-tiering
+  directive (merged precedent #53 already follows the per-lane rule).
+  The agent-labels roster gains `sonnet5` (Claude Sonnet 5), live
+  server-side already. "Commit identity mechanics" drops the hardcoded
+  lane example and adds SSH per-command signing (owner-registered Mac
+  key, `gpg.format=ssh`, never `git config`; key registered 2026-08-18).
+  The Dependabot bullet documents the lockstep-pair practice (merged
+  precedents #53, #55). The branch-prefix example generalizes from
+  `fable5/<topic>` to `<lane>/<topic>`. A new "Release-lock closure"
+  subsection documents all FIVE release-lock file locations as a closed
+  set — including `scripts/ci/test_release_contract.py`'s live-snapshot
+  pin this same PR advances — citing the PR #53 first-head `security`-job
+  failure that motivated it. The merge-readiness bullet now requires the
+  Main Worker PASS receipt and "Working a change end to end" gains the
+  missing Main Worker step (10 steps), both matching naranjo.online.
+
 ## [0.1.12] - 2026-08-18
 
 ### Changed

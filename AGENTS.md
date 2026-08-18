@@ -54,8 +54,16 @@ Numbered for citation, repo-scoped, none negotiable in code:
    the release workflow.
 3. **Commit-metadata privacy and attribution.** Commits are authored AND
    committed as the owner's GitHub noreply identity (both fields). No
-   co-author trailers. Agent-authored commit messages and PR bodies are
-   signed `- Fable5` (owner attribution decision, 2026-08-10).
+   co-author trailers. Agent-authored commit messages and PR bodies end
+   with the ACTING agent's own signature — never a fixed lane — exactly
+   matching its agent label from the roster in "Agent labels" below
+   (`- Fable5` ↔ `fable5`, `- Sonnet5` ↔ `sonnet5`, `- Opus5` ↔ `opus5`,
+   `- 5.6 Sol` ↔ `5.6-sol`). The original single-signer rule (every agent
+   PR signed `- Fable5`, owner attribution decision 2026-08-10) is
+   superseded by the owner's model-tiering directive (2026-08-18), which
+   routes work across parallel Sonnet5/Opus5/5.6-Sol/Fable5 lanes by task
+   tier; merged precedent #53 (signed `- Sonnet5`, owner-merged the same
+   day) already follows the per-lane rule.
 4. **Fail-closed doctrine — never weaken.** No security behavior may be
    made toggleable: no boolean, env var, build tag, or config field may
    silently disable signing, verification, probes, TLS, header policy, or
@@ -139,6 +147,34 @@ policy — and `scripts/ci/chart-ingress-pin.sh` renders the chart and proves
 the pin holds: the default render, the refusal of an unpinned instance, and
 the demonstration that the instance is what separates one connector from
 another.
+
+### Release-lock closure
+
+Requirement 10's one-patch advance touches a CLOSED set of five locations,
+every one bumped in the same commit:
+
+1. `VERSION` — the numeric `X.Y.Z`.
+2. `chart/Chart.yaml` — both `version` and `appVersion`, numeric, matching (1).
+3. `chart/values.yaml` — `image.tag`, plain `vX.Y.Z`, matching (1).
+4. `CHANGELOG.md` — a new `## [X.Y.Z] - <ISO date>` heading immediately
+   after the empty `## [Unreleased]` heading.
+5. `scripts/ci/test_release_contract.py` — `GovernanceReceiptTests`' own
+   live-snapshot pin (currently the hardcoded literal at ~line 803), which
+   asserts the tag `validate_snapshot` computes from the real
+   VERSION/chart/values/CHANGELOG tree against that literal.
+
+CI proves (1)-(4) mechanically: the `chart` job's numeric `VERSION` ↔
+numeric chart `version` ↔ numeric `appVersion` ↔ plain-v `image.tag`
+four-way lock, plus `test_release_contract.py`'s own changelog-format
+assertions over the same four files. Location (5) is the easiest to miss
+precisely because the checker enforces the other four without enforcing
+its own copy — it is a literal inside the checker, not a source-of-truth
+file the checker reads. Missing it is not hypothetical: it broke PR #53's
+first head, failing the `security` job's
+`test_governance_docs_pin_receipts_milestone_parity_and_generic_owner_wording`
+until a second commit advanced the live pin. Treat all five as one closed
+set — a PR that advances the release bumps all five in the same commit,
+never four.
 
 ## Testing doctrine
 
@@ -391,9 +427,10 @@ authority: the owner alone merges.
 - **Agent labels.** Every agent-created PR and issue carries TWO further
   labels: the umbrella `agent-authored` AND the acting agent's own label —
   `fable5` (Claude Fable 5), `5.6-sol` (ChatGPT 5.6 SOL ULTRA), `opus5`
-  (Claude Opus 5), `opus4.8` (Claude Opus 4.8). The body signature must
-  match the label (`- Fable5` ↔ `fable5`), and adversarial-review
-  verdicts carry the same identity as `- <Agent> (adversarial reviewer)`.
+  (Claude Opus 5), `opus4.8` (Claude Opus 4.8), `sonnet5` (Claude Sonnet 5).
+  The body signature must match the label (`- Fable5` ↔ `fable5`), and
+  adversarial-review verdicts carry the same identity as `- <Agent>
+  (adversarial reviewer)`.
   These repositories are worked by several frontier models in parallel
   lanes; labels plus signatures keep authorship auditable with no owner
   relay. When a new model joins, its label — description "Authored by
@@ -420,14 +457,19 @@ authority: the owner alone merges.
   next-patch, changelog, exact-head review, CI, and base-freshness controls.
   Infrastructure/tool outages are reported as infrastructure failures; they do
   not waive a real product failure or justify lowering this repository's
-  coverage floor.
+  coverage floor. A version-locked pair Dependabot splits across separate PRs
+  (`github/codeql-action` init+analyze; `svelte`+`svelte-check`) is superseded
+  by ONE agent PR bundling both bumps plus the root-cause `groups:` stanza in
+  `.github/dependabot.yml`, in the same commit, so the pair stops arriving as
+  mutually-blocking PRs (merged precedents #53, #55).
 - **Merge readiness.** Draft remains Draft until every check is successful at
   the exact head, the base equals current protected `main`, all discussions and
-  findings are resolved, a fresh exact-head APPROVE receipt exists, the next
-  patch still follows that base, the automatic release consequence is proven,
-  and the owner-observed release-control receipt proves immutable releases plus
-  strict exact required checks with no bypass. Only the coordinator flips
-  Ready. The author and reviewer never do.
+  findings are resolved, a fresh exact-head APPROVE receipt exists, a fresh
+  exact-head canonical `ROLE: MAIN-WORKER` / `VERDICT: PASS` receipt exists, the
+  next patch still follows that base, the automatic release consequence is
+  proven, and the owner-observed release-control receipt proves immutable
+  releases plus strict exact required checks with no bypass. Only the
+  coordinator flips Ready. The author and reviewer never do.
 
 ## Working a change end to end
 
@@ -438,7 +480,9 @@ The complete delivery loop, each step gated by the sections around it:
    owner, set a milestone. Never apply or interpret `requires-review` on the
    issue; request any issue-spec review through an explicit normal comment.
 2. **Branch from `origin/main`** after `git fetch origin`; branch names
-   are lane-prefixed (`fable5/<topic>`). One writer per branch, always —
+   are lane-prefixed (`<lane>/<topic>`, e.g. `fable5/<topic>`,
+   `sonnet5/<topic>`, `opus5/<topic>`, `5.6-sol/<topic>`). One writer per
+   branch, always —
    a branch that is not yours is a branch you never push to. Reserve the exact
    next patch from that base; if another PR lands, create a fresh branch from
    current main, carry the still-valid diff without rewriting published
@@ -457,13 +501,17 @@ The complete delivery loop, each step gated by the sections around it:
 6. **Adversarial review** per the protocol above; findings are fixed on
    the same branch by the same writer and delta re-reviewed before the
    flip to ready.
-7. **Prove server release controls.** For an automatic-release change, the
+7. **Obtain the Main Worker receipt.** After the author tree and exact-head
+   adversarial verdict are final, a distinct Main Worker runs the bounded
+   canonical check defined above and posts its exact-head PASS comment. A
+   later push invalidates both exact-head receipts.
+8. **Prove server release controls.** For an automatic-release change, the
    repository owner runs the GET-only preflight in
    `docs/release-governance.md`; immutable releases, strict current-base
    required checks, and the no-bypass ruleset must be exact before Ready.
-8. **Owner comments** are handled per the owner review protocol below.
-9. **The owner merges.** Nothing you can do — approval, green checks,
-   ready state — substitutes for that.
+9. **Owner comments** are handled per the owner review protocol below.
+10. **The owner merges.** Nothing you can do — approval, green checks,
+    ready state — substitutes for that.
 
 ## Commit identity mechanics
 
@@ -486,8 +534,20 @@ committer, on every outgoing commit — is exactly:
   not amend, rebase, cherry-pick onto a published branch, or rewrite history;
   use additive commits or a fresh branch from current main.
 - No `Co-Authored-By` trailers, ever. Agent-authored commit bodies, PR
-  bodies, and issue bodies end with the acting agent's signature (this
-  lane: `- Fable5`), matching its agent label.
+  bodies, and issue bodies end with the acting agent's own signature —
+  never a fixed lane — matching its agent label per the roster mapping in
+  requirement 3.
+- Agent commits are SSH-signed per command with the owner-registered Mac
+  key, never via `git config`:
+
+      git -c gpg.format=ssh \
+          -c user.signingkey="key::$(ssh-add -L | grep ssh-ed25519)" \
+          commit -S ...
+
+  The key was registered 2026-08-18; agent commits show `Verified` on
+  GitHub. Main-only merge enforcement (requirement 2) is what keeps the
+  owner's phone and other-machine merges unblocked — signing is a
+  commit-level property, not a branch-protection identity gate.
 - Treat the Git index as public (requirement 11): no hostname, IP
   address, machine or account identifier, username, workspace path,
   token, or private operational fact enters any commit, message,

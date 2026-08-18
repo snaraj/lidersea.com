@@ -1448,9 +1448,20 @@ class SettingsReceiptTests(unittest.TestCase):
             RC.validate_settings_receipt(changed, "owner/site")
 
         # Everything the ruleset detail DOES expose to this credential stays
-        # enforced: removing the bypass read must not have skipped the rules
-        # parsing that follows it. Each mutant below sits after the former bypass
-        # read in the ruleset record and must still deny.
+        # enforced on BOTH sides of where the bypass read used to sit — the
+        # removal site is the "bypass_actors is deliberately NOT read here"
+        # block in release_contract.py. Measured by capturing which guard each
+        # mutant actually trips: the first TWO deny BEFORE that point —
+        # enforcement raises "Protect-Main ruleset identity or enforcement is
+        # not exact" and conditions.ref_name.include raises "Protect-Main must
+        # target only refs/heads/main" — so they prove the guards ahead of the
+        # removal still fire. The last TWO deny AFTER it — rules: [] raises
+        # "Protect-Main rule types are missing or foreign" and rules: None
+        # fails the array read with "Protect-Main rules must be a JSON array" —
+        # so only those two prove the rules parsing behind the removal is still
+        # reached. All four kill; do not drop the rules pair believing
+        # enforcement covers the same ground, because it runs before the
+        # removal and proves nothing past it.
         for path, value in (
             (("enforcement",), "disabled"),
             (("conditions", "ref_name", "include"), ["~ALL"]),

@@ -7,6 +7,21 @@ Git, image, and GitHub Release tags use the exact plain `vX.Y.Z` form.
 
 ## [Unreleased]
 
+## [0.1.11] - 2026-08-18
+
+### Changed
+
+- CI: `github/codeql-action/init` and `github/codeql-action/analyze` bumped
+  together from 4.37.6 to 4.37.7 (`.github/workflows/codeql.yml`). Both
+  actions are full-SHA pinned in the same `analyze` job, and CodeQL
+  requires matching CLI versions between `init` and `analyze` within one
+  job, so Dependabot's per-artifact PRs #50 (`init`) and #51 (`analyze`)
+  mutually blocked each other's CI with "Loaded a configuration file for
+  version X, but running version Y." This single commit moves both pins
+  together. `.github/dependabot.yml` now groups future
+  `github/codeql-action*` updates under one `github-actions` group so
+  this pairing arrives as one PR instead of two.
+
 ## [0.1.10] - 2026-08-13
 
 ### Added

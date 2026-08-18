@@ -804,17 +804,13 @@ def build_settings_receipt(
     """Derive and validate a privacy-bounded receipt from authoritative REST."""
     if repository_record.get("full_name") != repository or repository_record.get("default_branch") != "main":
         raise ContractError("repository settings identity or default branch is not exact")
-    merge_methods: list[str] = []
-    for field, method in (
-        ("allow_merge_commit", "merge"),
-        ("allow_rebase_merge", "rebase"),
-        ("allow_squash_merge", "squash"),
-    ):
-        enabled = repository_record.get(field)
-        if not isinstance(enabled, bool):
-            raise ContractError(f"repository setting {field} is not boolean")
-        if enabled:
-            merge_methods.append(method)
+    # Merge methods are read from the Protect-Main ruleset below, never from the
+    # repository record's allow_merge_commit/allow_rebase_merge/allow_squash_merge
+    # booleans. REST returns those booleans only to credentials holding Contents
+    # write, and the settings jobs mint a repository-scoped App token with
+    # Administration read as its ONLY permission, so the booleans are absent for
+    # every authorized caller of this path. The ruleset is also the authoritative
+    # source: it is what actually constrains merges into protected main.
     if not isinstance(immutable_record.get("enabled"), bool) or not isinstance(
         immutable_record.get("enforced_by_owner"), bool
     ):
@@ -902,11 +898,12 @@ def build_settings_receipt(
     }
     if set(pull_parameters) != expected_pull_fields:
         raise ContractError("pull-request rule parameter fields are missing or foreign")
-    allowed_merge_methods = _string_set(
+    # Sole source of the receipt's merge methods. _string_set fails closed on a
+    # missing, non-list, non-string, empty-string, or duplicated value, and the
+    # exact {rebase, squash} set is enforced by validate_settings_receipt below.
+    merge_methods = _string_set(
         pull_parameters.get("allowed_merge_methods"), "ruleset merge methods"
     )
-    if allowed_merge_methods != set(merge_methods):
-        raise ContractError("repository and ruleset merge methods do not match")
     for field, expected in (
         ("dismiss_stale_reviews_on_push", False),
         ("require_code_owner_review", False),

@@ -2468,12 +2468,16 @@ class SbomAttestationTests(unittest.TestCase):
 
         expected = self.expected()
         amd64 = expected["linux/amd64"]
+        # cosign generates the subject itself from the CLI target, so it
+        # carries no platform: both platforms' expected subjects are the
+        # bare image and the same digest. A wrong SUBJECT is therefore a
+        # foreign digest or a foreign image, mirroring
+        # AttestationSetTests — not a platform string, which the subject no
+        # longer encodes.
         wrong_subject = copy.deepcopy(expected["linux/arm64"])
-        wrong_subject["subject"][0]["name"] = self.IMAGE
-        wrong_platform = copy.deepcopy(expected["linux/arm64"])
-        wrong_platform["subject"][0]["name"] = wrong_platform["subject"][0]["name"].replace(
-            "linux/arm64", "linux/s390x"
-        )
+        wrong_subject["subject"][0]["digest"]["sha256"] = "e" * 64
+        wrong_image = copy.deepcopy(expected["linux/arm64"])
+        wrong_image["subject"][0]["name"] = "ghcr.io/attacker/site"
         wrong_payload = copy.deepcopy(expected["linux/arm64"])
         wrong_payload["predicate"]["name"] = "foreign"
         malformed = copy.deepcopy(expected["linux/arm64"])
@@ -2482,7 +2486,7 @@ class SbomAttestationTests(unittest.TestCase):
             [amd64],
             [amd64, amd64],
             [amd64, wrong_subject],
-            [amd64, wrong_platform],
+            [amd64, wrong_image],
             [amd64, wrong_payload],
             [amd64, malformed],
             [*expected.values(), copy.deepcopy(amd64)],
@@ -2834,7 +2838,7 @@ cosign() {
   case "$1" in
     verify) return 0 ;;
     verify-attestation)
-      if [[ "$*" == *'--type spdxjson'* ]]; then
+      if [[ "$*" == *'--type https://spdx.dev/Document'* ]]; then
         "${TEST_PYTHON}" -c 'import base64,json,sys; [print(json.dumps({"payload":base64.b64encode(open(path,"rb").read()).decode("ascii")})) for path in sys.argv[1:]]' \
           "${RUNNER_TEMP}/existing-linux-amd64.sbom.statement.json" \
           "${RUNNER_TEMP}/existing-linux-arm64.sbom.statement.json"
@@ -3482,7 +3486,7 @@ class WorkflowStructureTests(unittest.TestCase):
             "sbom-platforms",
             "sbom-statement",
             "sbom-set",
-            "cosign verify-attestation --type spdxjson --output json",
+            "cosign verify-attestation --type 'https://spdx.dev/Document' --output json",
             "${{ env.IMAGE }}:${{ steps.release.outputs.tag }}",
             'helm push "${RUNNER_TEMP}/${chart_name}-${version}.tgz" "oci://${CHART%/*}"',
         ):
@@ -3525,8 +3529,8 @@ class WorkflowStructureTests(unittest.TestCase):
                 raise ValueError(f"orchestrator lost exact release wiring: {required}")
         for required in (
             "tag-record",
-            "cosign attest --yes --statement",
-            "cosign verify-attestation --type slsaprovenance1 --output json",
+            "cosign attest --yes --predicate",
+            "cosign verify-attestation --type 'https://slsa.dev/provenance/v1' --output json",
             "release-state",
             "release-manifest",
             "manifest-record",
@@ -3547,10 +3551,10 @@ class WorkflowStructureTests(unittest.TestCase):
         for repeated in (
             "attestation-statement",
             "attestation-set",
-            "cosign verify-attestation --type slsaprovenance1 --output json",
+            "cosign verify-attestation --type 'https://slsa.dev/provenance/v1' --output json",
             "sbom-statement",
             "sbom-set",
-            "cosign verify-attestation --type spdxjson --output json",
+            "cosign verify-attestation --type 'https://spdx.dev/Document' --output json",
         ):
             if publisher.count(repeated) < 2:
                 raise ValueError(f"publisher must use {repeated} for both existing and new images")
@@ -3755,7 +3759,7 @@ class WorkflowStructureTests(unittest.TestCase):
             "sbom-platforms",
             "sbom-statement",
             "sbom-set",
-            "cosign verify-attestation --type spdxjson --output json",
+            "cosign verify-attestation --type 'https://spdx.dev/Document' --output json",
             "audit-sbom.json",
             "CHART_DIGEST",
             "Rescan the immutable image digest at HIGH and CRITICAL",
@@ -3939,8 +3943,8 @@ class WorkflowStructureTests(unittest.TestCase):
             ("orchestrator", 'tagger[email]=${tagger_email}'),
             ("orchestrator", 'tagger[date]=${tagger_date}'),
             ("publisher", "tag-record"),
-            ("publisher", "cosign attest --yes --statement"),
-            ("publisher", "cosign verify-attestation --type slsaprovenance1 --output json"),
+            ("publisher", "cosign attest --yes --predicate"),
+            ("publisher", "cosign verify-attestation --type 'https://slsa.dev/provenance/v1' --output json"),
             ("publisher", "release-state"),
             ("publisher", "release-manifest"),
             ("publisher", "manifest-record"),

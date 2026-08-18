@@ -29,6 +29,43 @@ Git, image, and GitHub Release tags use the exact plain `vX.Y.Z` form.
   upstream manifest), and the `go-version`/`GOVERSION` pins in
   `.github/workflows/codeql.yml` and `.github/workflows/pr-gate.yml`.
 
+### Fixed
+
+- Release publishing, attestation layer: both SLSA provenance and SPDX SBOM
+  attest calls used `cosign attest --yes --statement <file>`, but
+  `--statement` is a dead flag on image attest — cosign's `attest.go`
+  requires `--predicate` unconditionally
+  (`if c.PredicatePath == "" { return "predicate cannot be empty" }`) in
+  every checked release (v2.2.4, v2.4.0, v2.5.0, v2.6.5, v3.1.3);
+  `StatementPath` is consumed only by `attest-blob`. naranjo.online's
+  identical step failed on exactly this in its publisher run 32195803008;
+  lidersea's own publisher has not yet reached this step in a completed run
+  (0.1.9-0.1.12 failed earlier in `immutable_settings`, fixed in 0.1.14 and
+  0.1.15; the furthest-reaching 0.1.15 run died at the Trivy CVE gate
+  above), so this closes the same latent defect before lidersea's publisher
+  ever reaches it. Reproduced offline with the pinned cosign v3.1.3:
+  `--statement` fails immediately with `predicate cannot be empty`, before
+  any registry or OIDC call (`.github/workflows/release-publisher.yml`).
+- Both attest sites now sign the modified predicate directly —
+  `cosign attest --yes --predicate <file> --type <predicateType URI>
+  "${IMAGE}@${DIGEST}"` — with the exact URI (`https://slsa.dev/provenance/v1`,
+  `https://spdx.dev/Document`) that the corresponding
+  `cosign verify-attestation --type` filter resolves to, so sign, verify,
+  and the Python comparison stay on one predicateType; a typed alias like
+  `slsaprovenance1` is never used to sign, since it routes to cosign's
+  protobuf path with `DiscardUnknown` and silently drops BuildKit's custom
+  predicate fields. `attestation-statement` and `sbom-statement` in
+  `scripts/ci/release_contract.py` now also write the modified predicate —
+  the exact bytes cosign embeds — to a new required `--predicate-output`
+  path, and their expected-statement `_type` switches to
+  `https://in-toto.io/Statement/v0.1`, matching what cosign's
+  `generateCustomStatement` actually stamps. The SBOM statement's subject
+  also drops its `?platform=` suffix to match cosign's real subject (bare
+  image, no platform), since cosign derives the subject only from the CLI
+  target. Verified end to end with the pinned cosign v3.1.3: the new
+  invocation parses and generates cleanly for both predicate types and
+  fails only on a deliberately invalid identity token.
+
 ### Release
 
 - VERSION, chart `version`/`appVersion`, chart `values.yaml` `image.tag`,

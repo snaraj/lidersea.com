@@ -732,6 +732,7 @@ jobs:
           tag="${{ steps.release.outputs.tag }}"
           manifest="${RUNNER_TEMP}/release-manifest.json"
           existing="${RUNNER_TEMP}/existing-release.json"
+          existing_list="${RUNNER_TEMP}/existing-releases-list.json"
           downloaded="${RUNNER_TEMP}/downloaded-release-manifest.json"
           api="${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/releases/tags/${tag}"
           verify_publication_aliases() {
@@ -745,7 +746,7 @@ jobs:
               = "${CHART_DIGEST}"
           }
           observe_release() {
-            local status asset_id
+            local status asset_id list_status selection
             local -a record_args=()
             rm -f -- "${downloaded}"
             status="$(curl --silent --show-error --location \
@@ -754,6 +755,36 @@ jobs:
               --header 'X-GitHub-Api-Version: 2026-03-10' \
               --header "Authorization: Bearer ${GH_TOKEN}" \
               "${api}")"
+            if [ "${status}" = 404 ]; then
+              # GitHub never returns an unpublished draft Release on the
+              # by-tag endpoint above (only exact/published releases are
+              # addressable by tag there), so a 404 is ambiguous between
+              # "no Release at all" and "an unpublished draft exists". Fall
+              # back to the plural list endpoint, which DOES include drafts,
+              # and select locally by tag_name so a draft this workflow just
+              # created (or left stranded by a prior run) is still
+              # observable and the state machine below can resume it.
+              list_status="$(curl --silent --show-error --location \
+                --proto '=https' --tlsv1.2 --output "${existing_list}" --write-out '%{http_code}' \
+                --header 'Accept: application/vnd.github+json' \
+                --header 'X-GitHub-Api-Version: 2026-03-10' \
+                --header "Authorization: Bearer ${GH_TOKEN}" \
+                "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/releases?per_page=100")"
+              # Bash disables errexit inside a command substitution's own
+              # subshell (no inherit_errexit), and this whole function is
+              # already running inside the subshell forked for
+              # `state="$(observe_release)"` below. A bare `test`/assignment
+              # failure here would therefore be silently swallowed rather
+              # than abort the step, so both checks are explicit `|| exit 1`
+              # rather than relying on implicit -e propagation.
+              [ "${list_status}" = 200 ] || exit 1
+              selection="$(python3 -I -B scripts/ci/release_contract.py release-tag-select \
+                --releases-json "${existing_list}" --tag "${tag}" \
+                --repository "${GITHUB_REPOSITORY}" --output "${existing}")" || exit 1
+              if [ "${selection}" = one ]; then
+                status=200
+              fi
+            fi
             if [ "${status}" = 200 ]; then
               record_args=(--release-json "${existing}")
               if asset_id="$(python3 -I -B scripts/ci/release_contract.py release-asset-id \

@@ -13,7 +13,7 @@ RUN npm run check && npm test && npm run build
 
 # Compile and test a static Go binary for both amd64 CI and arm64 production;
 # Buildx selects the matching architecture from this manifest-list pin.
-FROM docker.io/library/golang:1.26.5-trixie@sha256:87ffdb09b6a2e29ff910748b745395e8a0299aa80b7c0551cdca9b55e3fd2b3e AS backend
+FROM docker.io/library/golang:1.26.6-trixie@sha256:b75d466dd608587fd66cca705a307ba65b889827d06ad61d6a75f0482b51b7c7 AS backend
 ENV CGO_ENABLED=0 \
     GOTOOLCHAIN=local
 WORKDIR /src

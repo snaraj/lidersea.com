@@ -299,8 +299,10 @@ jobs:
           for platform in "${required_platforms[@]}"; do
             predicate="${RUNNER_TEMP}/existing-${platform//\//-}.json"
             statement="${RUNNER_TEMP}/existing-${platform//\//-}.statement.json"
+            modified_predicate="${RUNNER_TEMP}/existing-${platform//\//-}.predicate.json"
             spdx="${RUNNER_TEMP}/existing-${platform//\//-}.spdx.json"
             sbom_statement="${RUNNER_TEMP}/existing-${platform//\//-}.sbom.statement.json"
+            modified_sbom="${RUNNER_TEMP}/existing-${platform//\//-}.sbom.predicate.json"
             if ! docker buildx imagetools inspect "${IMAGE}@${digest}" \
               --format "{{ json (index .Provenance \"${platform}\").SLSA }}" > "${predicate}"; then
               source_match=false
@@ -308,6 +310,7 @@ jobs:
             fi
             if ! python3 -I -B scripts/ci/release_contract.py attestation-statement \
               --predicate "${predicate}" --output "${statement}" \
+              --predicate-output "${modified_predicate}" \
               --image "${IMAGE}" --digest "${digest}" --source "${source}" \
               --revision "${SOURCE_SHA}" --platform "${platform}"; then
               source_match=false
@@ -321,6 +324,7 @@ jobs:
             fi
             if ! python3 -I -B scripts/ci/release_contract.py sbom-statement \
               --spdx "${spdx}" --output "${sbom_statement}" \
+              --predicate-output "${modified_sbom}" \
               --image "${IMAGE}" --digest "${digest}" --platform "${platform}"; then
               source_match=false
               continue
@@ -339,14 +343,14 @@ jobs:
               --certificate-identity "${identity}" \
               --certificate-oidc-issuer "${issuer}" \
               "${IMAGE}@${digest}" >/dev/null 2>&1 || return 1
-            cosign verify-attestation --type slsaprovenance1 --output json \
+            cosign verify-attestation --type 'https://slsa.dev/provenance/v1' --output json \
               --certificate-identity "${identity}" \
               --certificate-oidc-issuer "${issuer}" \
               "${IMAGE}@${digest}" > "${verified}" 2>/dev/null || return 1
             python3 -I -B scripts/ci/release_contract.py attestation-set \
               --verified "${verified}" "${expected_attestations[@]}" \
               > "${RUNNER_TEMP}/verified-attestation-count.txt" || return 1
-            cosign verify-attestation --type spdxjson --output json \
+            cosign verify-attestation --type 'https://spdx.dev/Document' --output json \
               --certificate-identity "${identity}" \
               --certificate-oidc-issuer "${issuer}" \
               "${IMAGE}@${digest}" > "${verified_sboms}" 2>/dev/null || return 1
@@ -435,11 +439,16 @@ jobs:
         run: cosign sign --yes "${IMAGE}@${{ steps.image.outputs.digest }}"
       - name: Attach and verify exact BuildKit SLSA and SPDX SBOM attestations
         # Buildx embeds one SLSA v1 predicate per platform. Preserve each
-        # complete predicate inside an exact in-toto statement, add a
-        # release binding that cosign's --statement path retains verbatim,
-        # and sign both statements about the immutable index digest. The
-        # final decision is made only from cosign's cryptographically
-        # verified output, never from an unauthenticated download count.
+        # complete predicate, add a release binding, and sign it by passing
+        # the modified predicate plus its exact predicateType URI to cosign's
+        # --predicate/--type flow: cosign's --statement flag is dead on image
+        # attest (attest.go requires --predicate unconditionally in every
+        # checked release; StatementPath is consumed only by attest-blob). A
+        # --type URI (never the typed protobuf alias) makes cosign embed the
+        # predicate verbatim, so BuildKit's custom fields are never silently
+        # discarded. The final decision is made only from cosign's
+        # cryptographically verified output, never from an unauthenticated
+        # download count.
         env:
           DIGEST: ${{ steps.image.outputs.digest }}
         if: steps.image_state.outputs.state == 'absent'
@@ -468,40 +477,50 @@ jobs:
           test "${sbom_platforms[*]}" = "${expected_platforms}"
           source="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
           statements=()
+          modified_predicates=()
           expected_attestations=()
           sbom_statements=()
+          modified_sboms=()
           expected_sboms=()
           for platform in "${platforms[@]}"; do
             predicate="${RUNNER_TEMP}/slsa-${platform//\//-}.json"
             statement="${RUNNER_TEMP}/slsa-${platform//\//-}.statement.json"
+            modified_predicate="${RUNNER_TEMP}/slsa-${platform//\//-}.predicate.json"
             spdx="${RUNNER_TEMP}/sbom-${platform//\//-}.spdx.json"
             sbom_statement="${RUNNER_TEMP}/sbom-${platform//\//-}.statement.json"
+            modified_sbom="${RUNNER_TEMP}/sbom-${platform//\//-}.predicate.json"
             docker buildx imagetools inspect "${IMAGE}@${DIGEST}" \
               --format "{{ json (index .Provenance \"${platform}\").SLSA }}" \
               > "${predicate}"
             python3 -I -B scripts/ci/release_contract.py attestation-statement \
               --predicate "${predicate}" --output "${statement}" \
+              --predicate-output "${modified_predicate}" \
               --image "${IMAGE}" --digest "${DIGEST}" --source "${source}" \
               --revision "${SOURCE_SHA}" --platform "${platform}"
             statements+=("${statement}")
+            modified_predicates+=("${modified_predicate}")
             expected_attestations+=(--expected "${platform}=${statement}")
             docker buildx imagetools inspect "${IMAGE}@${DIGEST}" \
               --format "{{ json (index .SBOM \"${platform}\").SPDX }}" > "${spdx}"
             python3 -I -B scripts/ci/release_contract.py sbom-statement \
               --spdx "${spdx}" --output "${sbom_statement}" \
+              --predicate-output "${modified_sbom}" \
               --image "${IMAGE}" --digest "${DIGEST}" --platform "${platform}"
             sbom_statements+=("${sbom_statement}")
+            modified_sboms+=("${modified_sbom}")
             expected_sboms+=(--expected "${platform}=${sbom_statement}")
           done
           test "$(sha256sum "${statements[@]}" | awk '{print $1}' | sort -u | wc -l)" \
             -eq "${#statements[@]}"
-          for statement in "${statements[@]}"; do
-            cosign attest --yes --statement "${statement}" "${IMAGE}@${DIGEST}"
+          for modified_predicate in "${modified_predicates[@]}"; do
+            cosign attest --yes --predicate "${modified_predicate}" \
+              --type 'https://slsa.dev/provenance/v1' "${IMAGE}@${DIGEST}"
           done
           test "$(sha256sum "${sbom_statements[@]}" | awk '{print $1}' | sort -u | wc -l)" \
             -eq "${#sbom_statements[@]}"
-          for statement in "${sbom_statements[@]}"; do
-            cosign attest --yes --statement "${statement}" "${IMAGE}@${DIGEST}"
+          for modified_sbom in "${modified_sboms[@]}"; do
+            cosign attest --yes --predicate "${modified_sbom}" \
+              --type 'https://spdx.dev/Document' "${IMAGE}@${DIGEST}"
           done
           identity="${source}/.github/workflows/release-publisher.yml@refs/heads/main"
           verified="${RUNNER_TEMP}/verified-new-attestations.json"
@@ -509,14 +528,14 @@ jobs:
             --certificate-identity "${identity}" \
             --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
             "${IMAGE}@${DIGEST}" >/dev/null
-          cosign verify-attestation --type slsaprovenance1 --output json \
+          cosign verify-attestation --type 'https://slsa.dev/provenance/v1' --output json \
             --certificate-identity "${identity}" \
             --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
             "${IMAGE}@${DIGEST}" > "${verified}"
           python3 -I -B scripts/ci/release_contract.py attestation-set \
             --verified "${verified}" "${expected_attestations[@]}"
           verified_sboms="${RUNNER_TEMP}/verified-new-sboms.json"
-          cosign verify-attestation --type spdxjson --output json \
+          cosign verify-attestation --type 'https://spdx.dev/Document' --output json \
             --certificate-identity "${identity}" \
             --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
             "${IMAGE}@${DIGEST}" > "${verified_sboms}"

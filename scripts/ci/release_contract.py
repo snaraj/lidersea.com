@@ -31,7 +31,12 @@ EXPECTED_WORKFLOW_PATH = ".github/workflows/pr-gate.yml"
 EXPECTED_CODEQL_WORKFLOW = "CodeQL"
 EXPECTED_CODEQL_WORKFLOW_PATH = ".github/workflows/codeql.yml"
 EXPECTED_PUBLISHER_PATH = ".github/workflows/release-publisher.yml"
-INTOTO_STATEMENT_TYPE = "https://in-toto.io/Statement/v1"
+# cosign's attest.go signs via --predicate/--type, never --statement (dead on
+# image attest in every checked release). A --type value that is a URI takes
+# the generateCustomStatement path, which embeds the predicate verbatim and
+# always stamps this exact literal _type — not the newer
+# https://in-toto.io/Statement/v1 this repository does not control.
+INTOTO_STATEMENT_TYPE = "https://in-toto.io/Statement/v0.1"
 SLSA_PREDICATE_TYPE = "https://slsa.dev/provenance/v1"
 SPDX_PREDICATE_TYPE = "https://spdx.dev/Document"
 DIGEST_RE = re.compile(r"^sha256:([0-9a-f]{64})$")
@@ -1665,14 +1670,15 @@ def build_sbom_statement(
     if not image or "@" in image or platform not in RELEASE_PLATFORMS:
         raise ContractError("SBOM image or platform identity is malformed")
     predicate = validate_spdx_document(document)
+    # cosign generates the subject itself from the CLI target
+    # ("${IMAGE}@${DIGEST}", never platform-qualified): the bare image repo
+    # plus the digest map below. The platform argument stays validated above
+    # for defense in depth and file naming, but it is not embeddable here —
+    # mirroring anything else would desync this expected statement from what
+    # cosign actually signs, which is exactly the class of bug this fixes.
     return {
         "_type": INTOTO_STATEMENT_TYPE,
-        "subject": [
-            {
-                "name": f"{image}@{digest}?platform={platform}",
-                "digest": {"sha256": match.group(1)},
-            }
-        ],
+        "subject": [{"name": image, "digest": {"sha256": match.group(1)}}],
         "predicateType": SPDX_PREDICATE_TYPE,
         "predicate": predicate,
     }
@@ -1937,6 +1943,7 @@ def _parser() -> argparse.ArgumentParser:
     statement = commands.add_parser("attestation-statement")
     statement.add_argument("--predicate", type=Path, required=True)
     statement.add_argument("--output", type=Path, required=True)
+    statement.add_argument("--predicate-output", type=Path, required=True)
     statement.add_argument("--image", required=True)
     statement.add_argument("--digest", required=True)
     statement.add_argument("--source", required=True)
@@ -1950,6 +1957,7 @@ def _parser() -> argparse.ArgumentParser:
     sbom_statement = commands.add_parser("sbom-statement")
     sbom_statement.add_argument("--spdx", type=Path, required=True)
     sbom_statement.add_argument("--output", type=Path, required=True)
+    sbom_statement.add_argument("--predicate-output", type=Path, required=True)
     sbom_statement.add_argument("--image", required=True)
     sbom_statement.add_argument("--digest", required=True)
     sbom_statement.add_argument("--platform", required=True)
@@ -2186,6 +2194,15 @@ def main(argv: list[str] | None = None) -> int:
                 revision=args.revision,
                 platform=args.platform,
             )
+            # The predicate-output file is the exact bytes cosign embeds when
+            # signing via --predicate/--type: it is what the workflow passes
+            # to `cosign attest`, while --output stays the full expected
+            # in-toto statement used only to validate cosign's later verified
+            # output (never fed to cosign itself — --statement is dead on
+            # image attest).
+            args.predicate_output.write_text(
+                json.dumps(statement["predicate"], sort_keys=True) + "\n", encoding="utf-8"
+            )
             args.output.write_text(json.dumps(statement, sort_keys=True) + "\n", encoding="utf-8")
         elif args.command == "attestation-set":
             expected: dict[str, Mapping[str, object]] = {}
@@ -2206,6 +2223,9 @@ def main(argv: list[str] | None = None) -> int:
                 image=args.image,
                 digest=args.digest,
                 platform=args.platform,
+            )
+            args.predicate_output.write_text(
+                json.dumps(statement["predicate"], sort_keys=True) + "\n", encoding="utf-8"
             )
             args.output.write_text(
                 json.dumps(statement, sort_keys=True) + "\n", encoding="utf-8"

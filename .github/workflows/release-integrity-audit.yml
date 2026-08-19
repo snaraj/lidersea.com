@@ -187,12 +187,15 @@ jobs:
           for platform in "${required_platforms[@]}"; do
             predicate="${RUNNER_TEMP}/audit-${platform//\//-}.json"
             statement="${RUNNER_TEMP}/audit-${platform//\//-}.statement.json"
+            modified_predicate="${RUNNER_TEMP}/audit-${platform//\//-}.predicate.json"
             spdx="${RUNNER_TEMP}/audit-${platform//\//-}.spdx.json"
             sbom_statement="${RUNNER_TEMP}/audit-${platform//\//-}.sbom.statement.json"
+            modified_sbom="${RUNNER_TEMP}/audit-${platform//\//-}.sbom.predicate.json"
             docker buildx imagetools inspect "${image}@${IMAGE_DIGEST}" \
               --format "{{ json (index .Provenance \"${platform}\").SLSA }}" > "${predicate}"
             python3 -I -B scripts/ci/release_contract.py attestation-statement \
               --predicate "${predicate}" --output "${statement}" \
+              --predicate-output "${modified_predicate}" \
               --image "${image}" --digest "${IMAGE_DIGEST}" --source "${source}" \
               --revision "${SOURCE_SHA}" --platform "${platform}"
             expected_attestations+=(--expected "${platform}=${statement}")
@@ -200,18 +203,19 @@ jobs:
               --format "{{ json (index .SBOM \"${platform}\").SPDX }}" > "${spdx}"
             python3 -I -B scripts/ci/release_contract.py sbom-statement \
               --spdx "${spdx}" --output "${sbom_statement}" \
+              --predicate-output "${modified_sbom}" \
               --image "${image}" --digest "${IMAGE_DIGEST}" --platform "${platform}"
             expected_sboms+=(--expected "${platform}=${sbom_statement}")
           done
           verified="${RUNNER_TEMP}/audit-verified-attestations.json"
-          cosign verify-attestation --type slsaprovenance1 --output json \
+          cosign verify-attestation --type 'https://slsa.dev/provenance/v1' --output json \
             --certificate-identity "${WORKFLOW_IDENTITY}" \
             --certificate-oidc-issuer "${issuer}" \
             "${image}@${IMAGE_DIGEST}" > "${verified}"
           test "$(python3 -I -B scripts/ci/release_contract.py attestation-set \
             --verified "${verified}" "${expected_attestations[@]}")" = 2
           verified_sboms="${RUNNER_TEMP}/audit-verified-sboms.json"
-          cosign verify-attestation --type spdxjson --output json \
+          cosign verify-attestation --type 'https://spdx.dev/Document' --output json \
             --certificate-identity "${WORKFLOW_IDENTITY}" \
             --certificate-oidc-issuer "${issuer}" \
             "${image}@${IMAGE_DIGEST}" > "${verified_sboms}"

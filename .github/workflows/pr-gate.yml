@@ -123,14 +123,14 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.26.5'
+          go-version: '1.26.6'
           check-latest: false
           cache: false
       - name: Verify application toolchain
         run: |
           test "$(node --version)" = "v24.19.0"
           test "$(npm --version)" = "11.17.0"
-          test "$(go env GOVERSION)" = "go1.26.5"
+          test "$(go env GOVERSION)" = "go1.26.6"
       - name: Build and check Svelte
         working-directory: frontend
         run: |
@@ -282,7 +282,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: '1.26.5'
+          go-version: '1.26.6'
           check-latest: false
           cache: false
       - name: Compute badge metrics

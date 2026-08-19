@@ -1,3 +1,7 @@
+# Default 2 for availability; 1..2 accepted so the workload can scale down/up
+# freely as a dev environment (owner directive 2026-08-19). The maximum is the
+# namespace quota's real budget (pods: 2, limits.memory 256Mi = 2x128Mi), not
+# rigidity — raising it starts with the quota, not this schema.
 replicaCount: 2
 # This sentinel remains false until the independently verified image digest and
 # admission controls have passed the documented promotion gate.

@@ -2,7 +2,14 @@
   "$schema": "http://json-schema.org/schema#",
   "type": "object",
   "additionalProperties": false,
-  "required": ["replicaCount", "deploymentReady", "image", "service", "ingress", "resources"],
+  "required": [
+    "replicaCount",
+    "deploymentReady",
+    "image",
+    "service",
+    "ingress",
+    "resources"
+  ],
   "definitions": {
     "cpuQuantity": {
       "type": "string",
@@ -15,42 +22,83 @@
     "resourcePair": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["cpu", "memory"],
+      "required": [
+        "cpu",
+        "memory"
+      ],
       "properties": {
-        "cpu": {"$ref": "#/definitions/cpuQuantity"},
-        "memory": {"$ref": "#/definitions/memoryQuantity"}
+        "cpu": {
+          "$ref": "#/definitions/cpuQuantity"
+        },
+        "memory": {
+          "$ref": "#/definitions/memoryQuantity"
+        }
       }
     }
   },
   "properties": {
-    "replicaCount": {"type": "integer", "const": 2},
-    "deploymentReady": {"type": "boolean"},
+    "replicaCount": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 2
+    },
+    "deploymentReady": {
+      "type": "boolean"
+    },
     "image": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["repository", "tag", "digest", "pullPolicy"],
+      "required": [
+        "repository",
+        "tag",
+        "digest",
+        "pullPolicy"
+      ],
       "properties": {
-        "repository": {"type": "string", "const": "ghcr.io/snaraj/lidersea-com"},
+        "repository": {
+          "type": "string",
+          "const": "ghcr.io/snaraj/lidersea-com"
+        },
         "tag": {
           "type": "string",
           "description": "Published release tag rendered in front of the digest so the workload reference is human-legible. Legibility only: the digest is what Kubernetes resolves and what cosign and admission verify, and it is required alongside this.",
           "pattern": "^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"
         },
-        "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
-        "pullPolicy": {"type": "string", "enum": ["IfNotPresent", "Never"]}
+        "digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "pullPolicy": {
+          "type": "string",
+          "enum": [
+            "IfNotPresent",
+            "Never"
+          ]
+        }
       }
     },
     "service": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["port"],
-      "properties": {"port": {"type": "integer", "const": 8080}}
+      "required": [
+        "port"
+      ],
+      "properties": {
+        "port": {
+          "type": "integer",
+          "const": 8080
+        }
+      }
     },
     "ingress": {
       "type": "object",
       "description": "The deployment-provider binding point: identifies the only ingress peer allowed to reach the origin. The origin itself is provider-neutral and speaks standard HTTP; swapping edge providers is a values override here, never a template or code edit. Every field is required, so the peer selector can never render with fewer facts than it takes to name one connector.",
       "additionalProperties": false,
-      "required": ["peerNamespace", "peerAppName", "peerInstance"],
+      "required": [
+        "peerNamespace",
+        "peerAppName",
+        "peerInstance"
+      ],
       "properties": {
         "peerNamespace": {
           "type": "string",
@@ -73,10 +121,17 @@
     "resources": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["requests", "limits"],
+      "required": [
+        "requests",
+        "limits"
+      ],
       "properties": {
-        "requests": {"$ref": "#/definitions/resourcePair"},
-        "limits": {"$ref": "#/definitions/resourcePair"}
+        "requests": {
+          "$ref": "#/definitions/resourcePair"
+        },
+        "limits": {
+          "$ref": "#/definitions/resourcePair"
+        }
       }
     }
   }

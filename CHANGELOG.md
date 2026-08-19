@@ -51,8 +51,17 @@ Git, image, and GitHub Release tags use the exact plain `vX.Y.Z` form.
   the rollout wedged permanently — no surge of any kind fits this budget.
   Swapped to `maxSurge: 0` / `maxUnavailable: 1`: one old pod is replaced
   by one new pod at a time, 2 pods present throughout and never 3, which
-  converges within the quota. `replicaCount`'s schema `const: 2` is
-  unchanged.
+  converges within the quota.
+- Chart scale range: per the owner's same-night directive (the cluster
+  doubles as the dev environment; workloads scale within the quota rather
+  than being shaped by it), `replicaCount`'s schema pin loosened from
+  `const: 2` to `minimum: 1` / `maximum: 2` — a user-visible relaxation:
+  the chart now accepts `replicaCount: 1`, previously refused. The default
+  stays 2 for availability, and the maximum documents the namespace
+  quota's real budget, so raising it starts with the quota, not this
+  schema. Known trade at `replicaCount: 1`: with `maxUnavailable: 1` the
+  rollout floor is zero available pods — a brief outage window per
+  rollout, accepted at dev scale and absent at the default 2.
 
 ### Release
 

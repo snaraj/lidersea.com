@@ -1492,6 +1492,32 @@ def classify_release_state(
     )
 
 
+def select_release_by_tag(
+    releases: object, *, tag: str, repository: str
+) -> tuple[str, Mapping[str, object] | None]:
+    """Select one GitHub Release by tag_name from the plural list endpoint.
+
+    The by-tag REST endpoint (``GET /repos/{repo}/releases/tags/{tag}``)
+    never returns an unpublished draft Release, so ``observe_release`` falls
+    back to this plural listing -- which DOES include drafts -- on a by-tag
+    404 and matches locally. Zero matches is absent, the same classification
+    a genuine 404 already carries. More than one match is a stray-draft
+    ambiguity this function refuses to resolve silently: it fails closed so
+    a human resolves the duplicate by hand.
+    """
+    records = [_object(item, "releases list record") for item in _array(releases, "releases list")]
+    matches = [record for record in records if record.get("tag_name") == tag]
+    if not matches:
+        return "absent", None
+    if len(matches) != 1:
+        raise ContractError(
+            f"{len(matches)} GitHub Releases share tag_name {tag!r} in {repository}; "
+            f"inspect GET /repos/{repository}/releases and resolve the stray "
+            "duplicate draft by hand before retrying"
+        )
+    return "one", matches[0]
+
+
 def require_publication_state(actual: str, required: str) -> str:
     """Turn an API classification into a shell-safe exact-state assertion."""
     if required not in {"absent", "draft-empty", "draft-ready", "exact"} or actual != required:
@@ -1918,6 +1944,11 @@ def _parser() -> argparse.ArgumentParser:
     release_state.add_argument("--repository", required=True)
     release_asset = commands.add_parser("release-asset-id")
     release_asset.add_argument("--release-json", type=Path, required=True)
+    release_tag_select = commands.add_parser("release-tag-select")
+    release_tag_select.add_argument("--releases-json", type=Path, required=True)
+    release_tag_select.add_argument("--tag", required=True)
+    release_tag_select.add_argument("--repository", required=True)
+    release_tag_select.add_argument("--output", type=Path, required=True)
     manifest = commands.add_parser("release-manifest")
     manifest.add_argument("--output", type=Path, required=True)
     manifest.add_argument("--repository", required=True)
@@ -2120,6 +2151,20 @@ def main(argv: list[str] | None = None) -> int:
             print(require_publication_state(state, args.require) if args.require else state)
         elif args.command == "release-asset-id":
             print(release_asset_id(_read_object(args.release_json)))
+        elif args.command == "release-tag-select":
+            state, record = select_release_by_tag(
+                parse_json(
+                    args.releases_json.read_text(encoding="utf-8"),
+                    str(args.releases_json),
+                ),
+                tag=args.tag,
+                repository=args.repository,
+            )
+            if record is not None:
+                args.output.write_text(
+                    json.dumps(record, sort_keys=True) + "\n", encoding="utf-8"
+                )
+            print(state)
         elif args.command == "release-manifest":
             write_release_manifest(
                 args.output,

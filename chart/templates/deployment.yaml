@@ -14,9 +14,20 @@ spec:
   revisionHistoryLimit: 3
   strategy:
     type: RollingUpdate
+    # Swap-in-place, not surge: the namespace ResourceQuota (pods: 2,
+    # limits.memory: 256Mi) is sized for exactly replicaCount pods at this
+    # chart's own per-pod memory limit (128Mi x 2 = 256Mi), so a third pod
+    # of any kind is unschedulable. maxSurge: 1 proved this live during the
+    # v0.1.16 rollout: the controller scaled the OLD ReplicaSet back up to
+    # 2 first (chasing the maxUnavailable: 0 availability floor), which
+    # alone filled the quota, and the NEW ReplicaSet's pod was then
+    # quota-rejected and the rollout wedged permanently. maxSurge: 0 with
+    # maxUnavailable: 1 replaces one old pod with one new pod at a time —
+    # 2 pods present throughout, never 3 — which is the only strategy that
+    # converges within this budget.
     rollingUpdate:
-      maxSurge: 1
-      maxUnavailable: 0
+      maxSurge: 0
+      maxUnavailable: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: {{ include "lidersea-com.name" . }}

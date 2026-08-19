@@ -7,6 +7,61 @@ Git, image, and GitHub Release tags use the exact plain `vX.Y.Z` form.
 
 ## [Unreleased]
 
+## [0.1.17] - 2026-08-19
+
+### Fixed
+
+- Release publishing, draft-observation layer (#67): `observe_release` in
+  `.github/workflows/release-publisher.yml` polled only
+  `GET /repos/{repo}/releases/tags/{tag}`, but GitHub never returns an
+  unpublished draft Release on that by-tag endpoint. Run 32201373323
+  (v0.1.16) proved it live: `gh release create --draft` succeeded, the
+  by-tag poll read "absent" five times anyway, and the step denied with
+  `DENY: draft create did not reach a resumable or exact state`, leaving a
+  stranded v0.1.16 draft (image and chart artifacts were already complete
+  and verified). The resumable-draft states in this same step and in
+  `release_contract.py release-state` were correct but unreachable. Fixed
+  by keeping the by-tag GET as the first probe — it still serves the
+  published/exact state directly — and, only on its 404, adding a second
+  probe, `GET /repos/{repo}/releases?per_page=100`, that lists and selects
+  locally by `tag_name`: zero matches stays absent; exactly one match is
+  written to the same existing-release file and classified by the same
+  `release-state` call as the by-tag path (drafts then classify as
+  draft-empty/draft-ready per the existing asset logic, unchanged); more
+  than one match is a stray-duplicate-draft ambiguity the new
+  `release-tag-select` command in `scripts/ci/release_contract.py` refuses
+  to resolve silently — it DENYs, names the repository and tag, and points
+  at `GET /repos/{repo}/releases` for a human to resolve by hand.
+  `release-state`/`classify_release_state` needed no change: it already
+  modeled every draft state correctly and only ever lacked a record to
+  classify. `release-integrity-audit.yml` uses the unrelated
+  `GET /repos/{repo}/releases/latest` endpoint (which by contract never
+  returns a draft or prerelease) to audit an already-published Release, so
+  it never hits this defect and needed no change. The v0.1.16 stranded
+  draft itself is an owner decision (publish it or accept the gap); this
+  fix only prevents new releases from stranding the same way.
+- Chart rollout strategy: `chart/templates/deployment.yaml`'s
+  `maxSurge: 1` / `maxUnavailable: 0` cannot roll within the
+  `lidersea-com` namespace's own ResourceQuota (#68). Cluster-proven during
+  the same v0.1.16 deploy: applying the chart at `replicaCount: 2` made the
+  controller scale the OLD ReplicaSet back up to 2 first, chasing the
+  `maxUnavailable: 0` availability floor; that alone filled the quota
+  (`pods: 2`, `limits.memory: 256Mi` against this chart's own 128Mi
+  per-pod memory limit), so the NEW ReplicaSet's pod was quota-rejected and
+  the rollout wedged permanently — no surge of any kind fits this budget.
+  Swapped to `maxSurge: 0` / `maxUnavailable: 1`: one old pod is replaced
+  by one new pod at a time, 2 pods present throughout and never 3, which
+  converges within the quota. `replicaCount`'s schema `const: 2` is
+  unchanged.
+
+### Release
+
+- VERSION, chart `version`/`appVersion`, chart `values.yaml` `image.tag`,
+  this CHANGELOG entry, and `scripts/ci/test_release_contract.py`'s
+  `GovernanceReceiptTests` live-snapshot pin all advance together per the
+  release-lock closure (five locations, one commit) — the exact-patch
+  discipline requirement 10 enforces.
+
 ## [0.1.16] - 2026-08-18
 
 ### Security

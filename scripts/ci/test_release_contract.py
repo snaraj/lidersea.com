@@ -802,7 +802,7 @@ class GovernanceReceiptTests(unittest.TestCase):
             path: (ROOT / path).read_text(encoding="utf-8")
             for path in ("VERSION", "chart/Chart.yaml", "chart/values.yaml", "CHANGELOG.md")
         }
-        self.assertEqual(RC.validate_snapshot(actual).tag, "v0.1.16")
+        self.assertEqual(RC.validate_snapshot(actual).tag, "v0.1.17")
 
 
 class MainRunBindingTests(unittest.TestCase):
@@ -3069,6 +3069,30 @@ class PublicationShellTransactionTests(unittest.TestCase):
         self.assertIn("release-state", audit)
         self.assertIn("--require exact", audit)
 
+    def test_release_tag_select_classifies_absent_one_and_ambiguous_matches(self):
+        record, _raw, _asset = release_record("draft-empty")
+        foreign_tag = copy.deepcopy(record)
+        foreign_tag["tag_name"] = "v9.9.9"
+        self.assertEqual(
+            RC.select_release_by_tag(
+                [foreign_tag], tag=self.TAG, repository="owner/site"
+            ),
+            ("absent", None),
+        )
+        self.assertEqual(
+            RC.select_release_by_tag(
+                [foreign_tag, record], tag=self.TAG, repository="owner/site"
+            ),
+            ("one", record),
+        )
+        with self.assertRaises(RC.ContractError) as raised:
+            RC.select_release_by_tag(
+                [record, copy.deepcopy(record)], tag=self.TAG, repository="owner/site"
+            )
+        self.assertIn(f"share tag_name {self.TAG!r}", str(raised.exception))
+        self.assertIn("owner/site", str(raised.exception))
+        self.assertIn("GET /repos/owner/site/releases", str(raised.exception))
+
     @staticmethod
     def workflow_run_block(path: Path, step_name: str) -> str:
         lines = path.read_text(encoding="utf-8").splitlines()
@@ -3257,6 +3281,7 @@ gh() {
                 "upload-race": "draft-empty",
                 "edit-race": "draft-ready",
                 "foreign": "foreign",
+                "duplicate-draft": "absent",
             }[mode]
             (runner / "state").write_text(initial + "\n", encoding="utf-8")
             calls = runner / "calls"
@@ -3288,7 +3313,27 @@ curl() {
   fi
   local state
   state="$(tr -d '\r\n' < "${MOCK_STATE}")"
-  if [ "${state}" = absent ]; then printf '{}\n' > "${output}"; printf '404'; return 0; fi
+  # The plural list endpoint is queried only after a by-tag 404, and it DOES
+  # surface drafts (the real GitHub behavior the by-tag branch below cannot
+  # model) so the fallback this mock exists to prove is genuinely exercised.
+  if [[ "${url}" == *"/releases?per_page=100" ]]; then
+    if [ "${MOCK_MODE}" = duplicate-draft ]; then
+      printf '[%s,%s]\n' \
+        "$(cat "${MOCK_FIXTURES}/draft-empty.json")" \
+        "$(cat "${MOCK_FIXTURES}/draft-ready.json")" > "${output}"
+      printf '200'
+      return 0
+    fi
+    if [ "${state}" = absent ]; then printf '[]\n' > "${output}"; printf '200'; return 0; fi
+    printf '[%s]\n' "$(cat "${MOCK_FIXTURES}/${state}.json")" > "${output}"
+    printf '200'
+    return 0
+  fi
+  # Only a published/exact Release is ever visible on the by-tag endpoint;
+  # an absent or still-draft Release 404s there, same as real GitHub.
+  if [ "${state}" = absent ] || [ "${state}" = draft-empty ] || [ "${state}" = draft-ready ]; then
+    printf '{}\n' > "${output}"; printf '404'; return 0
+  fi
   cp "${MOCK_FIXTURES}/${state}.json" "${output}"
   printf '200'
 }
@@ -3370,6 +3415,19 @@ gh() {
         self.assertIn(
             "DENY: GitHub Release must contain exactly one manifest asset", foreign.stderr
         )
+
+        # Proves the by-tag-404 fallback for real: the by-tag probe 404s (as
+        # GitHub genuinely does for an unpublished draft), the plural list
+        # probe surfaces two Releases sharing one tag_name, and the real
+        # (unmocked) release-tag-select command must fail closed rather than
+        # pick one silently.
+        duplicate, calls = self.run_release_transaction("duplicate-draft")
+        self.assertNotEqual(duplicate.returncode, 0)
+        self.assertEqual(calls, [])
+        self.assertIn(
+            f"DENY: 2 GitHub Releases share tag_name {self.TAG!r}", duplicate.stderr
+        )
+        self.assertIn("GET /repos/", duplicate.stderr)
 
     def test_terminal_exact_state_assertion_kills_inversion_mutant(self):
         block = self.workflow_run_block(
@@ -3535,6 +3593,7 @@ class WorkflowStructureTests(unittest.TestCase):
             "release-manifest",
             "manifest-record",
             "release-asset-id",
+            "release-tag-select",
             "gh release create \"${tag}\" --verify-tag --draft",
             "gh release upload \"${tag}\" \"${manifest}\"",
             "gh release edit \"${tag}\" --draft=false",
@@ -3542,6 +3601,7 @@ class WorkflowStructureTests(unittest.TestCase):
             "draft-ready",
             "observe_release | grep -Fx exact",
             "/releases/tags/${tag}",
+            "/releases?per_page=100",
             "X-GitHub-Api-Version: 2026-03-10",
             "for attempt in 1 2 3 4 5",
             "Terminally rebind the REST tag ref and annotated object",
@@ -3949,10 +4009,12 @@ class WorkflowStructureTests(unittest.TestCase):
             ("publisher", "release-manifest"),
             ("publisher", "manifest-record"),
             ("publisher", "release-asset-id"),
+            ("publisher", "release-tag-select"),
             ("publisher", "gh release upload \"${tag}\" \"${manifest}\""),
             ("publisher", "gh release edit \"${tag}\" --draft=false"),
             ("publisher", "observe_release | grep -Fx exact"),
             ("publisher", "/releases/tags/${tag}"),
+            ("publisher", "/releases?per_page=100"),
             ("publisher", "X-GitHub-Api-Version: 2026-03-10"),
             ("publisher", "for attempt in 1 2 3 4 5"),
             ("publisher", "Terminally rebind the REST tag ref and annotated object"),

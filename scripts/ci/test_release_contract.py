@@ -802,7 +802,7 @@ class GovernanceReceiptTests(unittest.TestCase):
             path: (ROOT / path).read_text(encoding="utf-8")
             for path in ("VERSION", "chart/Chart.yaml", "chart/values.yaml", "CHANGELOG.md")
         }
-        self.assertEqual(RC.validate_snapshot(actual).tag, "v0.1.17")
+        self.assertEqual(RC.validate_snapshot(actual).tag, "v0.1.19")
 
 
 class MainRunBindingTests(unittest.TestCase):
@@ -2506,6 +2506,182 @@ class SbomAttestationTests(unittest.TestCase):
                 self.assertEqual(
                     RC.main(["sbom-platforms", "--json", str(sbom)]), 1
                 )
+
+
+class AttestationStatementCLITests(unittest.TestCase):
+    """CLI-level oracles for the `attestation-statement` subcommand.
+
+    AttestationSetTests above builds its expectations with
+    RC.build_attestation_statement and then re-wraps those SAME objects as
+    the "verified" cosign records, so `_type` is only ever compared against
+    itself and no input can turn that comparison red. These tests instead
+    drive the real subcommand end to end through RC.main and pin the
+    on-disk contract against literals independent of the module under
+    test, so a reverted INTOTO_STATEMENT_TYPE, a --predicate-output that
+    writes the wrong object, an optional --predicate-output, or a deleted
+    write each turn a specific test here red.
+    """
+
+    IMAGE = "ghcr.io/owner/site"
+    DIGEST = "sha256:" + "f" * 64
+    SOURCE = "https://github.com/owner/site"
+    REVISION = "c" * 40
+    PLATFORM = "linux/amd64"
+
+    def invoke(self, temporary: str, *, include_predicate_output: bool = True) -> tuple[int, Path, Path]:
+        predicate_path = Path(temporary) / "predicate.json"
+        predicate_path.write_text(
+            json.dumps(embedded_predicate(self.SOURCE, self.REVISION, self.PLATFORM)),
+            encoding="utf-8",
+        )
+        output_path = Path(temporary) / "statement.json"
+        predicate_output_path = Path(temporary) / "modified-predicate.json"
+        arguments = [
+            "attestation-statement",
+            "--predicate", str(predicate_path),
+            "--output", str(output_path),
+        ]
+        if include_predicate_output:
+            arguments += ["--predicate-output", str(predicate_output_path)]
+        arguments += [
+            "--image", self.IMAGE,
+            "--digest", self.DIGEST,
+            "--source", self.SOURCE,
+            "--revision", self.REVISION,
+            "--platform", self.PLATFORM,
+        ]
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            code = RC.main(arguments)
+        return code, output_path, predicate_output_path
+
+    def test_statement_type_literal_is_the_pinned_in_toto_v01_uri(self):
+        # Hardcoded here rather than read from RC.INTOTO_STATEMENT_TYPE: this
+        # is the exact literal release_contract.py carried before the 0.1.16
+        # fix (CHANGELOG [0.1.16]) -- a mutant that reverts the module
+        # constant back to it must turn THIS literal comparison red.
+        # Comparing against the module's own constant would be
+        # self-referential and vacuous, exactly AttestationSetTests' gap.
+        with tempfile.TemporaryDirectory() as temporary:
+            code, output_path, _ = self.invoke(temporary)
+            self.assertEqual(code, 0)
+            statement = json.loads(output_path.read_text(encoding="utf-8"))
+        self.assertEqual(statement["_type"], "https://in-toto.io/Statement/v0.1")
+
+    def test_predicate_output_file_is_exactly_and_only_the_statement_predicate(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            code, output_path, predicate_output_path = self.invoke(temporary)
+            self.assertEqual(code, 0)
+            statement = json.loads(output_path.read_text(encoding="utf-8"))
+            modified_predicate = json.loads(predicate_output_path.read_text(encoding="utf-8"))
+        # Exactly the predicate member -- kills a mutant that writes some
+        # other object to --predicate-output.
+        self.assertEqual(modified_predicate, statement["predicate"])
+        # A strict subset of --output's content, never the whole statement:
+        # a mutant that writes the whole statement to --predicate-output
+        # would fail the equality above, and would also carry every one of
+        # the statement's own envelope keys, which the real predicate
+        # object never does.
+        self.assertNotEqual(modified_predicate, statement)
+        for envelope_key in statement:
+            self.assertNotIn(envelope_key, modified_predicate)
+
+    def test_missing_predicate_output_flag_exits_two(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaises(SystemExit) as failure:
+                self.invoke(temporary, include_predicate_output=False)
+            self.assertEqual(failure.exception.code, 2)
+
+    def test_predicate_output_file_exists_and_is_non_empty_after_success(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            code, _, predicate_output_path = self.invoke(temporary)
+            self.assertEqual(code, 0)
+            self.assertTrue(predicate_output_path.exists())
+            self.assertGreater(predicate_output_path.stat().st_size, 0)
+
+
+class SbomStatementCLITests(unittest.TestCase):
+    """CLI-level oracles for the `sbom-statement` subcommand.
+
+    SbomAttestationTests above builds its expectations with
+    RC.build_sbom_statement and then re-wraps those SAME objects as the
+    "verified" cosign records, so `_type` and `predicateType` are only ever
+    compared against themselves and no input can turn either comparison
+    red. These tests instead drive the real subcommand end to end through
+    RC.main and pin the on-disk contract against literals independent of
+    the module under test, mirroring AttestationStatementCLITests above for
+    the SPDX path.
+    """
+
+    IMAGE = "ghcr.io/owner/site"
+    DIGEST = "sha256:" + "f" * 64
+    PLATFORM = "linux/amd64"
+
+    def invoke(self, temporary: str, *, include_predicate_output: bool = True) -> tuple[int, Path, Path]:
+        spdx_path = Path(temporary) / "sbom.json"
+        spdx_path.write_text(json.dumps(spdx_document("amd64")), encoding="utf-8")
+        output_path = Path(temporary) / "statement.json"
+        predicate_output_path = Path(temporary) / "modified-predicate.json"
+        arguments = [
+            "sbom-statement",
+            "--spdx", str(spdx_path),
+            "--output", str(output_path),
+        ]
+        if include_predicate_output:
+            arguments += ["--predicate-output", str(predicate_output_path)]
+        arguments += [
+            "--image", self.IMAGE,
+            "--digest", self.DIGEST,
+            "--platform", self.PLATFORM,
+        ]
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            code = RC.main(arguments)
+        return code, output_path, predicate_output_path
+
+    def test_statement_type_literal_is_the_pinned_in_toto_v01_uri(self):
+        # Hardcoded rather than read from RC.INTOTO_STATEMENT_TYPE, for the
+        # same reason as AttestationStatementCLITests: SbomAttestationTests
+        # compares _type only against the module's own constant, so a
+        # mutant that changes the constant survives it undetected.
+        with tempfile.TemporaryDirectory() as temporary:
+            code, output_path, _ = self.invoke(temporary)
+            self.assertEqual(code, 0)
+            statement = json.loads(output_path.read_text(encoding="utf-8"))
+        self.assertEqual(statement["_type"], "https://in-toto.io/Statement/v0.1")
+
+    def test_predicate_type_literal_is_the_pinned_spdx_document_uri(self):
+        # Hardcoded rather than read from RC.SPDX_PREDICATE_TYPE: the SPDX
+        # path's own analogous constant, with the same self-referential gap
+        # in SbomAttestationTests -- a mutant that changes it must turn
+        # THIS comparison red, not one derived from the same constant.
+        with tempfile.TemporaryDirectory() as temporary:
+            code, output_path, _ = self.invoke(temporary)
+            self.assertEqual(code, 0)
+            statement = json.loads(output_path.read_text(encoding="utf-8"))
+        self.assertEqual(statement["predicateType"], "https://spdx.dev/Document")
+
+    def test_predicate_output_file_is_exactly_and_only_the_statement_predicate(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            code, output_path, predicate_output_path = self.invoke(temporary)
+            self.assertEqual(code, 0)
+            statement = json.loads(output_path.read_text(encoding="utf-8"))
+            modified_predicate = json.loads(predicate_output_path.read_text(encoding="utf-8"))
+        self.assertEqual(modified_predicate, statement["predicate"])
+        self.assertNotEqual(modified_predicate, statement)
+        for envelope_key in statement:
+            self.assertNotIn(envelope_key, modified_predicate)
+
+    def test_missing_predicate_output_flag_exits_two(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaises(SystemExit) as failure:
+                self.invoke(temporary, include_predicate_output=False)
+            self.assertEqual(failure.exception.code, 2)
+
+    def test_predicate_output_file_exists_and_is_non_empty_after_success(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            code, _, predicate_output_path = self.invoke(temporary)
+            self.assertEqual(code, 0)
+            self.assertTrue(predicate_output_path.exists())
+            self.assertGreater(predicate_output_path.stat().st_size, 0)
 
 
 class GitTransitionTests(unittest.TestCase):

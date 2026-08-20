@@ -20,6 +20,34 @@ const digestHexLen = 64
 // misconfiguration, not a capacity plan.
 const maxConcurrentCeiling = 256
 
+// bytesRangePrefix is the only range unit net/http honours. The admission
+// cap matches it exactly the way http.ServeContent's own parser does, so the
+// cap and the delegate can never disagree about what is a byte-range set.
+const bytesRangePrefix = "bytes="
+
+// maxRangeSetSize caps how many ranges one request may name, refused at
+// admission before a concurrency slot or a file descriptor is taken. A
+// player seeking video asks for one range; the multipart contract test asks
+// for two; nothing legitimate asks for more, so four is headroom rather than
+// a limit real traffic meets.
+//
+// The cap exists because multipart/byteranges answers EVERY named range with
+// its own boundary line, Content-Type, and Content-Range — about 129 bytes
+// of generated framing for the handful of bytes that name the range — so the
+// response grows with the range count while the request barely does.
+// Measured against this package's own delegate over the 4 KiB video fixture:
+// 1024 one-byte ranges answer an 8,025-byte Range header with 131,990
+// response bytes (16x), and every one of those bytes is written while
+// holding a concurrency slot on small single-board hardware. Capping the SET
+// SIZE removes the multiplier and leaves Range algebra entirely to net/http.
+const maxRangeSetSize = 4
+
+// rangeSetTooLargeMessage is the 416 body for a refused oversized set. It is
+// deliberately distinct from net/http's own Range errors so the responsible
+// layer is legible in a response — and assertable in a test — without
+// pinning the delegate's wording.
+const rangeSetTooLargeMessage = "range set too large"
+
 // contentTypes is the fail-closed extension allowlist. It exists because the
 // production container is distroless: there is no /etc/mime.types, and Go's
 // built-in table lacks the video types, so mime.TypeByExtension would serve

@@ -7,6 +7,47 @@ Git, image, and GitHub Release tags use the exact plain `vX.Y.Z` form.
 
 ## [Unreleased]
 
+## [0.1.18] - 2026-08-20
+
+### Security
+
+- Media pipeline, multipart amplification (#28): the pipeline delegates Range
+  handling to `http.ServeContent`, which honours a multi-range request without
+  any cap on how many ranges it names. Every named range is answered with its
+  own boundary line, `Content-Type`, and `Content-Range` — about 129 bytes of
+  generated framing for the handful of bytes that name it — so the response
+  grows with the range count while the request barely does. Measured against
+  the delegate over this repository's 4 KiB video fixture: 1024 one-byte
+  ranges answer an 8,025-byte `Range` header with 131,990 response bytes
+  (16x), and the origin writes all of them while holding one of its
+  `MEDIA_MAX_CONCURRENT` slots on single-board hardware.
+  `internal/media` now caps the SET SIZE at `maxRangeSetSize` (4 — players
+  seek with one range, the multipart contract test uses two) and answers
+  `416` with a constant-size body for anything larger.
+- The refusal is positioned deliberately: it runs after the URL class is
+  parsed and BEFORE both the concurrency-slot acquire and the file open, so a
+  hostile set costs one short response instead of a slot held for a multipart
+  write. `TestRangeSetCapPrecedesSlotAndFileWork` proves the ordering by
+  making each resource unavailable in turn — under a saturated semaphore the
+  answer must be the cap's `416` and not `503`, and against an empty media
+  root it must be `416` and not `404` — with a control request in each case
+  showing the request really does reach that stage.
+- Range algebra is untouched (requirement 9, no `net/http` fork or
+  vendoring): the cap COUNTS comma-separated members of a `bytes=` set and
+  decides nothing else. A header that is not a `bytes=` set — a foreign unit,
+  a different capitalisation, leading whitespace — is not counted at all and
+  still reaches `http.ServeContent`, which rejects every such spelling itself,
+  so no set the delegate would expand escapes the count. The refusal body is
+  deliberately distinct from the delegate's own Range errors, and the tests
+  assert which layer answered rather than status alone. One deliberate
+  narrowing: `net/http` skips empty members, so `bytes=0-9,,,,,` would have
+  served as a single range and is now refused — counting cannot be made to
+  under-count by padding a header with separators, and no player writes that.
+- Existing behavior is unchanged and pinned byte-for-byte:
+  `TestRangeBehaviorMatrix`, `TestMultipartRangeResponse` (two ranges, still
+  served), `TestConditionalRequestsUseTheDigest`, and
+  `TestBoundedConcurrencySheds` are untouched.
+
 ## [0.1.17] - 2026-08-19
 
 ### Fixed

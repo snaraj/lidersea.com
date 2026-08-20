@@ -15,7 +15,16 @@
 // decision the asset path made ("net/http's bounded reader, not a second ad
 // hoc implementation") — while this handler owns what net/http cannot know:
 // the digest identity, the immutable cache class, the media type allowlist,
-// and the concurrency bound. The Range matrix is pinned by explicit tests.
+// the concurrency bound, and how many ranges one request may name.
+//
+// That last one is an admission cap (maxRangeSetSize), refused with 416
+// BEFORE a concurrency slot or a file descriptor is taken: multipart
+// answers emit per-part framing for every range named, so an oversized set
+// is amplification the delegate has no way to decline. The cap counts set
+// members and nothing else — which bytes a range covers, whether it
+// overlaps, and whether it is satisfiable all stay http.ServeContent's, so
+// nothing this package does can widen what is served. The Range matrix is
+// pinned by explicit tests.
 package media
 
 import (
@@ -88,6 +97,17 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Range-set admission, ahead of every slot and every file descriptor: a
+	// request that names more ranges than any player ever seeks is refused
+	// here, so amplification costs the origin one short 416 rather than a
+	// concurrency slot held for a multipart write. Ordering is the whole
+	// point — a cap after the acquire would still let a hostile client
+	// occupy the semaphore — and it is pinned by its own test.
+	if rangeSetTooLarge(r.Header.Get("Range")) {
+		http.Error(w, rangeSetTooLargeMessage, http.StatusRequestedRangeNotSatisfiable)
+		return
+	}
+
 	// Bounded concurrency: acquire a slot for the whole response or say so
 	// honestly. A saturated origin answering 503 with Retry-After keeps video
 	// players backing off instead of piling onto small hardware.
@@ -157,6 +177,21 @@ func validDigest(digest string) bool {
 		}
 	}
 	return true
+}
+
+// rangeSetTooLarge reports whether a Range header names more members than
+// maxRangeSetSize. It counts comma-separated members of a bytes= set and
+// judges nothing else: an absent header, a non-bytes unit, or any other
+// spelling returns false and reaches http.ServeContent exactly as before,
+// which keeps every Range decision except set size in the delegate. Counting
+// is deliberately cheaper than parsing — the cap only ever refuses more than
+// stdlib would, never fewer, so an over-count cannot widen what is served.
+func rangeSetTooLarge(header string) bool {
+	set, isBytes := strings.CutPrefix(header, bytesRangePrefix)
+	if !isBytes {
+		return false
+	}
+	return strings.Count(set, ",")+1 > maxRangeSetSize
 }
 
 // validName accepts one path segment of safe filename bytes that does not

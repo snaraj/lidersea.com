@@ -7,6 +7,51 @@ Git, image, and GitHub Release tags use the exact plain `vX.Y.Z` form.
 
 ## [Unreleased]
 
+## [0.1.20] - 2026-08-20
+
+### Added
+
+- Attestation statement flow, python-side test oracles (#66): `AttestationSetTests`
+  and `SbomAttestationTests` in `scripts/ci/test_release_contract.py` build
+  their "expected" statements with `RC.build_attestation_statement` /
+  `RC.build_sbom_statement` and then re-wrap those SAME objects as the
+  "verified" cosign records, so `_type` and the `--predicate-output`
+  contract were only ever compared against themselves — no input could turn
+  either comparison red. Added `AttestationStatementCLITests` and
+  `SbomStatementCLITests`, nine tests total driving the real
+  `attestation-statement` and `sbom-statement` subcommands end to end
+  through `RC.main` against real temp files, independent of the module's
+  own constants: each pins its statement's `_type` as the hardcoded literal
+  `https://in-toto.io/Statement/v0.1` (never read from
+  `RC.INTOTO_STATEMENT_TYPE`); the SBOM class additionally pins
+  `predicateType` as the hardcoded literal `https://spdx.dev/Document`
+  (never read from `RC.SPDX_PREDICATE_TYPE`); both assert
+  `--predicate-output`'s content equals `statement["predicate"]` exactly,
+  is never equal to the whole statement, and carries none of the
+  statement's own envelope keys; both assert the subcommand exits 2 when
+  `--predicate-output` is omitted; both assert the file exists and is
+  non-empty after a successful run. Mutation-proved in a scratch copy
+  (full kill matrix in the PR body): reverting `INTOTO_STATEMENT_TYPE` to the broken
+  `https://in-toto.io/Statement/v1` turns only the two type-literal tests
+  red; reverting `SPDX_PREDICATE_TYPE` turns only the SBOM predicate-type
+  test red; swapping either subcommand's `--predicate-output` write to the
+  whole statement turns only that subcommand's byte-relationship test red;
+  `required=False` on either `--predicate-output` turns only that
+  subcommand's flag test red; deleting either write turns that
+  subcommand's byte-relationship and exists-non-empty tests red.
+  `AttestationSetTests` and `SbomAttestationTests` stayed green through
+  every mutation, confirming the self-referential blindness the issue
+  described. No production code changed; `release_contract.py`'s CLI
+  behavior is unchanged.
+
+### Release
+
+- VERSION, chart `version`/`appVersion`, chart `values.yaml` `image.tag`,
+  this CHANGELOG entry, and `scripts/ci/test_release_contract.py`'s
+  `GovernanceReceiptTests` live-snapshot pin all advance together per the
+  release-lock closure (five locations, one commit) — the exact-patch
+  discipline requirement 10 enforces.
+
 ## [0.1.19] - 2026-08-20
 
 ### Added

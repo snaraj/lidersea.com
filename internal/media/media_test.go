@@ -1,8 +1,10 @@
 // Package media tests pin the pipeline's whole contract: fail-closed
 // configuration parsing, the digest-immutable URL class's strict shape, the
 // explicit Range behavior matrix (start/middle/suffix/open/multipart/
-// malformed/unsatisfiable), conditional requests over the digest ETag,
-// bounded concurrency, and the opaque-404 policy for everything unservable.
+// malformed/unsatisfiable), the range-set admission cap and its position
+// ahead of both the concurrency slot and the file open, conditional requests
+// over the digest ETag, bounded concurrency, and the opaque-404 policy for
+// everything unservable.
 package media
 
 import (
@@ -286,6 +288,274 @@ func TestMultipartRangeResponse(t *testing.T) {
 			t.Errorf("multipart body lacks %q", part)
 		}
 	}
+}
+
+// oneByteRangeSet builds a Range header naming n distinct one-byte ranges —
+// the amplification shape, because it is the cheapest request per range a
+// client can write.
+func oneByteRangeSet(n int) string {
+	specs := make([]string, n)
+	for i := range specs {
+		specs[i] = fmt.Sprintf("%d-%d", i, i)
+	}
+	return "bytes=" + strings.Join(specs, ",")
+}
+
+// refusedByTheCap reports whether THIS package answered 416, as opposed to
+// http.ServeContent's own Range refusal. The two are deliberately different
+// bodies, so every row below states which layer must have decided — a cap
+// that quietly swallowed the delegate's cases would pass a status-only
+// assertion while destroying the Range contract.
+func refusedByTheCap(response *httptest.ResponseRecorder) bool {
+	return strings.TrimSpace(response.Body.String()) == rangeSetTooLargeMessage
+}
+
+// TestRangeSetSizeIsCappedAtAdmission is the admission contract for the
+// number of ranges one request may name. Sets at or under maxRangeSetSize
+// serve exactly as before; sets over it are refused 416 by this package;
+// and anything that is not a bytes= set — a foreign unit, a different
+// capitalisation, leading whitespace — is not the cap's business at all and
+// must still be decided by http.ServeContent, which is what keeps the Range
+// algebra in the audited delegate (requirement 9, no fork or vendoring).
+//
+// The delegate rejects every non-`bytes=` spelling outright, so matching the
+// prefix exactly the way it does leaves no set the delegate would expand but
+// the cap would not have counted.
+func TestRangeSetSizeIsCappedAtAdmission(t *testing.T) {
+	t.Parallel()
+	video := testsupport.MediaFixtures()[1]
+	size := len(video.Bytes)
+
+	tests := []struct {
+		name           string
+		rangeHeader    string // "" sends no Range header at all
+		wantStatus     int
+		wantMultipart  bool
+		wantCapRefusal bool
+		wantParts      []string // Content-Range lines every multipart part must carry
+	}{
+		{
+			name:       "no range header is untouched",
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:        "one range is untouched",
+			rangeHeader: "bytes=0-9",
+			wantStatus:  http.StatusPartialContent,
+		},
+		{
+			name:          "two ranges keep the multipart contract",
+			rangeHeader:   "bytes=0-9,100-109",
+			wantStatus:    http.StatusPartialContent,
+			wantMultipart: true,
+			wantParts: []string{
+				fmt.Sprintf("Content-Range: bytes 0-9/%d", size),
+				fmt.Sprintf("Content-Range: bytes 100-109/%d", size),
+			},
+		},
+		{
+			name:          "exactly the cap is served",
+			rangeHeader:   "bytes=0-9,100-109,200-209,300-309",
+			wantStatus:    http.StatusPartialContent,
+			wantMultipart: true,
+			wantParts: []string{
+				fmt.Sprintf("Content-Range: bytes 0-9/%d", size),
+				fmt.Sprintf("Content-Range: bytes 100-109/%d", size),
+				fmt.Sprintf("Content-Range: bytes 200-209/%d", size),
+				fmt.Sprintf("Content-Range: bytes 300-309/%d", size),
+			},
+		},
+		{
+			name:           "one over the cap is refused",
+			rangeHeader:    "bytes=0-9,100-109,200-209,300-309,400-409",
+			wantStatus:     http.StatusRequestedRangeNotSatisfiable,
+			wantCapRefusal: true,
+		},
+		{
+			name:           "far over the cap is refused",
+			rangeHeader:    oneByteRangeSet(64),
+			wantStatus:     http.StatusRequestedRangeNotSatisfiable,
+			wantCapRefusal: true,
+		},
+		{
+			// net/http skips empty members, so this set would otherwise serve
+			// as a single range. The cap counts members instead of parsing
+			// them, which is deliberately the stricter reading: padding a
+			// header with separators is not something a player does, and
+			// counting cannot be made to under-count by a spelling trick.
+			name:           "separator padding counts toward the cap",
+			rangeHeader:    "bytes=0-9,,,,,",
+			wantStatus:     http.StatusRequestedRangeNotSatisfiable,
+			wantCapRefusal: true,
+		},
+		{
+			name:        "a malformed bytes set under the cap still reaches the delegate",
+			rangeHeader: "bytes=abc,def",
+			wantStatus:  http.StatusRequestedRangeNotSatisfiable,
+		},
+		{
+			name:        "a foreign unit is never counted, however many members",
+			rangeHeader: "seconds=" + strings.TrimPrefix(oneByteRangeSet(32), "bytes="),
+			wantStatus:  http.StatusRequestedRangeNotSatisfiable,
+		},
+		{
+			name:        "a mis-capitalised unit is never counted",
+			rangeHeader: "Bytes=" + strings.TrimPrefix(oneByteRangeSet(32), "bytes="),
+			wantStatus:  http.StatusRequestedRangeNotSatisfiable,
+		},
+		{
+			name:        "a space-prefixed unit is never counted",
+			rangeHeader: " " + oneByteRangeSet(32),
+			wantStatus:  http.StatusRequestedRangeNotSatisfiable,
+		},
+	}
+	// One slot per parallel subtest, for the same reason as the Range matrix:
+	// admitted rows hold a slot for their whole response, so a smaller
+	// semaphore would shed legitimate rows nondeterministically. Shedding
+	// itself is pinned by TestBoundedConcurrencySheds, and the cap's position
+	// ahead of the slot by TestRangeSetCapPrecedesSlotAndFileWork.
+	h, _ := testHandler(t, len(tests))
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			var header map[string]string
+			if test.rangeHeader != "" {
+				header = map[string]string{"Range": test.rangeHeader}
+			}
+			response := get(t, h, http.MethodGet, video.URL(), header)
+			if response.Code != test.wantStatus {
+				t.Fatalf("Range %q status = %d, want %d", test.rangeHeader, response.Code, test.wantStatus)
+			}
+			if got := refusedByTheCap(response); got != test.wantCapRefusal {
+				t.Errorf("Range %q refused by the cap = %v, want %v (body %q)",
+					test.rangeHeader, got, test.wantCapRefusal, strings.TrimSpace(response.Body.String()))
+			}
+			if got := strings.HasPrefix(response.Header().Get("Content-Type"), "multipart/byteranges"); got != test.wantMultipart {
+				t.Errorf("Range %q multipart = %v, want %v (Content-Type %q)",
+					test.rangeHeader, got, test.wantMultipart, response.Header().Get("Content-Type"))
+			}
+			for _, part := range test.wantParts {
+				if !strings.Contains(response.Body.String(), part) {
+					t.Errorf("Range %q multipart body lacks %q", test.rangeHeader, part)
+				}
+			}
+			if test.wantCapRefusal {
+				// A refusal happens before the asset's identity is looked up,
+				// so none of the serving headers may appear: they would prove
+				// the file was opened and stat'ed for a request that is never
+				// answered with content.
+				for _, name := range []string{"ETag", "Cache-Control", "Content-Range"} {
+					if got := response.Header().Get(name); got != "" {
+						t.Errorf("Range %q refusal carries %s = %q; the refusal precedes the asset", test.rangeHeader, name, got)
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestOversizedRangeSetIsNotAnAmplifier pins the property the cap exists
+// for: a refused set answers with fewer bytes than the Range header that
+// asked for it, and the refusal's size does not grow with the number of
+// ranges named, so no set size turns this origin into an amplifier.
+func TestOversizedRangeSetIsNotAnAmplifier(t *testing.T) {
+	t.Parallel()
+	h, fixtures := testHandler(t, 4)
+	video := fixtures[1]
+
+	small := oneByteRangeSet(maxRangeSetSize + 1)
+	large := oneByteRangeSet(1024)
+	smallResponse := get(t, h, http.MethodGet, video.URL(), map[string]string{"Range": small})
+	largeResponse := get(t, h, http.MethodGet, video.URL(), map[string]string{"Range": large})
+
+	for _, refusal := range []*httptest.ResponseRecorder{smallResponse, largeResponse} {
+		if refusal.Code != http.StatusRequestedRangeNotSatisfiable || !refusedByTheCap(refusal) {
+			t.Fatalf("oversized set = %d %q, want a 416 refused by the cap",
+				refusal.Code, strings.TrimSpace(refusal.Body.String()))
+		}
+	}
+	if smallResponse.Body.Len() != largeResponse.Body.Len() {
+		t.Errorf("refusal body grew with the range count: %d bytes for %d ranges, %d for 1024",
+			smallResponse.Body.Len(), maxRangeSetSize+1, largeResponse.Body.Len())
+	}
+	if largeResponse.Body.Len() >= len(large) {
+		t.Errorf("refusal wrote %d bytes for a %d-byte Range header; a refusal must never exceed the request",
+			largeResponse.Body.Len(), len(large))
+	}
+}
+
+// TestRangeSetCapPrecedesSlotAndFileWork is the ordering proof. The cap is
+// only worth having if it runs BEFORE the two resources a hostile request
+// wants to consume — the concurrency slot and the open file — so each is
+// checked by making that resource unavailable and requiring the 416 anyway:
+// under a full semaphore the refusal must be 416 and not the 503 a request
+// reaching the acquire would get, and against an empty media root it must be
+// 416 and not the 404 a request reaching the open would get.
+func TestRangeSetCapPrecedesSlotAndFileWork(t *testing.T) {
+	t.Parallel()
+	h, fixtures := testHandler(t, 2)
+	video := fixtures[1]
+	oversized := map[string]string{"Range": oneByteRangeSet(maxRangeSetSize + 1)}
+
+	h.slots <- struct{}{}
+	h.slots <- struct{}{}
+
+	t.Run("refused ahead of the slot acquire", func(t *testing.T) {
+		response := get(t, h, http.MethodGet, video.URL(), oversized)
+		if response.Code != http.StatusRequestedRangeNotSatisfiable || !refusedByTheCap(response) {
+			t.Fatalf("saturated oversized set = %d %q, want the cap's 416 rather than 503",
+				response.Code, strings.TrimSpace(response.Body.String()))
+		}
+		if len(h.slots) != 2 {
+			t.Errorf("%d slots held after a refusal; a refused request must consume none", len(h.slots))
+		}
+	})
+
+	t.Run("shedding is unchanged for admissible requests", func(t *testing.T) {
+		response := get(t, h, http.MethodGet, video.URL(), map[string]string{"Range": "bytes=0-9"})
+		if response.Code != http.StatusServiceUnavailable {
+			t.Fatalf("saturated single range = %d, want 503", response.Code)
+		}
+		if response.Header().Get("Retry-After") != "1" || response.Header().Get("Cache-Control") != "no-store" {
+			t.Errorf("saturated headers = Retry-After %q, Cache-Control %q",
+				response.Header().Get("Retry-After"), response.Header().Get("Cache-Control"))
+		}
+	})
+
+	<-h.slots
+	<-h.slots
+
+	t.Run("the refusal is not an artefact of saturation", func(t *testing.T) {
+		response := get(t, h, http.MethodGet, video.URL(), oversized)
+		if response.Code != http.StatusRequestedRangeNotSatisfiable || !refusedByTheCap(response) {
+			t.Fatalf("idle oversized set = %d %q, want the cap's 416", response.Code, strings.TrimSpace(response.Body.String()))
+		}
+		atCap := get(t, h, http.MethodGet, video.URL(), map[string]string{"Range": "bytes=0-9,100-109,200-209,300-309"})
+		if atCap.Code != http.StatusPartialContent {
+			t.Fatalf("idle at-cap set = %d, want 206", atCap.Code)
+		}
+		if len(h.slots) != 0 {
+			t.Errorf("%d slots still held; the handler leaked a token", len(h.slots))
+		}
+	})
+
+	t.Run("refused ahead of the file open", func(t *testing.T) {
+		empty, err := NewHandler(Config{Enabled: true, Root: t.TempDir(), MaxConcurrent: 2})
+		if err != nil {
+			t.Fatalf("NewHandler() error = %v", err)
+		}
+		response := get(t, empty, http.MethodGet, video.URL(), oversized)
+		if response.Code != http.StatusRequestedRangeNotSatisfiable || !refusedByTheCap(response) {
+			t.Fatalf("oversized set against an empty root = %d %q, want the cap's 416 rather than 404",
+				response.Code, strings.TrimSpace(response.Body.String()))
+		}
+		// Control: the same URL really does reach the open, so the 416 above
+		// is the cap's ordering and not an unservable path.
+		missing := get(t, empty, http.MethodGet, video.URL(), map[string]string{"Range": "bytes=0-9"})
+		if missing.Code != http.StatusNotFound {
+			t.Fatalf("single range against an empty root = %d, want 404", missing.Code)
+		}
+	})
 }
 
 // TestConditionalRequestsUseTheDigest verifies the digest ETag is a working

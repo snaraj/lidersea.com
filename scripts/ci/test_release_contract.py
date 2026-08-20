@@ -356,6 +356,7 @@ def settings_api() -> dict[str, object]:
                         "allowed_merge_methods": ["rebase", "squash"],
                         "dismiss_stale_reviews_on_push": False,
                         "require_code_owner_review": False,
+                        "require_extra_approval_for_unattributed_changes": True,
                         "require_last_push_approval": False,
                         "required_approving_review_count": 0,
                         "required_review_thread_resolution": True,
@@ -802,7 +803,7 @@ class GovernanceReceiptTests(unittest.TestCase):
             path: (ROOT / path).read_text(encoding="utf-8")
             for path in ("VERSION", "chart/Chart.yaml", "chart/values.yaml", "CHANGELOG.md")
         }
-        self.assertEqual(RC.validate_snapshot(actual).tag, "v0.1.20")
+        self.assertEqual(RC.validate_snapshot(actual).tag, "v0.1.21")
 
 
 class MainRunBindingTests(unittest.TestCase):
@@ -1032,6 +1033,10 @@ class SettingsReceiptTests(unittest.TestCase):
             '"required_approving_review_count": 0',
             '"required_review_thread_resolution": true',
             '"required_reviewers": []',
+            # The unattributed-change approval is pinned at the rule and carries no
+            # receipt field, so this prose line is the only place the runbook states
+            # it — and therefore the only place it could be quietly dropped.
+            "require_extra_approval_for_unattributed_changes: true",
             '"private_vulnerability_reporting": true',
             '"secret_scanning": true',
             '"secret_scanning_push_protection": true',
@@ -1265,6 +1270,7 @@ class SettingsReceiptTests(unittest.TestCase):
             ("allowed_merge_methods", ["squash"]),
             ("dismiss_stale_reviews_on_push", True),
             ("require_code_owner_review", True),
+            ("require_extra_approval_for_unattributed_changes", False),
             ("require_last_push_approval", True),
             ("required_approving_review_count", 1),
             ("required_review_thread_resolution", False),
@@ -1398,6 +1404,63 @@ class SettingsReceiptTests(unittest.TestCase):
             changed["merge_methods"] = receipt_value
             with self.subTest(receipt_merge_methods=receipt_value), self.assertRaises(RC.ContractError):
                 RC.validate_settings_receipt(changed, "owner/site")
+
+    def test_unattributed_change_approval_is_pinned_true_and_stays_rule_level(self):
+        # GitHub added require_extra_approval_for_unattributed_changes to the live
+        # Protect-Main pull_request rule after v0.1.18 shipped. The closed field set
+        # did exactly what it exists to do — it denied publication rather than
+        # accepting an unreviewed settings surface — so the remedy is a deliberate
+        # re-anchor on the live value, which is also the stricter one, never a
+        # relaxation of the closed set. This battery pins all four directions.
+        field = "require_extra_approval_for_unattributed_changes"
+
+        def parameters(records: dict[str, object]) -> dict[str, object]:
+            return next(
+                rule
+                for rule in records["repos/owner/site/rulesets/42"]["rules"]
+                if rule["type"] == "pull_request"
+            )["parameters"]
+
+        # The corrected live shape is green, and the fixture really does carry the
+        # pinned value rather than passing by omission.
+        exact = copy.deepcopy(settings_api())
+        self.assertIs(parameters(exact)[field], True)
+        self.assertEqual(self.observe(exact), settings_receipt())
+
+        # An absent field is red: a pinned control that silently disappears from the
+        # authoritative surface must deny, not default.
+        absent = copy.deepcopy(settings_api())
+        del parameters(absent)[field]
+        with self.assertRaises(RC.ContractError):
+            self.observe(absent)
+
+        # Every non-True value is red, including the falsy and non-boolean shapes an
+        # identity comparison is there to catch.
+        for value in (False, None, 0, 1, "true", [], {}):
+            changed = copy.deepcopy(settings_api())
+            parameters(changed)[field] = value
+            with self.subTest(unattributed_value=value), self.assertRaises(
+                RC.ContractError
+            ):
+                self.observe(changed)
+
+        # A FURTHER foreign field is still red: re-anchoring on this one name did not
+        # open the set to the next one GitHub adds.
+        extra = copy.deepcopy(settings_api())
+        parameters(extra)["require_extra_approval_for_unreviewed_changes"] = True
+        with self.assertRaises(RC.ContractError):
+            self.observe(extra)
+
+        # The pin is rule-level only. It does not enter the value-only receipt — the
+        # same split do_not_enforce_on_create already sits on — and the receipt's own
+        # closed field set still rejects the name as foreign, so no dangling copy can
+        # be smuggled past the offline revalidation either.
+        receipt = self.observe(copy.deepcopy(settings_api()))
+        self.assertNotIn(field, receipt)
+        smuggled = settings_receipt()
+        smuggled[field] = True
+        with self.assertRaises(RC.ContractError):
+            RC.validate_settings_receipt(smuggled, "owner/site")
 
     def test_bypass_actors_are_never_read_under_the_ci_credential(self):
         # REST documents the withholding in the "Get a repository ruleset"
@@ -1555,6 +1618,7 @@ class SettingsReceiptTests(unittest.TestCase):
             '"require_signatures": true',
             '"required_review_thread_resolution": true',
             '"required_approving_review_count": 0',
+            "require_extra_approval_for_unattributed_changes: true",
             '"code_coverage_minimum": 80',
             '"private_vulnerability_reporting": true',
             '"secret_scanning": true',
@@ -1601,6 +1665,10 @@ class SettingsReceiptTests(unittest.TestCase):
             ('"require_signatures": true', '"require_signatures": false'),
             ('"required_review_thread_resolution": true', '"required_review_thread_resolution": false'),
             ('"required_approving_review_count": 0', '"required_approving_review_count": 1'),
+            (
+                "require_extra_approval_for_unattributed_changes: true",
+                "require_extra_approval_for_unattributed_changes: false",
+            ),
             ('"code_coverage_minimum": 80', '"code_coverage_minimum": 79'),
             ('"private_vulnerability_reporting": true', '"private_vulnerability_reporting": false'),
             ('"secret_scanning": true', '"secret_scanning": false'),

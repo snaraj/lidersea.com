@@ -29,6 +29,20 @@ jobs:
           fetch-depth: 0
       - name: Test hostile release event and state transitions
         run: python3 -I -B -m unittest discover -s scripts/ci -p 'test_release_contract.py' -v
+      - name: Test hostile Dependabot config schema gate
+        # A dedicated discovery step, scoped by its own glob rather than
+        # widening the release-contract step above: this repository had NO
+        # gate on .github/dependabot.yml at all (issue #56) — actionlint
+        # only covers .github/workflows/*.yml, and the step above's glob
+        # never matched this file. Kept as its own named step so either
+        # suite can fail without masking which contract broke.
+        run: python3 -I -B -m unittest discover -s scripts/ci -p 'test_dependabot_contract.py' -v
+      - name: Validate the Dependabot config directly
+        # Belt-and-suspenders alongside the discovery step above: this
+        # invokes the same validator CI-authors actually run, so the gate
+        # still catches a malformed dependabot.yml even if a future edit to
+        # the discovery glob or test layout stops collecting the suite.
+        run: python3 -I -B scripts/ci/dependabot_contract.py .github/dependabot.yml
       - name: Enforce one exact patch from the protected base
         if: github.event_name != 'workflow_dispatch'
         env:

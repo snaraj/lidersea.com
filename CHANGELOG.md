@@ -7,6 +7,53 @@ Git, image, and GitHub Release tags use the exact plain `vX.Y.Z` form.
 
 ## [Unreleased]
 
+## [0.1.18] - 2026-08-20
+
+### Added
+
+- CI: `.github/dependabot.yml` now has a machine gate (#56). Nothing
+  validated this file before — actionlint covers `.github/workflows/*.yml`
+  only, and the release contract's own workflow sweep never matched this
+  path either. The adversarial review of PR #55 proved the gap live
+  (finding 1): a schema-invalid `groups` stanza (`patterns:` typoed to
+  `patternz:`, plus an unrelated `bogus-key`) survived every existing
+  repository check. `scripts/ci/dependabot_contract.py` is a new,
+  standard-library-only, conservative fail-closed mini-parser for the
+  subset of YAML this file actually uses (requirement 9: no PyYAML here;
+  the hand-rolled indentation reader in `scripts/ci/chart-ingress-pin.sh`
+  is the existing precedent). It rejects tabs, flow-style collections,
+  duplicate keys, and any unparseable construct outright, then validates
+  the schema itself: `version: 2` exactly; a non-empty `updates:` list of
+  mappings; each entry's `package-ecosystem` against GitHub's documented
+  ecosystem set, `directory` starting with `/`, and `schedule.interval` in
+  {daily, weekly, monthly} (optional `day`/`time`/`timezone` accepted);
+  each optional `groups:` entry restricted to {patterns, exclude-patterns,
+  dependency-type, update-types, applies-to} with non-empty pattern
+  strings. Unknown keys are rejected at every level, mirroring the
+  narrow-allowlist precedent in `internal/ratings` and the chart's ingress
+  provider binding: widening a schema allowlist here is a reviewed code
+  change, never silent drift. `pr-gate.yml`'s `security` job gained two
+  steps: a dedicated `unittest discover` step scoped to
+  `test_dependabot_contract.py` (the existing release-contract discovery
+  step's glob never matched this file, so a sibling step was added rather
+  than widening it and mixing two unrelated failure reasons into one step
+  name), plus a direct `dependabot_contract.py` invocation so the gate
+  still runs even if a future discovery-glob edit drifts. The hostile
+  suite proves the exact PR #55 `groups` stanza is rejected, alongside
+  `version: 1`, a missing `schedule`, an unknown ecosystem, unknown keys
+  at every level, an empty `updates:`, tab indentation, and flow-style
+  collections; the repository's own `dependabot.yml` is the load-bearing
+  positive case that must keep passing. Mirrors the same gate landing in
+  naranjo.online (#59).
+
+### Release
+
+- VERSION, chart `version`/`appVersion`, chart `values.yaml` `image.tag`,
+  this CHANGELOG entry, and `scripts/ci/test_release_contract.py`'s
+  `GovernanceReceiptTests` live-snapshot pin all advance together per the
+  release-lock closure (five locations, one commit) — the exact-patch
+  discipline requirement 10 enforces.
+
 ## [0.1.17] - 2026-08-19
 
 ### Fixed

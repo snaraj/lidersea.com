@@ -143,8 +143,12 @@ The corresponding exact `Protect-Main` rule-type set is `creation`, `deletion`,
 `required_signatures`, `required_status_checks`, `code_scanning`,
 `code_quality`, and `code_coverage`. The pull-request rule allows exactly
 `rebase` and `squash`, zero formal approvals, no stale-review dismissal, no
-code-owner or last-push approval, no team reviewers, and requires resolution of
-all review threads. The preview security rules retain the observed exact
+code-owner or last-push approval, no team reviewers, requires resolution of
+all review threads, and pins
+`require_extra_approval_for_unattributed_changes: true`. That last parameter is
+asserted at the rule and is deliberately absent from the value-only receipt
+above, exactly as `do_not_enforce_on_create` is: the receipt carries the
+controls it can state as values, and the rule carries the rest. The preview security rules retain the observed exact
 CodeQL `high_or_higher`/`errors` thresholds, code-quality `errors` severity, and
 coverage floor `80` with `max_coverage_drop: null`. Required checks use
 `strict_required_status_checks_policy: true` and

@@ -907,6 +907,7 @@ def build_settings_receipt(
         "allowed_merge_methods",
         "dismiss_stale_reviews_on_push",
         "require_code_owner_review",
+        "require_extra_approval_for_unattributed_changes",
         "require_last_push_approval",
         "required_approving_review_count",
         "required_review_thread_resolution",
@@ -920,9 +921,18 @@ def build_settings_receipt(
     merge_methods = _string_set(
         pull_parameters.get("allowed_merge_methods"), "ruleset merge methods"
     )
+    # require_extra_approval_for_unattributed_changes is pinned here, at the rule,
+    # and deliberately does NOT enter the receipt. The receipt is the value-only
+    # artifact the owner posts; it already omits rule parameters whose invariant is
+    # asserted at the rule alone (do_not_enforce_on_create is the standing
+    # precedent), and projecting this one would only duplicate the assertion below
+    # while changing the externally pinned receipt shape. The receipt's own closed
+    # field set keeps rejecting the name as foreign, so no dangling copy can be
+    # smuggled past validate_settings_receipt either way.
     for field, expected in (
         ("dismiss_stale_reviews_on_push", False),
         ("require_code_owner_review", False),
+        ("require_extra_approval_for_unattributed_changes", True),
         ("require_last_push_approval", False),
         ("required_review_thread_resolution", True),
     ):

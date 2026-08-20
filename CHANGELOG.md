@@ -7,6 +7,22 @@ Git, image, and GitHub Release tags use the exact plain `vX.Y.Z` form.
 
 ## [Unreleased]
 
+## [0.1.21] - 2026-08-20
+
+### Fixed
+
+- Release publication, immutable-settings recheck (#78): the live `Protect-Main`
+  ruleset's `pull_request` rule gained
+  `require_extra_approval_for_unattributed_changes`, and the pinned closed
+  parameter field set in `scripts/ci/release_contract.py` denied it as foreign —
+  `DENY: pull-request rule parameter fields are missing or foreign` — which left
+  0.1.19 and 0.1.20 merged but unpublished. The closed set is re-anchored on the
+  new field with an exact-value assertion pinning the live, stricter `True`; the
+  set stays closed, so the next foreign field still denies. The pin is
+  rule-level, matching `do_not_enforce_on_create`, so the value-only settings
+  receipt shape is unchanged. `docs/release-governance.md` states the parameter
+  and the split, and the runbook token pins keep either from being dropped.
+
 ## [0.1.20] - 2026-08-20
 
 ### Added

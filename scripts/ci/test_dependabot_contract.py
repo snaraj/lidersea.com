@@ -59,19 +59,35 @@ class RealConfigTests(unittest.TestCase):
 class LowLevelParserTests(unittest.TestCase):
     """The generic block reader, exercised independently of the schema."""
 
-    def test_rejects_empty_whitespace_and_comment_only_documents(self):
+    def test_rejects_empty_and_whitespace_only_documents(self):
         for label, text in (
             ("empty", ""),
             ("whitespace only", "   \n\n  \n"),
-            ("comment only", "# just a comment\n"),
         ):
             with self.subTest(label=label), self.assertRaises(DC.ContractError) as denied:
                 DC.parse_yaml_subset(text)
             self.assertEqual(str(denied.exception), "line 1: file has no content")
 
-    def test_full_line_comments_are_skipped_but_never_required(self):
-        tree = DC.parse_yaml_subset("# top rationale\nversion: 2\nupdates:\n  - package-ecosystem: npm\n    directory: /\n    schedule:\n      interval: daily\n")
-        self.assertEqual(set(tree.items), {"version", "updates"})
+    def test_comments_are_rejected_everywhere_not_skipped(self):
+        # Adversarial finding 1 (PR #72): a prior version treated only a
+        # line whose first non-space character was "#" as a comment and
+        # silently skipped it, which meant every OTHER "#" -- a trailing
+        # comment on real content, or a bare "- # x" null item -- was
+        # folded into the scalar it followed instead of being rejected.
+        # Comments are unsupported in every position now; every "#"
+        # refuses the file outright, full-line or inline, quoted or not.
+        cases = {
+            "full line, leading": "# top rationale\nversion: 2\nupdates:\n  - package-ecosystem: npm\n    directory: /\n    schedule:\n      interval: daily\n",
+            "full line, indented": "version: 2\nupdates:\n  # a note\n  - package-ecosystem: npm\n    directory: /\n    schedule:\n      interval: daily\n",
+            "trailing on a mapping value": "version: 2\nupdates:\n  - package-ecosystem: npm # frontend\n    directory: /\n    schedule:\n      interval: daily\n",
+            "trailing on a quoted scalar": "version: 2\nupdates:\n  - package-ecosystem: npm\n    directory: /\n    schedule:\n      interval: daily\n    groups:\n      g:\n        patterns:\n          - \"svelte\" # core\n",
+            "null sequence item (dash then comment only)": "version: 2\nupdates:\n  - package-ecosystem: npm\n    directory: /\n    schedule:\n      interval: daily\n    groups:\n      g:\n        patterns:\n          - # the core package\n",
+            "comment-only document": "# just a comment\n",
+        }
+        for label, text in cases.items():
+            with self.subTest(label=label), self.assertRaises(DC.ContractError) as denied:
+                DC.parse_yaml_subset(text)
+            self.assertIn("'#' comments are not supported", str(denied.exception))
 
     def test_rejects_tabs_anywhere_in_the_document(self):
         with self.assertRaises(DC.ContractError) as denied:
@@ -184,6 +200,121 @@ class LowLevelParserTests(unittest.TestCase):
         with self.assertRaises(DC.ContractError) as denied:
             DC.parse_yaml_subset("- a\n- b\n")
         self.assertEqual(str(denied.exception), "line 1: the top-level document must be a mapping")
+
+    # The following eight tests each pin one branch the PR #72 adversarial
+    # review confirmed reachable-but-untested: a targeted weakening of any
+    # one survived the suite that was green at review time. Each fixture
+    # below reproduces the reviewer's own reachability probe; a name or
+    # message change on the guard it exercises must turn the matching test
+    # red, which is what makes it a guard and not decoration.
+
+    def test_rejects_anchors_aliases_tags_and_block_scalars(self):
+        for label, construct in (
+            ("anchor", "&anchor"),
+            ("alias", "*alias"),
+            ("tag", "!tag"),
+            ("literal block scalar", "|"),
+            ("folded block scalar", ">"),
+        ):
+            text = f"version: 2\nupdates:\n  - package-ecosystem: {construct} npm\n"
+            with self.subTest(label=label), self.assertRaises(DC.ContractError) as denied:
+                DC.parse_yaml_subset(text)
+            self.assertEqual(
+                str(denied.exception),
+                f"line 3: unsupported YAML construct starting with {construct[0]!r}",
+            )
+
+    def test_rejects_a_quoted_scalar_with_an_embedded_unescaped_quote(self):
+        with self.assertRaises(DC.ContractError) as denied:
+            DC.parse_yaml_subset('version: 2\nupdates:\n  - package-ecosystem: "a"b"\n')
+        self.assertEqual(str(denied.exception), "line 3: quoted scalar contains an unescaped quote character")
+
+    def test_rejects_an_unquoted_scalar_containing_a_quote_character(self):
+        with self.assertRaises(DC.ContractError) as denied:
+            DC.parse_yaml_subset('version: 2\nupdates:\n  - package-ecosystem: a"b\n')
+        self.assertEqual(str(denied.exception), "line 3: unquoted scalar contains a quote character")
+
+    def test_a_sequence_item_inside_a_mapping_block_is_rejected(self):
+        # A "- " line appearing where a mapping's next key is expected,
+        # at the mapping's own indent (schedule: is a mapping; a stray
+        # dash item under it is neither one of its keys nor a nested
+        # block of the preceding key).
+        text = (
+            "version: 2\nupdates:\n  - package-ecosystem: npm\n    directory: /\n"
+            "    schedule:\n      interval: daily\n      - stray\n"
+        )
+        with self.assertRaises(DC.ContractError) as denied:
+            DC.parse_yaml_subset(text)
+        self.assertEqual(str(denied.exception), "line 7: expected a mapping key, found a sequence item")
+
+    def test_a_mapping_key_inside_a_sequence_block_is_rejected(self):
+        # The mirror image: a "key: value" line at a sequence's own
+        # indent, where only more "- " items are expected.
+        text = (
+            "version: 2\nupdates:\n  - package-ecosystem: npm\n    directory: /\n"
+            "    schedule:\n      interval: daily\n    groups:\n      g:\n"
+            "        patterns:\n          - \"x\"\n          foo: bar\n"
+        )
+        with self.assertRaises(DC.ContractError) as denied:
+            DC.parse_yaml_subset(text)
+        self.assertEqual(str(denied.exception), "line 11: expected a sequence item, found a mapping key")
+
+    def test_a_bare_dash_with_nothing_indented_after_it_is_rejected(self):
+        text = (
+            "version: 2\nupdates:\n  - package-ecosystem: npm\n    directory: /\n"
+            "    schedule:\n      interval: daily\n    groups:\n      g:\n"
+            "        patterns:\n          -\n"
+        )
+        with self.assertRaises(DC.ContractError) as denied:
+            DC.parse_yaml_subset(text)
+        self.assertEqual(str(denied.exception), "line 10: sequence item has no value")
+
+    def test_orphaned_indentation_after_a_compact_mappings_last_key_is_rejected(self):
+        # Over-indentation immediately after "- key: value" (the compact
+        # mapping's inline first key, with no bare-key block to absorb it)
+        # is denied. In the unmutated reader this specific guard, internal
+        # to _parse_sequence's compact-mapping continuation, is the first
+        # of three "unexpected indentation" checks to see the stray line:
+        # this one, then _parse_sequence's own end-of-block guard right
+        # below it, then the enclosing _parse_mapping's end-of-block guard
+        # one level up -- each strictly more general than the last, since
+        # a residual line over-indented for THIS check is, by construction
+        # (item_indent = indent + 2), also over-indented for every guard
+        # enclosing it. Disabling this guard alone, or this one together
+        # with _parse_sequence's own end-of-block guard, still denies this
+        # exact fixture with this exact message (verified by hand): the
+        # enclosing _parse_mapping guard backstops both. That makes this
+        # assertion proof of fail-closed behavior on this fixture, not
+        # proof that this specific line is the one deciding it -- an
+        # honest distinction from the branches above it in this file, most
+        # of which (duplicate keys, sequence/mapping-shape mismatches, the
+        # dash-spacing rules) have no such backstop and really do turn
+        # green the moment their one guard is weakened.
+        with self.assertRaises(DC.ContractError) as denied:
+            DC.parse_yaml_subset("version: 2\nupdates:\n  - package-ecosystem: npm\n      stray: deep\n")
+        self.assertEqual(str(denied.exception), "line 4: unexpected indentation")
+
+    def test_orphaned_indentation_after_a_sequences_last_item_is_rejected(self):
+        # Over-indentation after a sequence's own final item (not tied to
+        # any specific item's compact mapping) is denied -- the
+        # sequence-level sibling of
+        # test_rejects_orphaned_indentation_not_tied_to_a_key, which
+        # exercises the mapping-level version of this same check. Same
+        # caveat as the test above: this fixture's stray line is also
+        # caught by the enclosing "patterns:"-owning mapping's own
+        # end-of-block guard, confirmed by disabling both simultaneously.
+        # The two checks are redundant by construction, not by accident:
+        # every block this reader parses is a value nested under some
+        # mapping key, so a sequence's own trailing-indentation guard can
+        # never be the outermost check for any real dependabot.yml shape.
+        text = (
+            "version: 2\nupdates:\n  - package-ecosystem: npm\n    directory: /\n"
+            "    schedule:\n      interval: daily\n    groups:\n      g:\n"
+            "        patterns:\n          - \"x\"\n            stray\n"
+        )
+        with self.assertRaises(DC.ContractError) as denied:
+            DC.parse_yaml_subset(text)
+        self.assertEqual(str(denied.exception), "line 11: unexpected indentation")
 
 
 class RequiredHostileBatteryTests(unittest.TestCase):
@@ -466,9 +597,128 @@ class SchemaValidationTests(unittest.TestCase):
             with self.subTest(label=label):
                 assert_denied(self, mutated, expected)
 
-    def test_leading_comment_does_not_disturb_a_valid_document(self):
+    def test_a_leading_comment_on_an_otherwise_valid_document_is_rejected(self):
+        # Superseded by the comments-are-never-supported design (finding 1):
+        # this used to be the accepted case; the whole positive claim was
+        # part of what the fix reversed, so pin the reversal explicitly
+        # here rather than only in LowLevelParserTests.
         text = "# groups exist to stop mutually-blocking version-locked PRs\n" + real_text()
-        self.assertEqual(DC.check_text(text), (3, 2))
+        with self.assertRaises(DC.ContractError) as denied:
+            DC.check_text(text)
+        self.assertEqual(str(denied.exception), "line 1: '#' comments are not supported, full-line or inline; remove the comment")
+
+    def test_inline_comments_are_rejected_at_every_documented_position(self):
+        # Finding 1's false-reject half: before the fix, a trailing comment
+        # on real content did not just get absorbed -- several shapes were
+        # rejected too, but for the WRONG reason (an invented ecosystem, an
+        # invented interval, a syntax error), which would have misled
+        # anyone debugging why their otherwise-valid file failed. Now every
+        # one fails for the SAME, correct, and only reason.
+        cases = {
+            "package-ecosystem": real_text().replace("package-ecosystem: npm", "package-ecosystem: npm # frontend", 1),
+            "schedule.interval": real_text().replace("interval: weekly", "interval: weekly # once a week", 1),
+            "version": real_text().replace("version: 2", "version: 2 # schema v2", 1),
+            "open-pull-requests-limit": real_text().replace(
+                "open-pull-requests-limit: 3", "open-pull-requests-limit: 3 # cap", 1
+            ),
+            "quoted pattern with trailing comment": real_text().replace(
+                '- "svelte"\n', '- "svelte" # core\n', 1
+            ),
+        }
+        for label, text in cases.items():
+            with self.subTest(label=label), self.assertRaises(DC.ContractError) as denied:
+                DC.check_text(text)
+            self.assertIn("'#' comments are not supported", str(denied.exception))
+
+    def test_as_sequence_correctly_rejects_a_scalar_where_a_list_belongs(self):
+        # Finding 2's first fail-open weakening: a mutant that neuters
+        # _as_sequence to return an empty Sequence instead of raising turns
+        # this exact "patterns: svelte" typo -- a plausible human mistake,
+        # the same malformed-groups class issue #56 exists to catch -- into
+        # a group with zero patterns that silently PASSES. This test calls
+        # _as_sequence only through the normal parse/validate path (never
+        # the private function directly), so it is dead only if the whole
+        # call chain is dead.
+        text = real_text().replace(
+            '        patterns:\n          - "github/codeql-action*"\n',
+            "        patterns: svelte\n",
+            1,
+        )
+        assert_denied(self, text, "line 10: groups.codeql-action.patterns must be a list")
+        # updates: itself is _as_sequence's other call site; cover it too.
+        assert_denied(
+            self,
+            "version: 2\nupdates: justastring\n",
+            "line 2: updates must be a list",
+        )
+
+    def test_as_scalar_correctly_rejects_a_mapping_where_a_plain_value_belongs(self):
+        text = real_text().replace(
+            "directory: /frontend",
+            "directory:\n      nested: 1",
+            1,
+        )
+        assert_denied(
+            self, text, "line 18: updates[2].directory must be a plain value, not a nested list or mapping"
+        )
+
+    def test_scalars_reject_forbidden_control_characters(self):
+        # Finding 5: NUL, DEL, and the C1/line-separator ranges previously
+        # passed straight through as literal pattern/directory text.
+        for label, mutated, line_no, code_point in (
+            ("NUL in a pattern", real_text().replace('"github/codeql-action*"', '"nul\x00here"', 1), 11, "0000"),
+            ("DEL after directory", real_text().replace("directory: /frontend", "directory: /frontend\x7f", 1), 18, "007F"),
+            ("NEL (C1) in a pattern", real_text().replace('"github/codeql-action*"', '"a\x85b"', 1), 11, "0085"),
+            ("LINE SEPARATOR in a pattern", real_text().replace('"github/codeql-action*"', '"a\u2028b"', 1), 11, "2028"),
+        ):
+            with self.subTest(label=label), self.assertRaises(DC.ContractError) as denied:
+                DC.check_text(mutated)
+            self.assertEqual(
+                str(denied.exception),
+                f"line {line_no}: scalar contains a forbidden control character U+{code_point}",
+            )
+
+
+class DocumentedNarrownessTests(unittest.TestCase):
+    """Finding 4: narrowing this reader deliberately accepts (fails closed,
+    never a correctness hole) but that the module docstring must state
+    rather than leave for the next author to discover by accident."""
+
+    def test_group_names_are_restricted_to_the_key_charset(self):
+        # Dependabot's own group names are arbitrary strings; this reader
+        # reuses KEY_RE for every mapping key including group names, with
+        # no quoting escape hatch.
+        for label, name in (
+            ("leading digit", "1action"),
+            ("at-scoped", "@sveltejs"),
+            ("leading underscore", "_private"),
+            ("embedded space", "svelte pkgs"),
+        ):
+            text = real_text().replace("codeql-action:", f"{name}:", 1)
+            with self.subTest(label=label), self.assertRaises(DC.ContractError) as denied:
+                DC.parse_yaml_subset(text)
+            self.assertIn("expected a mapping key", str(denied.exception))
+
+    def test_a_same_indent_block_sequence_is_rejected(self):
+        # Idiomatic, valid YAML ("patterns:" then "- x" at the SAME
+        # column) is out of scope: this reader requires a sequence's items
+        # to be indented STRICTLY deeper than the key that introduces them.
+        text = (
+            "version: 2\nupdates:\n  - package-ecosystem: npm\n    directory: /\n"
+            "    schedule:\n      interval: daily\n    groups:\n      g:\n"
+            "        patterns:\n        - \"x\"\n"
+        )
+        with self.assertRaises(DC.ContractError) as denied:
+            DC.parse_yaml_subset(text)
+        self.assertEqual(str(denied.exception), "line 9: key 'patterns' has no value")
+
+    def test_a_byte_order_mark_is_rejected_by_name(self):
+        with self.assertRaises(DC.ContractError) as denied:
+            DC.parse_yaml_subset("\ufeff" + real_text())
+        self.assertEqual(
+            str(denied.exception),
+            "line 1: a UTF-8 byte-order mark is not supported; save the file without a BOM",
+        )
 
 
 class CommandLineInterfaceTests(unittest.TestCase):
@@ -503,6 +753,24 @@ class CommandLineInterfaceTests(unittest.TestCase):
     def test_no_path_argument_exits_two(self):
         status, _out, _err = self.invoke([])
         self.assertEqual(status, 2)
+
+    def test_bytes_that_are_not_valid_utf8_exit_two_and_deny_by_path(self):
+        # `main()` reads with `encoding="utf-8"` and has a dedicated
+        # `except UnicodeDecodeError` handler sitting right next to the
+        # `except OSError` one above -- covered by
+        # test_a_missing_file_exits_two_and_denies_by_path -- but nothing
+        # exercised it: a mutant collapsing it to `return 0` (turning a file
+        # CI cannot even decode into a silent pass) survived. 0x80 is a bare
+        # UTF-8 continuation byte with no lead byte before it, invalid in
+        # every position.
+        with tempfile.TemporaryDirectory() as scratch:
+            target = Path(scratch) / "dependabot.yml"
+            target.write_bytes(b"version: 2\nupdates:\n  - package-ecosystem: \x80\n")
+            status, out, err = self.invoke([str(target)])
+            self.assertEqual(status, 2)
+            self.assertEqual(out, "")
+            self.assertTrue(err.startswith(f"DENY: {target}: "))
+            self.assertIn("codec can't decode byte", err)
 
     def test_mutation_proof_on_a_temporary_corrupted_copy(self):
         # Copy the real file into a scratch directory, corrupt it with the

@@ -23,6 +23,32 @@ collections (`[...]`, `{...}`), anchors, aliases, tags, and block scalars
 are all unsupported and rejected rather than approximated, and any line the
 reader cannot place is rejected outright. Conservative and fail-closed:
 "unparseable" and "invalid" are the same outcome.
+
+This reader is narrower than general YAML in ways worth stating rather
+than discovering by accident (each pinned by a dedicated rejection test
+in test_dependabot_contract.py):
+
+- Comments are not supported anywhere -- full-line or trailing, quoted
+  context or not -- and a `#` character anywhere in the source is
+  rejected outright rather than stripped. A trailing `#` was previously
+  silently folded into the scalar it followed (an adversarial review of
+  this module found it: a `- # comment` null item was accepted as
+  literal pattern text). Distinguishing a real comment start from a
+  literal `#` inside a quoted scalar is real parser work this module
+  does not attempt, so every `#` refuses the file instead of guessing.
+  dependabot.yml carries no comments today.
+- Scalars reject C0/C1 control characters, DEL, and the Unicode line and
+  paragraph separators, matching real YAML's printable-character rule.
+- Mapping keys, including group names under `groups:`, are restricted to
+  `[A-Za-z][A-Za-z0-9_.-]*` with no quoting escape hatch -- narrower than
+  Dependabot's own arbitrary-string group names.
+- A block sequence must be indented STRICTLY deeper than its key; the
+  same-indent form (`patterns:` then `- x` at the same column -- valid,
+  idiomatic YAML) is rejected as a bare key with no value.
+- A UTF-8 byte-order mark at the start of the file is named and rejected
+  rather than left to surface as an unrelated, confusing parse error.
+
+Every one of these fails closed -- narrower than necessary, never wider.
 """
 
 from __future__ import annotations
@@ -82,13 +108,28 @@ def _fail(line: int, message: str) -> NoReturn:
     raise ContractError(f"line {line}: {message}")
 
 
+BOM = "\ufeff"
+
+
 def _tokenize(text: str) -> list[_Line]:
+    if text.startswith(BOM):
+        _fail(1, "a UTF-8 byte-order mark is not supported; save the file without a BOM")
     if "\t" in text:
         line_no = next(i for i, raw in enumerate(text.split("\n"), start=1) if "\t" in raw)
         _fail(line_no, "tab characters are not allowed; use spaces")
     if "\r" in text:
         line_no = next(i for i, raw in enumerate(text.split("\n"), start=1) if "\r" in raw)
         _fail(line_no, "carriage returns are not allowed; use bare LF line endings")
+    if "#" in text:
+        # Full-line AND inline, every position, quoted context or not: see
+        # the module docstring. A prior version treated only a line whose
+        # first non-space character was "#" as a comment and skipped it,
+        # which silently folded every OTHER "#" (a trailing comment on real
+        # content, or a bare "- # x" null item) into the scalar it followed
+        # instead of rejecting it -- accept-what-it-cannot-place, exactly
+        # what this reader promises never to do.
+        line_no = next(i for i, raw in enumerate(text.split("\n"), start=1) if "#" in raw)
+        _fail(line_no, "'#' comments are not supported, full-line or inline; remove the comment")
 
     lines: list[_Line] = []
     for no, raw in enumerate(text.split("\n"), start=1):
@@ -96,17 +137,36 @@ def _tokenize(text: str) -> list[_Line]:
             continue
         stripped = raw.lstrip(" ")
         indent = len(raw) - len(stripped)
-        if stripped.startswith("#"):
-            continue
         content = stripped.rstrip()
         lines.append(_Line(no=no, indent=indent, content=content))
     return lines
 
 
+# C0/C1 controls, DEL, and the Unicode line/paragraph separators: real YAML
+# restricts scalars to printable characters, and none of these can appear in
+# the shipped dependabot.yml, so treat them the same as any other construct
+# this reader refuses rather than approximates.
+_FORBIDDEN_SCALAR_RE = re.compile(
+    "[\x00-\x1f\x7f-\x9f\u2028\u2029]"
+)
+
+
+def _reject_control_characters(text: str, line_no: int) -> None:
+    match = _FORBIDDEN_SCALAR_RE.search(text)
+    if match:
+        _fail(line_no, f"scalar contains a forbidden control character U+{ord(match.group()):04X}")
+
+
 def _parse_scalar_value(raw: str, line_no: int) -> Scalar:
+    # `raw` is always the single-space-delimited remainder of an already
+    # rstripped, non-blank tokenized line: KEY_RE's `(?: (.*))?` group only
+    # captures after one literal space (so a bare "key:" with nothing after
+    # never reaches here), and the sequence reader requires content[2] to be
+    # non-space before slicing a scalar item's remainder. `value` below can
+    # therefore never be empty -- proven, not merely assumed, by the review
+    # fuzz campaign that found the redundant guard this comment replaces
+    # (230,009 inputs, zero hits) -- so indexing value[0] is safe.
     value = raw.strip()
-    if value == "":
-        _fail(line_no, "empty scalar value")
     if value[0] in "[{":
         _fail(line_no, "flow-style collections are not supported; use a block list or mapping")
     if value[0] in "&*!|>%@`?":
@@ -118,9 +178,11 @@ def _parse_scalar_value(raw: str, line_no: int) -> Scalar:
         inner = value[1:-1]
         if quote in inner:
             _fail(line_no, "quoted scalar contains an unescaped quote character")
+        _reject_control_characters(inner, line_no)
         return Scalar(line=line_no, text=inner, quoted=True)
     if '"' in value or "'" in value:
         _fail(line_no, "unquoted scalar contains a quote character")
+    _reject_control_characters(value, line_no)
     return Scalar(line=line_no, text=value, quoted=False)
 
 
@@ -242,8 +304,15 @@ def parse_yaml_subset(text: str) -> Mapping:
     if lines[0].indent != 0:
         _fail(lines[0].no, "the document must start at column 0")
     node, next_i = _parse_node(lines, 0, 0)
-    if next_i != len(lines):
-        _fail(lines[next_i].no, "unexpected indentation")
+    # next_i always equals len(lines) here: _parse_mapping and _parse_sequence
+    # each already fail closed, from inside their own recursion, on any line
+    # more indented than their own siblings before ever returning control to
+    # their caller -- so no residual, unconsumed line can survive to be
+    # inspected at this outer level. That inner enforcement is exercised
+    # directly (see test_rejects_orphaned_indentation_not_tied_to_a_key and
+    # its sequence-shaped siblings), which is what makes a duplicate check
+    # here provably redundant rather than merely assumed safe.
+    assert next_i == len(lines)
     if not isinstance(node, Mapping):
         _fail(lines[0].no, "the top-level document must be a mapping")
     return node

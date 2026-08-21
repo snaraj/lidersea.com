@@ -3985,6 +3985,25 @@ class NoArtifactWiringTests(unittest.TestCase):
         cumulative = orchestrator.split("no-artifact)", 1)[1].split("DENY: unknown transition class", 1)[0]
         self.assertIn('--base "${tag_target}"', cumulative)
         self.assertIn("= no-artifact", cumulative)
+        # The gap re-proof must anchor on evidence the VERDICT CANNOT CHOOSE.
+        # The class re-derivation is parameterised by claimed_base, so a
+        # verdict naming a base inside the push re-derives a genuine artifact
+        # merge as documentation. What defeats that here is the retained tag:
+        # it is computed from HEAD's tree alone, so the forgery cannot change
+        # which tag must already exist, and the tag for a release this push
+        # never made does not exist. Anchoring the cumulative proof on
+        # claimed_base — or on a boundary recovered from git, which would move
+        # with the forgery — reopens that hole silently.
+        # Assert over EXECUTABLE lines only: the comment above explains the
+        # attack and necessarily names claimed_base, and prose must never be
+        # able to satisfy or break a guard.
+        cumulative_code = "\n".join(
+            line for line in cumulative.splitlines() if not line.lstrip().startswith("#")
+        )
+        self.assertNotIn("claimed_base", cumulative_code)
+        self.assertNotIn("release-window", cumulative_code)
+        self.assertIn("git/ref/tags/${retained_tag}", cumulative_code)
+        self.assertIn("DENY: retained release tag", cumulative_code)
 
     def test_agents_contract_names_the_exact_code_allowlist(self):
         agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")

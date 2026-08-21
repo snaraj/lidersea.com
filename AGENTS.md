@@ -106,7 +106,13 @@ Numbered for citation, repo-scoped, none negotiable in code:
     an unparseable diff entry, or a non-regular file mode all deny; renames
     decompose into add plus delete, so a rename crossing the allowlist
     boundary denies through its non-allowlisted side. Widening the allowlist
-    is itself an artifact-classified gate change that releases. PR, protected-main,
+    is itself an artifact-classified gate change that releases. One consequence
+    is deliberate and must not be mistaken for a bug: the orchestrator proves
+    the retained release actually happened by requiring its tag to exist, so a
+    documentation merge whose retained release never completed fails red — and
+    that red is STICKY. Every later documentation merge fails the same way
+    until an artifact merge succeeds and moves the retained version forward.
+    That is the intended trade: loud and recoverable, never a wrong release. PR, protected-main,
     and recovery validation inspect every intermediate state: retain or advance
     one patch only; skip, reversion, transient future, or multiple integration
     boundaries are denied. Successful main CI binds one exact-SHA,
@@ -482,7 +488,8 @@ authority: the owner alone merges.
   the exact head, the base equals current protected `main`, all discussions and
   findings are resolved, a fresh exact-head APPROVE receipt exists, a fresh
   exact-head canonical `ROLE: MAIN-WORKER` / `VERDICT: PASS` receipt exists, the
-  next patch still follows that base, the automatic release consequence is
+  next patch still follows that base for an artifact-classified PR (a
+  documentation-only PR reserves no patch at all), the automatic release consequence is
   proven, and the owner-observed release-control receipt proves immutable
   releases plus strict exact required checks with no bypass. Only the
   coordinator flips Ready. The author and reviewer never do.
@@ -544,7 +551,9 @@ The complete delivery loop, each step gated by the sections around it:
    `sonnet5/<topic>`, `opus5/<topic>`, `5.6-sol/<topic>`). One writer per
    branch, always —
    a branch that is not yours is a branch you never push to. Reserve the exact
-   next patch from that base; if another PR lands, create a fresh branch from
+   next patch from that base when the change touches any artifact surface; a
+   documentation-only change (requirement 10's closed allowlist) reserves no
+   patch and must leave every release lock untouched. If another PR lands, create a fresh branch from
    current main, carry the still-valid diff without rewriting published
    history, take the new next patch, and close/supersede the stale PR.
 3. **Build the change** inside the requirements and doctrine above.

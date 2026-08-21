@@ -146,6 +146,25 @@ jobs:
             no-artifact)
               retained_tag="$(jq -er '.tag' <<<"${rederived}")"
               [[ "${retained_tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+              # THE TAG PROBE BELOW IS LOAD-BEARING FOR CORRECTNESS, NOT ONLY
+              # FRESHNESS - do not replace it with a boundary recovered from
+              # git. The class re-derivation is parameterised by the
+              # verdict's claimed_base, so a verdict naming a base INSIDE
+              # this push makes a genuine artifact merge re-derive as
+              # documentation. What defeats that here is that the retained
+              # tag is computed from HEAD's tree alone: the forged base can
+              # change the CLASS but not WHICH TAG must already exist. In
+              # that attack the demanded tag is the version this very push
+              # was supposed to release, no such tag exists, the budget below
+              # exhausts, and the job denies. A git-recovered boundary would
+              # instead move WITH the forgery - it would land on the in-push
+              # bump commit - and the whole re-proof would agree with the lie,
+              # silently skipping a release. The sibling repository cannot
+              # poll a tag (its publisher tags 15-20 minutes after merge,
+              # past this job's timeout) and therefore has to anchor on the
+              # newest earlier successful protected-main gate run from the
+              # Actions record instead. Both anchors share the one property
+              # that matters: the verdict cannot choose them.
               api="${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}"
               ref_json="${RUNNER_TEMP}/retained-ref.json"
               tag_json="${RUNNER_TEMP}/retained-tag.json"

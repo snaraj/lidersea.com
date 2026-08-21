@@ -65,9 +65,27 @@ jobs:
             printf 'unsupported release-gate event %s on %s\n' "${GITHUB_EVENT_NAME}" "${GITHUB_REF}" >&2
             exit 1
           fi
+          verdict="${RUNNER_TEMP}/transition-verdict.json"
           python3 -I -B scripts/ci/release_contract.py transition \
             --repository . --base "${base_sha}" --head "${head_sha}" \
-            "${first_parent[@]}"
+            "${first_parent[@]}" | tee "${verdict}"
+          jq -er 'if .class == "artifact" or .class == "no-artifact" then .class else error("unknown transition class") end' \
+            "${verdict}"
+      - name: Publish the transition verdict for the release orchestrator
+        # The orchestrator must learn WHICH range this push validated — the
+        # push base is unrecoverable from git alone once later merges land —
+        # so the gate's own verdict rides as a run artifact bound to this
+        # exact run ID. The orchestrator re-derives the whole classification
+        # from git before acting on it; the artifact only supplies the range.
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: transition-verdict
+          path: ${{ runner.temp }}/transition-verdict.json
+          if-no-files-found: error
+          # A run re-attempt re-uploads under the same immutable name; without
+          # overwrite the collision fails the gate and strands the merged SHA.
+          overwrite: true
       - name: Install checksum-verified tools
         run: ./scripts/ci/install-tools.sh
       - name: Validate workflows

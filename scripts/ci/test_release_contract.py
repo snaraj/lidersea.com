@@ -803,7 +803,9 @@ class GovernanceReceiptTests(unittest.TestCase):
             path: (ROOT / path).read_text(encoding="utf-8")
             for path in ("VERSION", "chart/Chart.yaml", "chart/values.yaml", "CHANGELOG.md")
         }
-        self.assertEqual(RC.validate_snapshot(actual).tag, "v0.1.22")
+        raw_version = (ROOT / "VERSION").read_bytes().decode("utf-8")
+        self.assertRegex(raw_version, r"\A(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\n\Z")
+        self.assertEqual(RC.validate_snapshot(actual).tag, f"v{raw_version[:-1]}")
 
 
 class MainRunBindingTests(unittest.TestCase):

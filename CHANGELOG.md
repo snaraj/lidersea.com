@@ -7,6 +7,16 @@ Git, image, and GitHub Release tags use the exact plain `vX.Y.Z` form.
 
 ## [Unreleased]
 
+## [0.1.22] - 2026-08-21
+
+### Added
+
+- Publish the parallel-agent worktree contract in `AGENTS.md` so any clone
+  carries the isolation, lane-ownership, shared-git-state, and cleanup rules
+  that previously lived only in a machine-local skills folder.
+- Ignore `.claude/worktrees/` so the layout the contract mandates stays clean
+  in a fresh clone instead of relying on a local `.git/info/exclude`.
+
 ## [0.1.21] - 2026-08-20
 
 ### Fixed

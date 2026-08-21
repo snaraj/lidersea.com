@@ -803,7 +803,7 @@ class GovernanceReceiptTests(unittest.TestCase):
             path: (ROOT / path).read_text(encoding="utf-8")
             for path in ("VERSION", "chart/Chart.yaml", "chart/values.yaml", "CHANGELOG.md")
         }
-        self.assertEqual(RC.validate_snapshot(actual).tag, "v0.1.21")
+        self.assertEqual(RC.validate_snapshot(actual).tag, "v0.1.22")
 
 
 class MainRunBindingTests(unittest.TestCase):

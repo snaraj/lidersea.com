@@ -77,7 +77,148 @@ jobs:
           ref: ${{ github.event.workflow_run.head_sha }}
           persist-credentials: false
           fetch-depth: 0
+      - name: Classify the completed range from its authorized gate verdict
+        # A documentation-only merge changes no artifact, so there is nothing
+        # to version, sign, scan, or release. The gate that validated the
+        # exact pushed range published its verdict as a run artifact on the
+        # run this event names; this step re-derives the entire class from
+        # git before trusting one byte of it, and a no-artifact verdict must
+        # additionally re-prove the whole tag-to-head gap as documentation.
+        # Every other outcome — absent verdict, foreign class, mismatch,
+        # missing tag — fails this job red. There is no third path.
+        id: classify
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COMPLETED_SHA: ${{ github.event.workflow_run.head_sha }}
+          MAIN_RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          set -euo pipefail
+          event_sha="$(python3 -I -B scripts/ci/release_contract.py workflow-run \
+            --event "${GITHUB_EVENT_PATH}" --repository "${GITHUB_REPOSITORY}")"
+          test "${event_sha}" = "${COMPLETED_SHA}"
+          test "$(git rev-parse HEAD)" = "${COMPLETED_SHA}"
+          [[ "${MAIN_RUN_ID}" =~ ^[1-9][0-9]*$ ]]
+          artifacts_json="${RUNNER_TEMP}/gate-artifacts.json"
+          # Run-scoped listing, deliberately. There is no per-attempt
+          # artifacts endpoint: .../runs/{id}/attempts/{n}/artifacts returns
+          # 404 (verified against the live API, with .../attempts/{n}/jobs
+          # returning 200 as the control), so scoping the fetch that way
+          # would fail this step on every merge and take releases down.
+          # Re-attempt safety does not need it: the gate uploads with
+          # overwrite, so one run holds exactly one transition-verdict
+          # artifact - the latest attempt's - and the exactly-one assertion
+          # below fails closed if that ever stops being true.
+          gh api --method GET --paginate --slurp \
+            --header 'Accept: application/vnd.github+json' \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/${GITHUB_REPOSITORY}/actions/runs/${MAIN_RUN_ID}/artifacts?per_page=100" \
+            > "${artifacts_json}"
+          artifact_id="$(jq -er \
+            '[.[].artifacts[] | select(.name == "transition-verdict" and .expired == false)]
+             | if length == 1 then .[0].id else error("expected exactly one transition-verdict artifact") end' \
+            "${artifacts_json}")"
+          archive="${RUNNER_TEMP}/transition-verdict.zip"
+          curl --silent --show-error --location --fail \
+            --proto '=https' --tlsv1.2 \
+            --header 'Accept: application/vnd.github+json' \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            --output "${archive}" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}/zip"
+          verdict_dir="${RUNNER_TEMP}/transition-verdict"
+          mkdir -p "${verdict_dir}"
+          unzip -q -o "${archive}" -d "${verdict_dir}"
+          verdict="${verdict_dir}/transition-verdict.json"
+          test "$(find "${verdict_dir}" -type f | wc -l)" -eq 1
+          test -s "${verdict}"
+          claimed_class="$(jq -er '.class' "${verdict}")"
+          claimed_base="$(jq -er '.base_sha' "${verdict}")"
+          claimed_source="$(jq -er '.source_sha' "${verdict}")"
+          test "${claimed_source}" = "${COMPLETED_SHA}"
+          [[ "${claimed_base}" =~ ^[0-9a-f]{40}$ ]]
+          rederived="$(python3 -I -B scripts/ci/release_contract.py transition \
+            --repository . --base "${claimed_base}" --head "${COMPLETED_SHA}" \
+            --first-parent)"
+          rederived_class="$(jq -er '.class' <<<"${rederived}")"
+          test "${rederived_class}" = "${claimed_class}"
+          case "${claimed_class}" in
+            artifact) ;;
+            no-artifact)
+              retained_tag="$(jq -er '.tag' <<<"${rederived}")"
+              [[ "${retained_tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+              api="${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}"
+              ref_json="${RUNNER_TEMP}/retained-ref.json"
+              tag_json="${RUNNER_TEMP}/retained-tag.json"
+              tag_target=''
+              # The retained version's own release may still be tagging in a
+              # parallel orchestrator run for the preceding artifact merge —
+              # which first waits out its own CodeQL poll (up to 300s) before
+              # tagging — so this budget must comfortably exceed that wait.
+              # Poll like the CodeQL binding does, then fail closed.
+              for _ in $(seq 1 90); do
+                status="$(curl --silent --show-error --location \
+                  --proto '=https' --tlsv1.2 \
+                  --output "${ref_json}" --write-out '%{http_code}' \
+                  --header 'Accept: application/vnd.github+json' \
+                  --header 'X-GitHub-Api-Version: 2026-03-10' \
+                  --header "Authorization: Bearer ${GH_TOKEN}" \
+                  "${api}/git/ref/tags/${retained_tag}")"
+                if [ "${status}" = 200 ]; then
+                  tag_object="$(python3 -I -B scripts/ci/release_contract.py tag-ref-object \
+                    --ref-json "${ref_json}" --tag "${retained_tag}")"
+                  object_status="$(curl --silent --show-error --location \
+                    --proto '=https' --tlsv1.2 \
+                    --output "${tag_json}" --write-out '%{http_code}' \
+                    --header 'Accept: application/vnd.github+json' \
+                    --header 'X-GitHub-Api-Version: 2026-03-10' \
+                    --header "Authorization: Bearer ${GH_TOKEN}" \
+                    "${api}/git/tags/${tag_object}")"
+                  test "${object_status}" = 200
+                  test "$(jq -er '.object.type' "${tag_json}")" = commit
+                  tag_target="$(jq -er '.object.sha' "${tag_json}")"
+                  break
+                fi
+                # 404 = tag not minted yet; throttles and server errors are
+                # transient and retried inside the same fail-closed budget.
+                # Anything else (401, 422, ...) is a hard denial immediately.
+                case "${status}" in
+                  404|403|429|500|502|503|504) ;;
+                  *)
+                    printf 'DENY: retained-tag probe returned HTTP %s\n' "${status}" >&2
+                    exit 1
+                    ;;
+                esac
+                sleep 10
+              done
+              if [ -z "${tag_target}" ]; then
+                # This red is STICKY: if the retained release genuinely never
+                # tagged, every later documentation merge fails here the same
+                # way until an artifact merge succeeds and moves the retained
+                # version forward. That is the intended trade - loud and
+                # recoverable, never a wrong release - and a reviewer should
+                # not have to derive it from the loop above.
+                printf 'DENY: retained release tag %s never appeared for the no-artifact gap\n' "${retained_tag}" >&2
+                exit 1
+              fi
+              [[ "${tag_target}" =~ ^[0-9a-f]{40}$ ]]
+              cumulative="$(python3 -I -B scripts/ci/release_contract.py transition \
+                --repository . --base "${tag_target}" --head "${COMPLETED_SHA}" \
+                --first-parent)"
+              test "$(jq -er '.class' <<<"${cumulative}")" = no-artifact
+              test "$(jq -er '.tag' <<<"${cumulative}")" = "${retained_tag}"
+              printf 'NO-ARTIFACT: %s is documentation-only; no tag, no Release, publisher not dispatched.\n' \
+                "${COMPLETED_SHA}"
+              printf '## No-artifact merge\n\nCommit %s changed documentation surfaces only; the retained release stays %s and the publisher was not dispatched.\n' \
+                "${COMPLETED_SHA}" "${retained_tag}" >> "${GITHUB_STEP_SUMMARY}"
+              ;;
+            *)
+              printf 'DENY: unknown transition class %s\n' "${claimed_class}" >&2
+              exit 1
+              ;;
+          esac
+          printf 'class=%s\n' "${claimed_class}" >> "${GITHUB_OUTPUT}"
       - name: Bind event, source, and exact next patch
+        if: steps.classify.outputs.class == 'artifact'
         id: release
         env:
           COMPLETED_SHA: ${{ github.event.workflow_run.head_sha }}
@@ -98,6 +239,7 @@ jobs:
           printf 'base_sha=%s\nsource_sha=%s\nversion=%s\ntag=%s\n' \
             "${base_sha}" "${source_sha}" "${version}" "${tag}" >> "${GITHUB_OUTPUT}"
       - name: Authorize exact successful PR-gate and CodeQL main jobs
+        if: steps.classify.outputs.class == 'artifact'
         id: main_ci
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -170,6 +312,7 @@ jobs:
             --jobs-json "${codeql_jobs}" --workflow codeql --run-id "${codeql_run_id}")" = 2
           printf 'codeql_run_id=%s\n' "${codeql_run_id}" >> "${GITHUB_OUTPUT}"
       - name: Create or verify the exact immutable annotated tag
+        if: steps.classify.outputs.class == 'artifact'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SOURCE_SHA: ${{ steps.release.outputs.source_sha }}
@@ -251,6 +394,7 @@ jobs:
           fi
           classify_tag exact >/dev/null
       - name: Dispatch the successful-main-bound publisher explicitly
+        if: steps.classify.outputs.class == 'artifact'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SOURCE_SHA: ${{ steps.release.outputs.source_sha }}

@@ -2947,6 +2947,251 @@ class GitTransitionTests(unittest.TestCase):
             self.assertIn("VERSION disappeared after initialization", str(denied.exception))
 
 
+class NoArtifactClassTests(unittest.TestCase):
+    """The documentation-only class must fail closed in every direction."""
+
+    def git(self, root: Path, *args: str) -> str:
+        return subprocess.run(["git", "-C", str(root), *args], check=True, text=True, stdout=subprocess.PIPE).stdout.strip()
+
+    def release_commit(self, root: Path, version: str) -> str:
+        files = snapshot(version)
+        for name, contents in files.items():
+            path = root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(contents, encoding="utf-8")
+        self.git(root, "add", ".")
+        self.git(root, "-c", "user.name=Release Test", "-c", "user.email=release@example.invalid", "commit", "-m", version)
+        return self.git(root, "rev-parse", "HEAD")
+
+    def paths_commit(self, root: Path, files: dict[str, str | None], marker: str) -> str:
+        for name, contents in files.items():
+            path = root / name
+            if contents is None:
+                path.unlink()
+                self.git(root, "rm", "-q", "--cached", name)
+                continue
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(contents, encoding="utf-8")
+            self.git(root, "add", name)
+        self.git(root, "-c", "user.name=Release Test", "-c", "user.email=release@example.invalid", "commit", "-m", marker)
+        return self.git(root, "rev-parse", "HEAD")
+
+    def repo(self, temporary: str) -> tuple[Path, str]:
+        root = Path(temporary)
+        self.git(root, "init", "-q")
+        self.git(root, "branch", "-m", "main")
+        return root, self.release_commit(root, "0.1.9")
+
+    def test_documentation_path_table_is_closed_in_both_directions(self):
+        for path, expected in (
+            ("AGENTS.md", True),
+            ("README.md", True),
+            (".gitignore", True),
+            ("docs/guide.md", True),
+            ("docs/deep/nested.md", True),
+            ("CHANGELOG.md", False),
+            ("VERSION", False),
+            ("LICENSE", False),
+            ("chart/Chart.yaml", False),
+            ("chart/values.yaml", False),
+            ("scripts/ci/release_contract.py", False),
+            (".github/workflows/pr-gate.yml", False),
+            (".github/dependabot.yml", False),
+            ("docs/tool.py", False),
+            ("docs/README", False),
+            ("app/.gitignore", False),
+            ("readme.md", False),
+            ("main.go", False),
+            ("", False),
+        ):
+            with self.subTest(path=path):
+                self.assertIs(RC.is_documentation_path(path), expected)
+
+    def test_docs_only_single_commit_classifies_no_artifact(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root, base = self.repo(temporary)
+            head = self.paths_commit(root, {"AGENTS.md": "agents contract\n"}, "docs")
+            verdict = RC.classify_transition(root, base, head, first_parent=True)
+            self.assertEqual(
+                verdict,
+                {
+                    "class": "no-artifact",
+                    "base_sha": base,
+                    "source_sha": head,
+                    "version": "0.1.9",
+                    "tag": "v0.1.9",
+                    "commits": 1,
+                },
+            )
+
+    def test_docs_only_add_edit_delete_range_classifies_no_artifact(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root, base = self.repo(temporary)
+            self.paths_commit(root, {"docs/guide.md": "guide\n", ".gitignore": "*.tmp\n"}, "add")
+            self.paths_commit(root, {"README.md": "edited readme\n"}, "edit")
+            head = self.paths_commit(root, {"docs/guide.md": None}, "delete")
+            verdict = RC.classify_transition(root, base, head, first_parent=True)
+            self.assertEqual(verdict["class"], "no-artifact")
+            self.assertEqual(verdict["commits"], 3)
+            self.assertEqual(verdict["tag"], "v0.1.9")
+
+    def test_mixed_range_without_release_patch_denies_naming_paths(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root, base = self.repo(temporary)
+            self.paths_commit(root, {"AGENTS.md": "docs edit\n"}, "docs")
+            head = self.paths_commit(root, {"main.go": "package main\n"}, "code")
+            with self.assertRaises(RC.ContractError) as denied:
+                RC.classify_transition(root, base, head, first_parent=True)
+            self.assertIn("without one exact release patch", str(denied.exception))
+            self.assertIn("main.go", str(denied.exception))
+
+    def test_artifact_only_range_without_release_patch_denies(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root, base = self.repo(temporary)
+            head = self.paths_commit(root, {"main.go": "package main\n"}, "code")
+            with self.assertRaises(RC.ContractError):
+                RC.classify_transition(root, base, head, first_parent=True)
+
+    def test_changelog_only_edit_denies(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root, base = self.repo(temporary)
+            changed = (root / "CHANGELOG.md").read_text(encoding="utf-8") + "\n- stray claim\n"
+            head = self.paths_commit(root, {"CHANGELOG.md": changed}, "stray")
+            with self.assertRaises(RC.ContractError) as denied:
+                RC.classify_transition(root, base, head, first_parent=True)
+            self.assertIn("CHANGELOG.md", str(denied.exception))
+
+    def test_docs_range_with_full_release_patch_stays_artifact(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root, base = self.repo(temporary)
+            files = dict(snapshot("0.1.10"))
+            files["AGENTS.md"] = "agents contract\n"
+            head = self.paths_commit(root, files, "release with docs")
+            verdict = RC.classify_transition(root, base, head, first_parent=True)
+            self.assertEqual(verdict["class"], "artifact")
+            self.assertEqual(verdict["tag"], "v0.1.10")
+            self.assertEqual(verdict["source_sha"], head)
+            intent = RC.validate_transition(root, base, head, first_parent=True)
+            self.assertEqual(intent, RC.ReleaseIntent(head, RC.Version.parse("0.1.10")))
+
+    def test_touch_then_revert_inside_range_denies(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root, base = self.repo(temporary)
+            self.paths_commit(root, {"main.go": "package main\n"}, "touch")
+            self.paths_commit(root, {"main.go": None}, "revert")
+            head = self.paths_commit(root, {"AGENTS.md": "docs edit\n"}, "docs")
+            with self.assertRaises(RC.ContractError) as denied:
+                RC.classify_transition(root, base, head, first_parent=True)
+            self.assertIn("main.go", str(denied.exception))
+
+    def test_symlink_swap_at_documentation_path_denies(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root, base = self.repo(temporary)
+            os.symlink("AGENTS.md", root / "README.md")
+            self.git(root, "add", "README.md")
+            self.git(root, "-c", "user.name=Release Test", "-c", "user.email=release@example.invalid", "commit", "-m", "symlink add")
+            added = self.git(root, "rev-parse", "HEAD")
+            with self.assertRaises(RC.ContractError):
+                RC.classify_transition(root, base, added, first_parent=True)
+
+            seeded = self.paths_commit(root, {"docs/real.md": "real file\n"}, "seed doc")
+            (root / "docs/real.md").unlink()
+            os.symlink("../CHANGELOG.md", root / "docs/real.md")
+            self.git(root, "add", "docs/real.md")
+            self.git(root, "-c", "user.name=Release Test", "-c", "user.email=release@example.invalid", "commit", "-m", "typechange")
+            swapped = self.git(root, "rev-parse", "HEAD")
+            with self.assertRaises(RC.ContractError):
+                RC.classify_transition(root, seeded, swapped, first_parent=True)
+
+    def test_executable_bit_on_markdown_remains_documentation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root, _ = self.repo(temporary)
+            base = self.paths_commit(root, {"README.md": "# readme\n"}, "seed readme")
+            os.chmod(root / "README.md", 0o755)
+            self.git(root, "add", "README.md")
+            self.git(root, "-c", "user.name=Release Test", "-c", "user.email=release@example.invalid", "commit", "-m", "chmod")
+            head = self.git(root, "rev-parse", "HEAD")
+            verdict = RC.classify_transition(root, base, head, first_parent=True)
+            self.assertEqual(verdict["class"], "no-artifact")
+
+    def test_rename_decomposes_and_denies_only_across_the_allowlist_boundary(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root, _ = self.repo(temporary)
+            base = self.paths_commit(root, {"docs/old.md": "content\n"}, "seed")
+            self.git(root, "mv", "docs/old.md", "docs/new.md")
+            self.git(root, "-c", "user.name=Release Test", "-c", "user.email=release@example.invalid", "commit", "-m", "inside rename")
+            inside = self.git(root, "rev-parse", "HEAD")
+            verdict = RC.classify_transition(root, base, inside, first_parent=True)
+            self.assertEqual(verdict["class"], "no-artifact")
+
+            self.git(root, "mv", "docs/new.md", "escaped.txt")
+            self.git(root, "-c", "user.name=Release Test", "-c", "user.email=release@example.invalid", "commit", "-m", "crossing rename")
+            crossing = self.git(root, "rev-parse", "HEAD")
+            with self.assertRaises(RC.ContractError) as denied:
+                RC.classify_transition(root, inside, crossing, first_parent=True)
+            self.assertIn("escaped.txt", str(denied.exception))
+
+    def test_tree_identical_range_classifies_no_artifact(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root, base = self.repo(temporary)
+            self.git(root, "-c", "user.name=Release Test", "-c", "user.email=release@example.invalid", "commit", "--allow-empty", "-m", "no-op")
+            head = self.git(root, "rev-parse", "HEAD")
+            verdict = RC.classify_transition(root, base, head, first_parent=True)
+            self.assertEqual(verdict["class"], "no-artifact")
+
+    def test_two_parent_commit_denies_in_both_classes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root, base = self.repo(temporary)
+            self.git(root, "checkout", "-q", "-b", "topic", base)
+            self.paths_commit(root, {"AGENTS.md": "topic docs\n"}, "topic docs")
+            self.git(root, "checkout", "-q", "main")
+            self.paths_commit(root, {"README.md": "main docs\n"}, "main docs")
+            self.git(root, "-c", "user.name=Release Test", "-c", "user.email=release@example.invalid", "merge", "--no-ff", "topic", "-m", "merge")
+            head = self.git(root, "rev-parse", "HEAD")
+            with self.assertRaises(RC.ContractError):
+                RC.classify_transition(root, base, head, first_parent=True)
+
+    def test_cli_transition_emits_both_verdicts_and_denies_mixed(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root, base = self.repo(temporary)
+            docs_head = self.paths_commit(root, {"AGENTS.md": "docs edit\n"}, "docs")
+            stream = io.StringIO()
+            with contextlib.redirect_stdout(stream):
+                code = RC.main(["transition", "--repository", str(root), "--base", base, "--head", docs_head, "--first-parent"])
+            self.assertEqual(code, 0)
+            verdict = json.loads(stream.getvalue())
+            self.assertEqual(verdict["class"], "no-artifact")
+            self.assertEqual(verdict["source_sha"], docs_head)
+
+            release_head = self.release_commit(root, "0.1.10")
+            stream = io.StringIO()
+            with contextlib.redirect_stdout(stream):
+                code = RC.main(["transition", "--repository", str(root), "--base", docs_head, "--head", release_head, "--first-parent"])
+            self.assertEqual(code, 0)
+            verdict = json.loads(stream.getvalue())
+            self.assertEqual(verdict["class"], "artifact")
+            self.assertEqual(verdict["tag"], "v0.1.10")
+
+            mixed_head = self.paths_commit(root, {"main.go": "package main\n"}, "code only")
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = RC.main(["transition", "--repository", str(root), "--base", release_head, "--head", mixed_head, "--first-parent"])
+            self.assertEqual(code, 1)
+            self.assertTrue(err.getvalue().startswith("DENY: "))
+
+    def test_discovery_still_recovers_boundary_past_trailing_docs_merges(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root, base = self.repo(temporary)
+            release_head = self.release_commit(root, "0.1.10")
+            docs_head = self.paths_commit(root, {"AGENTS.md": "post-release docs\n"}, "docs")
+            window = RC.discover_transition_window(root, docs_head)
+            self.assertEqual(window.intent.version, RC.Version.parse("0.1.10"))
+            self.assertEqual(window.intent.source_sha, docs_head)
+            cumulative = RC.classify_transition(root, release_head, docs_head, first_parent=True)
+            self.assertEqual(cumulative["class"], "no-artifact")
+            self.assertEqual(cumulative["tag"], "v0.1.10")
+
+
 class ExistingImageShellPathTests(unittest.TestCase):
     @staticmethod
     def workflow_run_block(step_name: str) -> str:
@@ -3689,6 +3934,65 @@ gh() {
             "DENY: GitHub Release did not become authoritative immutable exact state",
             killed.stderr,
         )
+
+
+class NoArtifactWiringTests(unittest.TestCase):
+    """The verdict artifact and orchestrator classification stay fail closed."""
+
+    def test_gate_publishes_the_transition_verdict_on_protected_pushes_only(self):
+        gate = (ROOT / ".github/workflows/pr-gate.yml").read_text(encoding="utf-8")
+        self.assertIn("name: transition-verdict", gate)
+        self.assertIn("if-no-files-found: error", gate)
+        self.assertIn("transition-verdict.json", gate)
+        upload = gate.split("- name: Publish the transition verdict", 1)[1].split("- name: ", 1)[0]
+        self.assertIn("github.event_name == 'push' && github.ref == 'refs/heads/main'", upload)
+        self.assertIn("overwrite: true", upload)
+        self.assertRegex(gate, r"uses: actions/upload-artifact@[0-9a-f]{40}")
+
+    def test_orchestrator_classifies_before_any_release_effect(self):
+        orchestrator = (ROOT / ".github/workflows/release-after-main.yml").read_text(encoding="utf-8")
+        self.assertIn("id: classify", orchestrator)
+        self.assertEqual(
+            orchestrator.count("if: steps.classify.outputs.class == 'artifact'"),
+            4,
+            "every release-effect step must be gated on the artifact class",
+        )
+        self.assertIn('test "${rederived_class}" = "${claimed_class}"', orchestrator)
+        self.assertIn("expected exactly one transition-verdict artifact", orchestrator)
+        self.assertIn('test "${claimed_source}" = "${COMPLETED_SHA}"', orchestrator)
+        # GitHub serves /actions/runs/{id}/attempts/{n}/jobs but NOT the
+        # attempts/<n>/artifacts endpoint (404), so an attempt-scoped fetch
+        # would fail the classify step on every merge. Pin the single
+        # artifacts-fetch LINE rather than the whole file, so prose
+        # explaining the 404 can neither satisfy nor break this assertion.
+        artifact_fetch = [
+            line for line in orchestrator.splitlines() if "/artifacts?per_page=" in line
+        ]
+        self.assertEqual(len(artifact_fetch), 1, artifact_fetch)
+        self.assertIn(
+            "/actions/runs/${MAIN_RUN_ID}/artifacts?per_page=100", artifact_fetch[0]
+        )
+        self.assertNotIn("attempts", artifact_fetch[0])
+        self.assertIn(
+            "overwrite: true", (ROOT / ".github/workflows/pr-gate.yml").read_text(encoding="utf-8")
+        )
+        self.assertIn("DENY: retained release tag", orchestrator)
+        self.assertIn("publisher not dispatched", orchestrator)
+        self.assertLess(
+            orchestrator.index("id: classify"),
+            orchestrator.index("Dispatch the successful-main-bound publisher"),
+        )
+        cumulative = orchestrator.split("no-artifact)", 1)[1].split("DENY: unknown transition class", 1)[0]
+        self.assertIn('--base "${tag_target}"', cumulative)
+        self.assertIn("= no-artifact", cumulative)
+
+    def test_agents_contract_names_the_exact_code_allowlist(self):
+        agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+        for name in sorted(RC.DOCUMENTATION_FILES):
+            self.assertIn(f"`{name}`", agents)
+        self.assertIn("Markdown files under `docs/`", agents)
+        self.assertIn("no-artifact", agents)
+        self.assertIn("nothing to version, sign, scan", agents)
 
 
 class WorkflowStructureTests(unittest.TestCase):

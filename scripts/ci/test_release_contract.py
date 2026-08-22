@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import zipfile
 from unittest import mock
 from pathlib import Path
 
@@ -3190,6 +3191,962 @@ class NoArtifactClassTests(unittest.TestCase):
             cumulative = RC.classify_transition(root, release_head, docs_head, first_parent=True)
             self.assertEqual(cumulative["class"], "no-artifact")
             self.assertEqual(cumulative["tag"], "v0.1.10")
+
+
+    def test_gitlink_entry_denies_even_under_an_allowlisted_path(self):
+        # A submodule records mode 160000, outside the regular-file mode set.
+        # The path itself is allowlisted, so only the mode guard can deny -
+        # exactly the case a path-only allowlist would wave through.
+        with tempfile.TemporaryDirectory() as temporary:
+            root, base = self.repo(temporary)
+            pointer = self.git(root, "rev-parse", "HEAD")
+            self.git(root, "update-index", "--add", "--cacheinfo", f"160000,{pointer},docs/vendored")
+            self.git(root, "-c", "user.name=Release Test", "-c", "user.email=release@example.invalid", "commit", "-m", "gitlink")
+            head = self.git(root, "rev-parse", "HEAD")
+            with self.assertRaises(RC.ContractError) as denied:
+                RC.classify_transition(root, base, head, first_parent=True)
+            self.assertIn("docs/vendored", str(denied.exception))
+
+    def test_malformed_diff_entry_denies_instead_of_being_skipped(self):
+        # The raw-diff parser is the one place a hostile or novel git output
+        # could silently drop an entry, so its guard must deny rather than
+        # ignore. Drive it directly: a real repository cannot easily emit a
+        # malformed entry, and a guard nothing can reach is not a guard.
+        # _diff_entries shells out with subprocess.run itself rather than
+        # through the _git helper, so THAT is the seam to stub - patching
+        # _git would silently do nothing and the test would pass vacuously.
+        with tempfile.TemporaryDirectory() as temporary:
+            root, base = self.repo(temporary)
+            head = self.paths_commit(root, {"AGENTS.md": "agents\n"}, "docs")
+            self.assertEqual(RC.classify_transition(root, base, head, first_parent=True)["class"], "no-artifact")
+            original = RC.subprocess.run
+            for corrupt, reason in (
+                (":100644 100644 aaaaaaa bbbbbbb\x00AGENTS.md\x00", "status field missing"),
+                (":100644 100644 aaaaaaa bbbbbbb Z\x00AGENTS.md\x00", "unknown status letter"),
+                (":100644 100644 zzzzzzz bbbbbbb M\x00AGENTS.md\x00", "non-hex blob id"),
+                (":100644 100644 aaaaaaa bbbbbbb M\x00\x00", "empty path"),
+                (":100644 M\x00AGENTS.md\x00", "truncated meta"),
+            ):
+                with self.subTest(reason=reason):
+                    def fake(command, *args, _corrupt=corrupt, **kwargs):
+                        if "diff" in command:
+                            return subprocess.CompletedProcess(command, 0, stdout=_corrupt.encode("utf-8"), stderr=b"")
+                        return original(command, *args, **kwargs)
+
+                    RC.subprocess.run = fake
+                    try:
+                        with self.assertRaises(RC.ContractError) as denied:
+                            RC.classify_transition(root, base, head, first_parent=True)
+                    finally:
+                        RC.subprocess.run = original
+                    self.assertIn("malformed", str(denied.exception))
+            RC.subprocess.run = lambda command, *args, **kwargs: (
+                subprocess.CompletedProcess(command, 0, stdout=b":100644\x00", stderr=b"")
+                if "diff" in command
+                else original(command, *args, **kwargs)
+            )
+            try:
+                with self.assertRaises(RC.ContractError) as unpaired:
+                    RC.classify_transition(root, base, head, first_parent=True)
+            finally:
+                RC.subprocess.run = original
+            self.assertIn("not meta/path paired", str(unpaired.exception))
+            # The stub is fully reverted: the same range classifies again.
+            self.assertEqual(RC.classify_transition(root, base, head, first_parent=True)["class"], "no-artifact")
+
+    def test_head_snapshot_is_revalidated_even_when_the_range_touches_no_lock(self):
+        # Unchanged locks across the range do NOT imply a coherent release
+        # snapshot: the range can START from an incoherent one. The head
+        # validate_snapshot call is what catches that, and without it this
+        # range would report a no-artifact verdict carrying a tag that
+        # contradicts the chart.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.git(root, "init", "-q")
+            self.git(root, "branch", "-m", "main")
+            skewed = snapshot("0.1.9")
+            skewed["chart/Chart.yaml"] = 'apiVersion: v2\nversion: 0.1.8\nappVersion: "0.1.8"\n'
+            base = self.paths_commit(root, skewed, "skewed base")
+            head = self.paths_commit(root, {"AGENTS.md": "agents\n"}, "docs only")
+            for lock in RC.RELEASE_LOCK_PATHS:
+                self.assertEqual(
+                    self.git(root, "show", f"{base}:{lock}"),
+                    self.git(root, "show", f"{head}:{lock}"),
+                    lock,
+                )
+            with self.assertRaises(RC.ContractError) as denied:
+                RC.classify_transition(root, base, head, first_parent=True)
+            self.assertIn("chart version does not equal VERSION", str(denied.exception))
+
+
+class NoArtifactClassifyShellPathTests(unittest.TestCase):
+    """Executed coverage for the release-after-main classify step's shell.
+
+    ``NoArtifactWiringTests`` only pins substrings of this step's source; it
+    never runs the ~110 lines of bash that decide whether a release
+    happens. This class extracts the real step body from the real workflow
+    file and runs it under real bash, real git (against a synthetic
+    repository this class builds), real jq, real unzip, and the real
+    ``release_contract.py`` copied verbatim into that repository --
+    following the ``ExistingImageShellPathTests`` house style. Only ``gh``,
+    ``curl``, ``python3``, and ``sleep`` are stubbed: ``gh`` and ``curl``
+    because they are the real network calls the step makes, ``sleep`` so a
+    90-attempt, 10-second-per-attempt poll does not take fifteen minutes,
+    and ``python3`` only to redirect to this interpreter (it still runs the
+    genuine ``release_contract.py``).
+
+    Unlike naranjo.online's sibling class, this repository's no-artifact
+    gap is re-proven against a TAG OBJECT the step polls for
+    (``GET .../git/ref/tags/{tag}`` then ``GET .../git/tags/{sha}``), never
+    against the newest earlier successful gate run pulled from the Actions
+    job history. The ``curl`` stub below therefore serves three distinct
+    endpoints -- the verdict-artifact zip, the tag-ref probe, and the tag
+    object resolve -- and a small on-disk script/counter file drives the
+    ref probe through a scripted sequence of HTTP statuses per call, so one
+    fixture can express "404 five times then 200" or "429, then 503, then
+    200" without bash re-entering the test process per attempt.
+    """
+
+    STEP = "Classify the completed range from its authorized gate verdict"
+
+    _PRELUDE = r'''
+set -x
+
+python3() {
+  "${TEST_PYTHON}" "$@"
+}
+
+sleep() {
+  :
+}
+
+gh() {
+  local all="$*"
+  case "${all}" in
+    *"/artifacts?"*) cat "${ARTIFACTS_JSON}" ;;
+    *) return 2 ;;
+  esac
+}
+
+curl() {
+  local output='' url="${!#}"
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --output) output="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  case "${url}" in
+    *"/artifacts/"*"/zip")
+      cp "${VERDICT_ZIP}" "${output}"
+      ;;
+    *"/git/ref/tags/"*)
+      "${TEST_PYTHON}" "${STUB_HELPER}" ref "${output}"
+      ;;
+    *"/git/tags/"*)
+      "${TEST_PYTHON}" "${STUB_HELPER}" tag "${output}"
+      ;;
+    *)
+      return 2
+      ;;
+  esac
+}
+'''
+
+    # ``TAG_PROBE_JSON`` describes a scripted sequence of ref-probe
+    # responses (consumed one per call, clamped to the last entry if the
+    # step calls more times than scripted) plus a single tag-object
+    # response. ``REF_COUNTER`` and ``CALL_LOG`` are plain files because
+    # each invocation of this helper is a fresh process -- there is no
+    # in-memory state to carry the call index between attempts.
+    _STUB_HELPER_SOURCE = '''\
+import json
+import os
+import sys
+
+kind = sys.argv[1]
+output_path = sys.argv[2]
+script = json.load(open(os.environ["TAG_PROBE_JSON"], encoding="utf-8"))
+log_path = os.environ["CALL_LOG"]
+
+if kind == "ref":
+    counter_path = os.environ["REF_COUNTER"]
+    try:
+        index = int(open(counter_path, encoding="utf-8").read().strip())
+    except FileNotFoundError:
+        index = 0
+    entries = script["ref"]
+    entry = entries[min(index, len(entries) - 1)]
+    with open(counter_path, "w", encoding="utf-8") as counter:
+        counter.write(str(index + 1))
+elif kind == "tag":
+    entry = script["tag"]
+else:
+    raise SystemExit("unknown probe kind: " + kind)
+
+with open(log_path, "a", encoding="utf-8") as log:
+    log.write(kind + " " + str(entry["status"]) + "\\n")
+with open(output_path, "w", encoding="utf-8") as body:
+    json.dump(entry.get("body", {}), body)
+sys.stdout.write(str(entry["status"]))
+'''
+
+    # --- synthetic repository helpers, mirroring NoArtifactClassTests -----
+
+    def git(self, root: Path, *args: str) -> str:
+        return subprocess.run(
+            ["git", "-C", str(root), *args], check=True, text=True, stdout=subprocess.PIPE
+        ).stdout.strip()
+
+    def release_commit(self, root: Path, version: str) -> str:
+        files = snapshot(version)
+        for name, contents in files.items():
+            path = root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(contents, encoding="utf-8")
+        self.git(root, "add", ".")
+        self.git(
+            root, "-c", "user.name=Release Test", "-c", "user.email=release@example.invalid",
+            "commit", "-m", version,
+        )
+        return self.git(root, "rev-parse", "HEAD")
+
+    def paths_commit(self, root: Path, files: dict[str, str | None], marker: str) -> str:
+        for name, contents in files.items():
+            path = root / name
+            if contents is None:
+                path.unlink()
+                self.git(root, "rm", "-q", "--cached", name)
+                continue
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(contents, encoding="utf-8")
+            self.git(root, "add", name)
+        self.git(
+            root, "-c", "user.name=Release Test", "-c", "user.email=release@example.invalid",
+            "commit", "-m", marker,
+        )
+        return self.git(root, "rev-parse", "HEAD")
+
+    def repo(self, temporary: str) -> tuple[Path, str]:
+        root = Path(temporary)
+        self.git(root, "init", "-q")
+        self.git(root, "branch", "-m", "main")
+        return root, self.release_commit(root, "0.1.9")
+
+    def _seed_documentation_push(self, temporary: str) -> tuple[Path, str, str, str]:
+        """Build base(0.1.9) -> release_head(0.1.10) -> docs_head.
+
+        ``release_head`` doubles as this push's true retained-release
+        boundary AND the commit the (fictional) v0.1.10 tag would point to
+        once the tag probe reports it.
+        """
+        root, base = self.repo(temporary)
+        release_head = self.release_commit(root, "0.1.10")
+        docs_head = self.paths_commit(root, {"AGENTS.md": "post-release docs\n"}, "docs")
+        return root, base, release_head, docs_head
+
+    @staticmethod
+    def _install_release_contract(root: Path) -> None:
+        destination = root / "scripts" / "ci"
+        destination.mkdir(parents=True, exist_ok=True)
+        shutil.copy(HERE / "release_contract.py", destination / "release_contract.py")
+
+    # --- workflow step extraction -------------------------------------------
+
+    @staticmethod
+    def workflow_run_block(step_name: str) -> str:
+        """Extract one step's ``run: |`` body from release-after-main.yml.
+
+        ``ExistingImageShellPathTests.workflow_run_block`` is hardcoded to
+        release-publisher.yml, so this repeats its exact dedent logic
+        against the orchestrator workflow instead. A renamed or removed
+        step raises AssertionError rather than testing an empty block.
+        """
+        lines = (ROOT / ".github" / "workflows" / "release-after-main.yml").read_text(
+            encoding="utf-8"
+        ).splitlines()
+        marker = f"      - name: {step_name}"
+        try:
+            start = lines.index(marker)
+            run = lines.index("        run: |", start)
+        except ValueError as exc:
+            raise AssertionError(f"workflow step is missing: {step_name}") from exc
+        body: list[str] = []
+        for line in lines[run + 1 :]:
+            if line.startswith("      - name:"):
+                break
+            if line.startswith("          "):
+                body.append(line[10:])
+            elif not line:
+                body.append("")
+            else:
+                break
+        if not body:
+            raise AssertionError(f"workflow step has no executable run block: {step_name}")
+        return "\n".join(body) + "\n"
+
+    # --- execution -----------------------------------------------------------
+
+    def execute(
+        self,
+        block: str,
+        *,
+        root: Path,
+        completed_sha: str,
+        main_run_id: str = "1000",
+        artifacts_pages: list[dict[str, object]] | None = None,
+        verdict: dict[str, object] | None = None,
+        zip_entries: dict[str, bytes] | None = None,
+        ref_script: list[dict[str, object]] | None = None,
+        tag_script: dict[str, object] | None = None,
+        timeout: float = 30.0,
+    ) -> tuple[subprocess.CompletedProcess[str], str, str, list[str]]:
+        for tool in ("git", "jq", "unzip", "find", "seq"):
+            if shutil.which(tool) is None:
+                raise AssertionError(
+                    f"required tool is not installed on this machine: {tool} "
+                    "-- refusing to skip silently"
+                )
+        if artifacts_pages is None:
+            artifacts_pages = [
+                {"artifacts": [{"id": 1, "name": "transition-verdict", "expired": False}]}
+            ]
+        if zip_entries is None:
+            payload = json.dumps(verdict if verdict is not None else {}).encode("utf-8")
+            zip_entries = {"transition-verdict.json": payload}
+        if ref_script is None:
+            # A deliberately unhandled HTTP status: if a test that does not
+            # expect the tag probe to be reached reaches it anyway, this
+            # denies loudly (the case statement's hard-fail arm) instead of
+            # silently succeeding or looping for 90 attempts.
+            ref_script = [{"status": 599}]
+        if tag_script is None:
+            tag_script = {"status": 599}
+
+        with tempfile.TemporaryDirectory() as scratch:
+            runner = Path(scratch)
+            artifacts_json = runner / "artifacts-listing.json"
+            artifacts_json.write_text(json.dumps(artifacts_pages), encoding="utf-8")
+            verdict_zip = runner / "verdict.zip"
+            with zipfile.ZipFile(verdict_zip, "w") as archive:
+                for name, data in zip_entries.items():
+                    archive.writestr(name, data)
+            event_path = runner / "event.json"
+            event_path.write_text(json.dumps(event(completed_sha)), encoding="utf-8")
+            output_path = runner / "github-output.txt"
+            output_path.write_text("", encoding="utf-8")
+            summary_path = runner / "github-summary.md"
+            summary_path.write_text("", encoding="utf-8")
+            runner_temp = runner / "runner-temp"
+            runner_temp.mkdir()
+
+            tag_probe_json = runner / "tag-probe.json"
+            tag_probe_json.write_text(
+                json.dumps({"ref": ref_script, "tag": tag_script}), encoding="utf-8"
+            )
+            call_log = runner / "call-log.txt"
+            call_log.write_text("", encoding="utf-8")
+            ref_counter = runner / "ref-counter.txt"
+            stub_helper = runner / "stub_helper.py"
+            stub_helper.write_text(self._STUB_HELPER_SOURCE, encoding="utf-8")
+
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "TEST_PYTHON": ExistingImageShellPathTests.bash_path(sys.executable),
+                    "GH_TOKEN": "fixture-token",
+                    "COMPLETED_SHA": completed_sha,
+                    "MAIN_RUN_ID": main_run_id,
+                    "RUNNER_TEMP": str(runner_temp),
+                    "GITHUB_OUTPUT": str(output_path),
+                    "GITHUB_STEP_SUMMARY": str(summary_path),
+                    "GITHUB_REPOSITORY": "owner/site",
+                    "GITHUB_API_URL": "https://api.github.example.invalid",
+                    "GITHUB_EVENT_PATH": str(event_path),
+                    "ARTIFACTS_JSON": str(artifacts_json),
+                    "VERDICT_ZIP": str(verdict_zip),
+                    "TAG_PROBE_JSON": str(tag_probe_json),
+                    "CALL_LOG": str(call_log),
+                    "REF_COUNTER": str(ref_counter),
+                    "STUB_HELPER": str(stub_helper),
+                }
+            )
+            completed = subprocess.run(
+                [ExistingImageShellPathTests.bash_executable()],
+                cwd=root,
+                env=environment,
+                check=False,
+                input=self._PRELUDE + "\n" + block,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                timeout=timeout,
+            )
+            calls = [line for line in call_log.read_text(encoding="utf-8").splitlines() if line]
+            return (
+                completed,
+                output_path.read_text(encoding="utf-8"),
+                summary_path.read_text(encoding="utf-8"),
+                calls,
+            )
+
+    # --- scenario 1: documentation-only merge, both-direction happy path ---
+
+    def test_documentation_only_merge_writes_no_artifact_class_and_summary(self):
+        block = self.workflow_run_block(self.STEP)
+        with tempfile.TemporaryDirectory() as temporary:
+            root, base, release_head, docs_head = self._seed_documentation_push(temporary)
+            self._install_release_contract(root)
+            verdict = {"class": "no-artifact", "base_sha": release_head, "source_sha": docs_head}
+            tag_object_sha = "a" * 40
+            ref_script = [
+                {
+                    "status": 200,
+                    "body": {
+                        "ref": "refs/tags/v0.1.10",
+                        "object": {"type": "tag", "sha": tag_object_sha},
+                    },
+                }
+            ]
+            tag_script = {"status": 200, "body": {"object": {"type": "commit", "sha": release_head}}}
+            completed, output, summary, calls = self.execute(
+                block,
+                root=root,
+                completed_sha=docs_head,
+                verdict=verdict,
+                ref_script=ref_script,
+                tag_script=tag_script,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            self.assertIn("class=no-artifact\n", output)
+            self.assertIn("NO-ARTIFACT:", completed.stdout)
+            self.assertIn("No-artifact merge", summary)
+            self.assertEqual(calls, ["ref 200", "tag 200"])
+
+    # --- scenario 2: artifact merge, the other happy-path direction --------
+
+    def test_artifact_merge_writes_artifact_class(self):
+        block = self.workflow_run_block(self.STEP)
+        with tempfile.TemporaryDirectory() as temporary:
+            root, base = self.repo(temporary)
+            self._install_release_contract(root)
+            bump_head = self.release_commit(root, "0.1.10")
+            verdict = {"class": "artifact", "base_sha": base, "source_sha": bump_head}
+            completed, output, summary, calls = self.execute(
+                block, root=root, completed_sha=bump_head, verdict=verdict
+            )
+            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            self.assertIn("class=artifact\n", output)
+            self.assertNotIn("NO-ARTIFACT:", completed.stdout)
+            self.assertEqual(summary, "")
+            # The artifact branch of the case statement is a no-op: the tag
+            # probe must never fire for a genuine artifact merge.
+            self.assertEqual(calls, [])
+
+    # --- scenario 3: THE LOAD-BEARING PROOF -- a forged base inside the push
+
+    def test_forged_base_inside_the_push_is_caught_by_the_tag_anchor(self):
+        """A verdict naming base_sha AFTER the version bump must still deny.
+
+        Push = [commit that bumps VERSION and touches code] then
+        [docs-only commit]. The true class over the whole push is
+        artifact. A forged (or buggy) verdict claims base_sha = the BUMP
+        commit itself and class = no-artifact: re-deriving over
+        [bump..docs] genuinely reports no-artifact, because the docs
+        commit alone changes nothing -- that FIRST re-derivation is
+        parameterised by claimed_base and is therefore NOT independent of
+        the verdict, exactly as in naranjo.online's sibling attack.
+
+        What defeats the forgery in THIS repository is not that
+        re-derivation and not a git-recovered boundary (which would move
+        WITH the forgery and land on the bump commit too): it is that the
+        retained tag is computed from HEAD's tree alone. Here that tree
+        still reads version 0.1.10 -- the version THIS VERY PUSH was
+        itself supposed to release -- so the demanded tag v0.1.10 can
+        never already exist, the poll exhausts its full 90-attempt budget
+        against an all-404 fixture, and the job denies. This is the proof
+        that the TAG ANCHOR, not the class re-derivation, is what makes
+        the verdict safe against untrustworthy input.
+        """
+        block = self.workflow_run_block(self.STEP)
+        with tempfile.TemporaryDirectory() as temporary:
+            root, base = self.repo(temporary)
+            self._install_release_contract(root)
+            bump = self.paths_commit(
+                root,
+                {**snapshot("0.1.10"), "cmd/server/extra.go": "package server\n"},
+                "bump with trailing code",
+            )
+            docs_head = self.paths_commit(root, {"AGENTS.md": "docs\n"}, "docs")
+            verdict = {"class": "no-artifact", "base_sha": bump, "source_sha": docs_head}
+            completed, output, _summary, calls = self.execute(
+                block,
+                root=root,
+                completed_sha=docs_head,
+                verdict=verdict,
+                ref_script=[{"status": 404}] * 90,
+                timeout=60.0,
+            )
+            self.assertNotEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            self.assertIn(
+                "DENY: retained release tag v0.1.10 never appeared for the no-artifact gap",
+                completed.stderr,
+            )
+            self.assertNotIn("class=", output)
+            self.assertEqual(len(calls), 90, "must exhaust the full poll budget, not bail early")
+
+    # --- scenario 4: an honest history whose retained tag never appears ----
+
+    def test_retained_tag_never_appears_denies_after_exhausting_the_budget(self):
+        block = self.workflow_run_block(self.STEP)
+        with tempfile.TemporaryDirectory() as temporary:
+            root, base, release_head, docs_head = self._seed_documentation_push(temporary)
+            self._install_release_contract(root)
+            verdict = {"class": "no-artifact", "base_sha": release_head, "source_sha": docs_head}
+            completed, output, _summary, calls = self.execute(
+                block,
+                root=root,
+                completed_sha=docs_head,
+                verdict=verdict,
+                ref_script=[{"status": 404}] * 90,
+                timeout=60.0,
+            )
+            self.assertNotEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            self.assertIn(
+                "DENY: retained release tag v0.1.10 never appeared for the no-artifact gap",
+                completed.stderr,
+            )
+            self.assertNotIn("class=", output)
+            self.assertEqual(len(calls), 90, "must exhaust the full poll budget, not bail early")
+
+    # --- scenario 5: the tag appears only after several 404s ---------------
+
+    def test_tag_appearing_after_several_404s_still_succeeds(self):
+        """Proves the poll's purpose: a slow-to-mint tag is not a denial."""
+        block = self.workflow_run_block(self.STEP)
+        with tempfile.TemporaryDirectory() as temporary:
+            root, base, release_head, docs_head = self._seed_documentation_push(temporary)
+            self._install_release_contract(root)
+            verdict = {"class": "no-artifact", "base_sha": release_head, "source_sha": docs_head}
+            tag_object_sha = "b" * 40
+            ref_script = [{"status": 404}] * 5 + [
+                {
+                    "status": 200,
+                    "body": {
+                        "ref": "refs/tags/v0.1.10",
+                        "object": {"type": "tag", "sha": tag_object_sha},
+                    },
+                }
+            ]
+            tag_script = {"status": 200, "body": {"object": {"type": "commit", "sha": release_head}}}
+            completed, output, _summary, calls = self.execute(
+                block,
+                root=root,
+                completed_sha=docs_head,
+                verdict=verdict,
+                ref_script=ref_script,
+                tag_script=tag_script,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            self.assertIn("class=no-artifact\n", output)
+            # Proves the loop genuinely retried five times before the
+            # sixth call succeeded, not that it got lucky on the first try.
+            self.assertEqual(calls, ["ref 404"] * 5 + ["ref 200", "tag 200"])
+
+    # --- scenario 6: transient statuses are retried, never treated fatal ---
+
+    def test_transient_statuses_are_retried_not_treated_as_fatal(self):
+        block = self.workflow_run_block(self.STEP)
+        with tempfile.TemporaryDirectory() as temporary:
+            root, base, release_head, docs_head = self._seed_documentation_push(temporary)
+            self._install_release_contract(root)
+            verdict = {"class": "no-artifact", "base_sha": release_head, "source_sha": docs_head}
+            tag_object_sha = "c" * 40
+            # Every transient code the case statement's retry arm names,
+            # in one sequence, proving none of them is fatal.
+            ref_script = [
+                {"status": 403},
+                {"status": 429},
+                {"status": 500},
+                {"status": 502},
+                {"status": 503},
+                {"status": 504},
+                {
+                    "status": 200,
+                    "body": {
+                        "ref": "refs/tags/v0.1.10",
+                        "object": {"type": "tag", "sha": tag_object_sha},
+                    },
+                },
+            ]
+            tag_script = {"status": 200, "body": {"object": {"type": "commit", "sha": release_head}}}
+            completed, output, _summary, calls = self.execute(
+                block,
+                root=root,
+                completed_sha=docs_head,
+                verdict=verdict,
+                ref_script=ref_script,
+                tag_script=tag_script,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            self.assertIn("class=no-artifact\n", output)
+            # Six transient ref attempts, then the terminal success, then
+            # the one tag-object resolve the success triggers.
+            self.assertEqual(len(calls), 8)
+
+    # --- scenario 7: a hard status denies immediately, never retried -------
+
+    def _assert_hard_status_denies_immediately(self, status: int) -> None:
+        block = self.workflow_run_block(self.STEP)
+        with tempfile.TemporaryDirectory() as temporary:
+            root, base, release_head, docs_head = self._seed_documentation_push(temporary)
+            self._install_release_contract(root)
+            verdict = {"class": "no-artifact", "base_sha": release_head, "source_sha": docs_head}
+            # A single scripted response. If a mutation loosened the
+            # hard-status arm into a retry, the stub would clamp to this
+            # same entry forever and `calls` would grow past one attempt.
+            completed, output, _summary, calls = self.execute(
+                block,
+                root=root,
+                completed_sha=docs_head,
+                verdict=verdict,
+                ref_script=[{"status": status}],
+            )
+            self.assertNotEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            self.assertIn(f"DENY: retained-tag probe returned HTTP {status}", completed.stderr)
+            self.assertNotIn("class=", output)
+            self.assertEqual(
+                calls, [f"ref {status}"], "a hard status must deny on the FIRST attempt"
+            )
+
+    def test_unauthorized_status_denies_immediately(self):
+        self._assert_hard_status_denies_immediately(401)
+
+    def test_unprocessable_status_denies_immediately(self):
+        self._assert_hard_status_denies_immediately(422)
+
+    # --- scenario 8: the tag object resolves to a non-commit type ----------
+
+    def test_tag_object_resolving_to_a_non_commit_type_denies(self):
+        block = self.workflow_run_block(self.STEP)
+        with tempfile.TemporaryDirectory() as temporary:
+            root, base, release_head, docs_head = self._seed_documentation_push(temporary)
+            self._install_release_contract(root)
+            verdict = {"class": "no-artifact", "base_sha": release_head, "source_sha": docs_head}
+            tag_object_sha = "d" * 40
+            ref_script = [
+                {
+                    "status": 200,
+                    "body": {
+                        "ref": "refs/tags/v0.1.10",
+                        "object": {"type": "tag", "sha": tag_object_sha},
+                    },
+                }
+            ]
+            tag_script = {"status": 200, "body": {"object": {"type": "tree", "sha": "e" * 40}}}
+            completed, output, _summary, calls = self.execute(
+                block,
+                root=root,
+                completed_sha=docs_head,
+                verdict=verdict,
+                ref_script=ref_script,
+                tag_script=tag_script,
+            )
+            self.assertNotEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            # `set -x` traces the command-substitution RESULT adjacent to
+            # the literal right-hand operand, so only the actual runtime
+            # value "tree" -- not the static jq program text, which is
+            # traced on every invocation including the happy path -- proves
+            # the object-type guard genuinely observed a non-commit type.
+            self.assertIn("test tree = commit", completed.stderr)
+            self.assertNotIn("class=", output)
+            self.assertEqual(calls, ["ref 200", "tag 200"])
+
+    # --- scenario 9: a real tag, but its gap to HEAD is not documentation --
+
+    def test_tag_target_to_head_gap_containing_a_non_documentation_commit_denies(self):
+        """The tag anchor finds a REAL tag -- unlike scenarios 3 and 4 --
+        but the cumulative re-proof from that real tag to HEAD still
+        catches a non-documentation commit the narrower
+        claimed_base..HEAD slice hid.
+
+        History: base (a real v0.1.9 release) -> code (touches a
+        non-documentation file, no version bump) -> docs (documentation
+        only) = HEAD. The verdict names claimed_base = code, so the FIRST
+        re-derivation ([code..docs]) is genuinely no-artifact and agrees
+        with the verdict -- the retained version at that tree is still
+        0.1.9, because `code` never touched VERSION. The tag probe
+        therefore demands v0.1.9, which DOES exist here and resolves to
+        `base`. The cumulative re-proof runs over [base..docs] instead --
+        the range the verdict's narrower claim hid -- which contains the
+        non-documentation commit without an exact release patch, and
+        `classify_transition` denies it as a mixed range.
+        """
+        block = self.workflow_run_block(self.STEP)
+        with tempfile.TemporaryDirectory() as temporary:
+            root, base = self.repo(temporary)
+            self._install_release_contract(root)
+            code = self.paths_commit(
+                root, {"internal/server/extra.go": "package server\n"}, "code touch"
+            )
+            docs_head = self.paths_commit(root, {"AGENTS.md": "docs\n"}, "docs")
+            verdict = {"class": "no-artifact", "base_sha": code, "source_sha": docs_head}
+            tag_object_sha = "f" * 40
+            ref_script = [
+                {
+                    "status": 200,
+                    "body": {
+                        "ref": "refs/tags/v0.1.9",
+                        "object": {"type": "tag", "sha": tag_object_sha},
+                    },
+                }
+            ]
+            tag_script = {"status": 200, "body": {"object": {"type": "commit", "sha": base}}}
+            completed, output, _summary, calls = self.execute(
+                block,
+                root=root,
+                completed_sha=docs_head,
+                verdict=verdict,
+                ref_script=ref_script,
+                tag_script=tag_script,
+            )
+            self.assertNotEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            self.assertIn("DENY: ", completed.stderr)
+            self.assertIn("without one exact release patch", completed.stderr)
+            self.assertIn("internal/server/extra.go", completed.stderr)
+            self.assertNotIn("class=", output)
+            self.assertEqual(calls, ["ref 200", "tag 200"])
+
+    def test_cumulative_reclassifying_as_artifact_denies(self):
+        """Isolates ``test $(jq ... cumulative.class) = no-artifact`` alone.
+
+        Scenario 9's mixed-range gap fails inside the cumulative
+        ``transition`` call itself (a ContractError from an unallowlisted
+        path with no release patch), so it never reaches this later
+        equality check. This scenario instead builds a tag_target..HEAD
+        gap that is a perfectly CLEAN, valid one-patch release bump
+        followed by docs -- something ``classify_transition`` genuinely
+        classifies "artifact" rather than erroring on -- so only the
+        explicit class-equality guard after the cumulative call can catch
+        it. The tag probe is scripted (independent of git reality) to
+        resolve the retained tag back to `base`, one commit further back
+        than the verdict's own claimed_base, to open that gap.
+        """
+        block = self.workflow_run_block(self.STEP)
+        with tempfile.TemporaryDirectory() as temporary:
+            root, base = self.repo(temporary)
+            self._install_release_contract(root)
+            valid_bump = self.release_commit(root, "0.1.10")
+            docs_head = self.paths_commit(root, {"AGENTS.md": "docs\n"}, "docs")
+            verdict = {"class": "no-artifact", "base_sha": valid_bump, "source_sha": docs_head}
+            tag_object_sha = "1" + "a" * 39
+            ref_script = [
+                {
+                    "status": 200,
+                    "body": {
+                        "ref": "refs/tags/v0.1.10",
+                        "object": {"type": "tag", "sha": tag_object_sha},
+                    },
+                }
+            ]
+            tag_script = {"status": 200, "body": {"object": {"type": "commit", "sha": base}}}
+            completed, output, _summary, calls = self.execute(
+                block,
+                root=root,
+                completed_sha=docs_head,
+                verdict=verdict,
+                ref_script=ref_script,
+                tag_script=tag_script,
+            )
+            self.assertNotEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            self.assertIn("test artifact = no-artifact", completed.stderr)
+            self.assertNotIn("class=", output)
+            self.assertEqual(calls, ["ref 200", "tag 200"])
+
+    # --- scenarios 10: the transition-verdict artifact listing -------------
+
+    def _assert_artifact_listing_denies(self, *, artifacts: list[dict[str, object]]) -> None:
+        block = self.workflow_run_block(self.STEP)
+        with tempfile.TemporaryDirectory() as temporary:
+            root, base, release_head, docs_head = self._seed_documentation_push(temporary)
+            self._install_release_contract(root)
+            completed, output, _summary, calls = self.execute(
+                block,
+                root=root,
+                completed_sha=docs_head,
+                artifacts_pages=[{"artifacts": artifacts}],
+                verdict={"class": "no-artifact", "base_sha": release_head, "source_sha": docs_head},
+            )
+            self.assertNotEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            # `set -x` traces the jq PROGRAM TEXT (a static command-line
+            # argument) on every invocation, so the literal else-branch
+            # message string is visible in stderr even when jq never takes
+            # that branch -- that text alone is not distinguishing. jq's
+            # actual runtime error is prefixed "jq: error (at FILE:LINE): ",
+            # with no surrounding quotes; matching "): " immediately before
+            # the message is what proves the error() call actually fired.
+            self.assertIn("): expected exactly one transition-verdict artifact", completed.stderr)
+            self.assertNotIn("class=", output)
+            self.assertEqual(calls, [], "must deny before the tag probe is ever reached")
+
+    def test_missing_transition_verdict_artifact_denies(self):
+        self._assert_artifact_listing_denies(artifacts=[])
+
+    def test_duplicate_transition_verdict_artifacts_deny(self):
+        self._assert_artifact_listing_denies(
+            artifacts=[
+                {"id": 1, "name": "transition-verdict", "expired": False},
+                {"id": 2, "name": "transition-verdict", "expired": False},
+            ]
+        )
+
+    def test_expired_only_transition_verdict_artifact_denies(self):
+        self._assert_artifact_listing_denies(
+            artifacts=[{"id": 1, "name": "transition-verdict", "expired": True}]
+        )
+
+    def test_valid_artifact_alongside_an_expired_duplicate_still_succeeds(self):
+        # The three denial cases above prove the exactly-one LENGTH check.
+        # None of them proves the `expired == false` FILTER does anything:
+        # a jq selector that ignored `expired` entirely would still deny all
+        # three. This is the positive case that separates them - two entries
+        # named transition-verdict, one expired - and it must pass, choosing
+        # the live one by id.
+        block = self.workflow_run_block(self.STEP)
+        with tempfile.TemporaryDirectory() as temporary:
+            root, base, release_head, docs_head = self._seed_documentation_push(temporary)
+            self._install_release_contract(root)
+            verdict = {"class": "no-artifact", "base_sha": release_head, "source_sha": docs_head}
+            tag_object_sha = "a" * 40
+            ref_script = [
+                {
+                    "status": 200,
+                    "body": {
+                        "ref": "refs/tags/v0.1.10",
+                        "object": {"type": "tag", "sha": tag_object_sha},
+                    },
+                }
+            ]
+            tag_script = {"status": 200, "body": {"object": {"type": "commit", "sha": release_head}}}
+            completed, output, _summary, calls = self.execute(
+                block,
+                root=root,
+                completed_sha=docs_head,
+                verdict=verdict,
+                ref_script=ref_script,
+                tag_script=tag_script,
+                artifacts_pages=[
+                    {
+                        "artifacts": [
+                            {"id": 7, "name": "transition-verdict", "expired": True},
+                            {"id": 1, "name": "transition-verdict", "expired": False},
+                        ]
+                    }
+                ],
+            )
+            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            self.assertIn("class=no-artifact\n", output)
+            self.assertEqual(calls, ["ref 200", "tag 200"])
+
+    # --- scenario 11: claimed_source/claimed_base malformed or wrong -------
+
+    def test_claimed_source_mismatch_denies(self):
+        block = self.workflow_run_block(self.STEP)
+        with tempfile.TemporaryDirectory() as temporary:
+            root, base, release_head, docs_head = self._seed_documentation_push(temporary)
+            self._install_release_contract(root)
+            wrong_source = "b" * 40
+            verdict = {
+                "class": "no-artifact", "base_sha": release_head, "source_sha": wrong_source,
+            }
+            completed, output, _summary, calls = self.execute(
+                block, root=root, completed_sha=docs_head, verdict=verdict
+            )
+            self.assertNotEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            self.assertIn(f"test {wrong_source} = {docs_head}", completed.stderr)
+            self.assertNotIn("class=", output)
+            self.assertEqual(calls, [])
+
+    def test_claimed_base_not_lowercase_hex_denies(self):
+        block = self.workflow_run_block(self.STEP)
+        with tempfile.TemporaryDirectory() as temporary:
+            root, base, release_head, docs_head = self._seed_documentation_push(temporary)
+            self._install_release_contract(root)
+            bad_base = "A" * 40
+            verdict = {"class": "no-artifact", "base_sha": bad_base, "source_sha": docs_head}
+            completed, output, _summary, calls = self.execute(
+                block, root=root, completed_sha=docs_head, verdict=verdict
+            )
+            self.assertNotEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            # `=~` alone is not distinguishing (the earlier, always-reached
+            # MAIN_RUN_ID regex check also traces one); require the bad
+            # value adjacent to the operator, matching the traced
+            # `[[ AAAA...A =~ ... ]]` line for this exact guard.
+            self.assertIn(f"[[ {bad_base} =~", completed.stderr)
+            self.assertNotIn("class=", output)
+            self.assertEqual(calls, [])
+
+    # --- scenario 12: claimed_class disagrees with the re-derivation -------
+
+    def _assert_class_mismatch_denies(self, *, claimed_class: str) -> None:
+        block = self.workflow_run_block(self.STEP)
+        with tempfile.TemporaryDirectory() as temporary:
+            root, base, release_head, docs_head = self._seed_documentation_push(temporary)
+            self._install_release_contract(root)
+            verdict = {
+                "class": claimed_class, "base_sha": release_head, "source_sha": docs_head,
+            }
+            completed, output, _summary, calls = self.execute(
+                block, root=root, completed_sha=docs_head, verdict=verdict
+            )
+            self.assertNotEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            self.assertIn(f"test no-artifact = {claimed_class}", completed.stderr)
+            self.assertNotIn(
+                "DENY: unknown transition class", completed.stdout + completed.stderr
+            )
+            self.assertNotIn("class=", output)
+            self.assertEqual(calls, [])
+
+    def test_foreign_verdict_class_denies_before_reaching_the_catchall(self):
+        # A claimed class of "release" is denied by the equality gate one
+        # line above the case statement, because the real classifier can
+        # never itself produce "release" to agree with it. Fail-closed is
+        # proven; the printed catch-all text is not reachable here and
+        # this test does not pretend otherwise.
+        self._assert_class_mismatch_denies(claimed_class="release")
+
+    def test_claimed_class_disagrees_with_rederivation_denies(self):
+        self._assert_class_mismatch_denies(claimed_class="artifact")
+
+    # --- scenario 13: the verdict zip carries more than one file -----------
+
+    def test_zip_with_more_than_one_file_denies(self):
+        block = self.workflow_run_block(self.STEP)
+        with tempfile.TemporaryDirectory() as temporary:
+            root, base, release_head, docs_head = self._seed_documentation_push(temporary)
+            self._install_release_contract(root)
+            verdict = {"class": "no-artifact", "base_sha": release_head, "source_sha": docs_head}
+            zip_entries = {
+                "transition-verdict.json": json.dumps(verdict).encode("utf-8"),
+                "unexpected-extra-file.json": b"{}",
+            }
+            completed, output, _summary, calls = self.execute(
+                block, root=root, completed_sha=docs_head, zip_entries=zip_entries
+            )
+            self.assertNotEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            # Match the traced comparison across BOTH shells that run this
+            # suite, without losing the "it was 2, not 1" evidence. `wc -l`
+            # pads its output on macOS but not on GNU coreutils, and bash
+            # quotes a traced word only when it needs to -- so the same
+            # guard traces as `test '       2' -eq 1` locally and
+            # `test 2 -eq 1` on the CI runner. Pinning either literal makes
+            # the suite pass on one platform and fail on the other; this
+            # regression cost one red CI run in the sibling repository
+            # before it was caught.
+            self.assertRegex(completed.stderr, r"test\s+'?\s*2'?\s+-eq\s+1")
+            self.assertNotIn("class=", output)
+            self.assertEqual(calls, [])
 
 
 class ExistingImageShellPathTests(unittest.TestCase):

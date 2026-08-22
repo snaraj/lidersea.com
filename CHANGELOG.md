@@ -7,6 +7,17 @@ Git, image, and GitHub Release tags use the exact plain `vX.Y.Z` form.
 
 ## [Unreleased]
 
+## [0.1.24] - 2026-08-21
+
+### Added
+
+- Classify a protected-main merge whose every commit is confined to the
+  documentation allowlist as `no-artifact`: no version advance, no tag, no
+  Release, no publisher dispatch. Every other range keeps the existing
+  one-exact-patch release contract unchanged. Nothing is relaxed - an
+  unchanged artifact has nothing to version, sign, scan, or attest, and a
+  documentation PR still runs the full gate (#75).
+
 ## [0.1.23] - 2026-08-21
 
 ### Changed

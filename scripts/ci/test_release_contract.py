@@ -3194,18 +3194,23 @@ class NoArtifactClassTests(unittest.TestCase):
 
 
     def test_gitlink_entry_denies_even_under_an_allowlisted_path(self):
-        # A submodule records mode 160000, outside the regular-file mode set.
-        # The path itself is allowlisted, so only the mode guard can deny -
-        # exactly the case a path-only allowlist would wave through.
+        # A submodule records mode 160000, outside the regular-file mode
+        # set. The path MUST be allowlisted (docs/*.md) or this test is
+        # decorative: with a non-allowlisted path the PATH guard denies and
+        # the mode guard is never reached, so adding 160000 to
+        # _DOCUMENTATION_DIFF_MODES would leave the suite green while a
+        # gitlink at an allowlisted path classified no-artifact. That is
+        # exactly the defect an adversarial review found in the first
+        # version of this test.
         with tempfile.TemporaryDirectory() as temporary:
             root, base = self.repo(temporary)
             pointer = self.git(root, "rev-parse", "HEAD")
-            self.git(root, "update-index", "--add", "--cacheinfo", f"160000,{pointer},docs/vendored")
+            self.git(root, "update-index", "--add", "--cacheinfo", f"160000,{pointer},docs/vendored.md")
             self.git(root, "-c", "user.name=Release Test", "-c", "user.email=release@example.invalid", "commit", "-m", "gitlink")
             head = self.git(root, "rev-parse", "HEAD")
             with self.assertRaises(RC.ContractError) as denied:
                 RC.classify_transition(root, base, head, first_parent=True)
-            self.assertIn("docs/vendored", str(denied.exception))
+            self.assertIn("docs/vendored.md", str(denied.exception))
 
     def test_malformed_diff_entry_denies_instead_of_being_skipped(self):
         # The raw-diff parser is the one place a hostile or novel git output
@@ -4147,6 +4152,69 @@ sys.stdout.write(str(entry["status"]))
             self.assertRegex(completed.stderr, r"test\s+'?\s*2'?\s+-eq\s+1")
             self.assertNotIn("class=", output)
             self.assertEqual(calls, [])
+
+
+    def test_lock_free_artifact_commit_in_the_gap_denies_via_the_tag_anchor(self):
+        """A no-bump artifact commit must deny even though the tag EXISTS.
+
+        The sibling repository was vulnerable here and this one is not, and
+        the difference is worth proving rather than asserting. There, the
+        gap re-proof anchored on a boundary recovered from git and then
+        WALKED the anchor forward over trailing artifact commits; with a
+        forged base that walk stepped over a later, unreleased artifact
+        commit and re-anchored past it, so the cumulative proof never saw
+        it. This repository has no such walk: the cumulative proof anchors
+        directly on the commit the retained tag points at, which no verdict
+        field can move.
+
+        History: [0.1.9] -> [M1 releases 0.1.10, tagged] -> [C changes code,
+        no bump] -> [D documentation]. Unlike the forged-base scenario, the
+        retained tag v0.1.10 genuinely EXISTS, so the poll succeeds and the
+        job gets all the way to the cumulative check -- which re-classifies
+        tag_target..D, sees C, and denies. Every release lock is identical
+        across the whole gap, so nothing but the cumulative proof can catch
+        this one.
+        """
+        block = self.workflow_run_block(self.STEP)
+        with tempfile.TemporaryDirectory() as temporary:
+            root, _base = self.repo(temporary)
+            release_head = self.release_commit(root, "0.1.10")
+            lock_free = self.paths_commit(
+                root, {"cmd/server/extra.go": "package server\n"}, "lock-free artifact"
+            )
+            docs_head = self.paths_commit(root, {"AGENTS.md": "docs\n"}, "docs")
+            self._install_release_contract(root)
+            # The FORGED base: naming the lock-free commit makes the
+            # parameterised re-derivation report no-artifact, so the job
+            # proceeds past the class-equality check and the tag anchor is
+            # what has to catch it. Naming the honest base would deny one
+            # step earlier and prove nothing about the anchor.
+            verdict = {"class": "no-artifact", "base_sha": lock_free, "source_sha": docs_head}
+            tag_object_sha = "a" * 40
+            ref_script = [
+                {
+                    "status": 200,
+                    "body": {
+                        "ref": "refs/tags/v0.1.10",
+                        "object": {"type": "tag", "sha": tag_object_sha},
+                    },
+                }
+            ]
+            tag_script = {"status": 200, "body": {"object": {"type": "commit", "sha": release_head}}}
+            completed, output, _summary, calls = self.execute(
+                block,
+                root=root,
+                completed_sha=docs_head,
+                verdict=verdict,
+                ref_script=ref_script,
+                tag_script=tag_script,
+            )
+            self.assertNotEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            self.assertNotIn("class=", output)
+            self.assertNotIn("NO-ARTIFACT:", completed.stdout)
+            # The tag resolved fine; the denial came from the cumulative
+            # re-proof, not from a failed probe.
+            self.assertEqual(calls, ["ref 200", "tag 200"])
 
 
 class ExistingImageShellPathTests(unittest.TestCase):

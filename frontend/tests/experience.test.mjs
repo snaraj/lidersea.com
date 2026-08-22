@@ -14,6 +14,55 @@ const sources = { fallback, component, styles };
 // those rules ban, so every source-fact assertion reads the code alone.
 const stylesCode = styles.replace(/\/\*[\s\S]*?\*\//g, '');
 
+// The same treatment for the component, and for the same reason twice
+// over. The delta review defeated the focus-return pin by writing the
+// sentence "Escape closes through here too." into dismissMenu's own doc
+// comment: the old assertion scanned a 200-character window for the words
+// "Escape" and "dismissMenu()" co-occurring, and `function dismissMenu():
+// void` contains the literal `dismissMenu()`, so a comment satisfied an
+// assertion about a call. Code-only reading is what makes the call-site
+// extractors below test calls instead of proximity. The `:` guard keeps a
+// protocol-relative URL from being mistaken for a line comment.
+const componentCode = component
+  .replace(/\/\*[\s\S]*?\*\//g, '')
+  .replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+
+// The brace-matched block that follows a marker. Used to ask whether a
+// handler CALLS something, which a windowed regex cannot answer.
+function blockAfter(source, marker) {
+  const start = source.indexOf(marker);
+  assert.notEqual(start, -1, `the component has no ${marker}`);
+  const open = source.indexOf('{', start + marker.length - 1);
+  assert.notEqual(open, -1, `${marker} opens no block`);
+  let depth = 0;
+  for (let i = open; i < source.length; i += 1) {
+    if (source[i] === '{') depth += 1;
+    else if (source[i] === '}') {
+      depth -= 1;
+      if (depth === 0) return source.slice(open + 1, i);
+    }
+  }
+  assert.fail(`${marker} has an unbalanced block`);
+}
+
+// The catalog as the STYLESHEET declares it. AGENTS.md says adding a
+// reading mode is "a catalog entry, its [data-theme] token block, and its
+// switcher option; nothing else changes" — so the assertions below have to
+// find the new mode by themselves or that sentence is false. The review
+// that forced this proved the hazard by adding a fifth theme at roughly
+// 1.0:1 contrast with six of its seven tokens missing: every test passed.
+// This is not circular. The stylesheet declares which modes EXIST; the
+// contrast, token-set, and switcher assertions then validate each one, and
+// the switcher check binds the two files against each other so neither can
+// quietly shrink alone.
+const stampedThemes = [
+  ...new Set(
+    declarationBlocks(styles)
+      .flatMap((block) => [...block.selector.matchAll(/\[data-theme='([a-z-]+)'\]/g)])
+      .map((match) => match[1]),
+  ),
+].sort();
+
 // Source-size budgets. Perf budgets are tests here, so a shell that grows
 // past its cap is a red build rather than a discussion. The caps are the
 // current sizes rounded up with room to work in; they ratchet DOWN as the
@@ -31,11 +80,17 @@ const stylesCode = styles.replace(/\/\*[\s\S]*?\*\//g, '');
 //
 //   surface     old cap   measured   new cap   headroom
 //   fallback       1800       1421      1800        21%
-//   component      7600       8854      9600         8%
+//   component      7600       9303      9600         3%
 //   styles         9800      12724     13600         6%
 //
 // Both raises are disclosed in the PR body so a reviewer can check the
-// headroom is working room and not cover for a regression.
+// headroom is working room and not cover for a regression. The component
+// row is re-measured at THIS head, not at the head that proposed the cap:
+// the focus-return repair grew App.svelte by 449 bytes after the raise was
+// written, so the earlier "8854 / 8%" described a component that no longer
+// exists. The real working room is 297 bytes, which is deliberately NOT
+// answered with a third raise in the same pull request — a cap that moves
+// every time the surface under it grows measures nothing.
 const sourceByteBudgets = { fallback: 1800, component: 9600, styles: 13600 };
 
 // Every declaration block in the stylesheet, as { selector, body } pairs.
@@ -199,14 +254,18 @@ test('every theme defines the same token set', () => {
       .sort();
 
   const light = tokensOf((block) => block.selector.includes("[data-theme='light']"));
-  const dark = tokensOf((block) => block.selector.includes("[data-theme='dark']"));
-  const sepia = tokensOf((block) => block.selector.includes("[data-theme='sepia']"));
   const system = tokensOf((block) =>
     block.atRules.some((rule) => rule.includes('prefers-color-scheme')),
   );
   assert.ok(light.length > 0, 'the light theme defines no tokens');
-  assert.deepEqual(dark, light, 'the dark theme does not define the light theme token set');
-  assert.deepEqual(sepia, light, 'the sepia theme does not define the light theme token set');
+  assert.ok(stampedThemes.length >= 3, `only ${stampedThemes.length} themes found in the stylesheet`);
+  for (const theme of stampedThemes) {
+    assert.deepEqual(
+      tokensOf((block) => block.selector.includes(`[data-theme='${theme}']`)),
+      light,
+      `the ${theme} theme does not define the light theme token set`,
+    );
+  }
   assert.deepEqual(system, light, 'the system mapping does not define the light theme token set');
 });
 
@@ -242,7 +301,8 @@ test('both palettes clear their contrast floors', () => {
     ['accent', 'canvas'],
     ['accent', 'raised'],
   ];
-  for (const theme of ['light', 'dark', 'sepia']) {
+  assert.ok(stampedThemes.length >= 3, `only ${stampedThemes.length} themes found in the stylesheet`);
+  for (const theme of stampedThemes) {
     for (const [foreground, background, floor] of [
       ...textPairs.map((pair) => [...pair, 4.5]),
       ...interfacePairs.map((pair) => [...pair, 3]),
@@ -306,9 +366,16 @@ test('the theme switcher is accessible and origin-led', () => {
   assert.match(component, /aria-label="Appearance"/);
   assert.match(component, /aria-pressed=\{active === option\.id\}/);
   assert.match(component, /type="button"/);
-  for (const id of ['system', 'light', 'dark', 'sepia']) {
-    assert.ok(component.includes(`id: '${id}'`), `the switcher is missing the ${id} option`);
-  }
+  // Cross-bound rather than listed: the switcher must offer "system" plus
+  // exactly the modes the stylesheet stamps. A mode with a token block and
+  // no way to reach it, and an option that stamps an attribute no block
+  // answers, are both caught — and neither file can shrink on its own.
+  const offered = [...componentCode.matchAll(/id: '([a-z-]+)'/g)].map((match) => match[1]);
+  assert.deepEqual(
+    offered.slice().sort(),
+    ['system', ...stampedThemes].sort(),
+    'the switcher options and the stylesheet disagree about which reading modes exist',
+  );
   assert.match(
     component,
     /getAttribute\(themeAttribute\)/,
@@ -356,11 +423,34 @@ test('the appearance menu is a dismissible disclosure, not a colour-only control
   // Closing unmounts whatever the keyboard was on, so focus must be handed
   // back deliberately. Without this it lands on <body> and the next Tab
   // restarts at the top of the page.
-  assert.match(component, /trigger\?\.focus\(\)/, 'the trigger must take focus back on close');
-  assert.match(component, /bind:this=\{trigger\}/);
-  for (const path of ['choose', 'Escape']) {
-    assert.ok(
-      new RegExp(`${path}[\\s\\S]{0,200}?dismissMenu\\(\\)`).test(component),
+  // Anchored to the three places that have to be true, because the delta
+  // review evaded the previous spelling of this pin three ways while
+  // svelte-check stayed at 0 and all 14 tests stayed green: it relocated
+  // bind:this onto an option button inside {#if open} (a markup
+  // restructure does that by accident, and .focus() on a detached node is
+  // a silent no-op), it retained the trigger?.focus() token in dead code
+  // outside dismissMenu, and it satisfied both path assertions from a doc
+  // comment. A binding on the wrong element, a call in the wrong function,
+  // and a mention that is not a call are all now red.
+  assert.match(
+    blockAfter(componentCode, 'function dismissMenu(): void'),
+    /trigger\?\.focus\(\)/,
+    'dismissMenu must hand focus back to the trigger, not merely set open to false',
+  );
+  const triggerTag = componentCode.match(/<button\b[^>]*class="theme-menu__trigger"[^>]*>/);
+  assert.ok(triggerTag, 'the appearance control is not a button carrying theme-menu__trigger');
+  assert.match(
+    triggerTag[0],
+    /bind:this=\{trigger\}/,
+    'trigger must bind the always-mounted trigger button; a node inside {#if open} is destroyed before focus lands',
+  );
+  for (const [path, marker] of [
+    ['choose', 'function choose(id: string): void'],
+    ['Escape', 'onkeydown='],
+  ]) {
+    assert.match(
+      blockAfter(componentCode, marker),
+      /dismissMenu\(\)/,
       `the ${path} path must close through dismissMenu so focus returns`,
     );
   }

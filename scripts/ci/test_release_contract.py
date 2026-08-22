@@ -3329,6 +3329,10 @@ gh() {
   local all="$*"
   case "${all}" in
     *"/artifacts?"*) cat "${ARTIFACTS_JSON}" ;;
+    *"/runs?branch=main"*)
+      printf 'runs\n' >> "${CALL_LOG}"
+      cat "${RUNS_JSON}"
+      ;;
     *) return 2 ;;
   esac
 }
@@ -3451,6 +3455,29 @@ sys.stdout.write(str(entry["status"]))
         return root, base, release_head, docs_head
 
     @staticmethod
+    def _gated_runs(*head_shas: str, current: int = 1000) -> dict[str, object]:
+        """An Actions run listing, NEWEST FIRST.
+
+        ``head_shas[0]`` receives the highest id, so it is the run
+        ``max_by(.id)`` must select. Every entry is a successful
+        protected-main push run below ``MAIN_RUN_ID``, so the filter
+        admits them all and only the ORDERING distinguishes the correct
+        anchor from the wrong one.
+        """
+        return {
+            "workflow_runs": [
+                {
+                    "id": current - 1 - index,
+                    "head_branch": "main",
+                    "event": "push",
+                    "conclusion": "success",
+                    "head_sha": sha,
+                }
+                for index, sha in enumerate(head_shas)
+            ]
+        }
+
+    @staticmethod
     def _install_release_contract(root: Path) -> None:
         destination = root / "scripts" / "ci"
         destination.mkdir(parents=True, exist_ok=True)
@@ -3504,6 +3531,7 @@ sys.stdout.write(str(entry["status"]))
         zip_entries: dict[str, bytes] | None = None,
         ref_script: list[dict[str, object]] | None = None,
         tag_script: dict[str, object] | None = None,
+        runs: dict[str, object] | None = None,
         timeout: float = 30.0,
     ) -> tuple[subprocess.CompletedProcess[str], str, str, list[str]]:
         for tool in ("git", "jq", "unzip", "find", "seq"):
@@ -3527,6 +3555,13 @@ sys.stdout.write(str(entry["status"]))
             ref_script = [{"status": 599}]
         if tag_script is None:
             tag_script = {"status": 599}
+        if runs is None:
+            # Fail-closed default, mirroring the 599 ref default: a test that
+            # reaches the gated-run anchor without declaring a fixture finds
+            # NO earlier gated main run, so the jq expression errors and the
+            # step denies loudly instead of quietly borrowing some other
+            # test's anchor.
+            runs = {"workflow_runs": []}
 
         with tempfile.TemporaryDirectory() as scratch:
             runner = Path(scratch)
@@ -3545,6 +3580,8 @@ sys.stdout.write(str(entry["status"]))
             runner_temp = runner / "runner-temp"
             runner_temp.mkdir()
 
+            runs_json = runner / "previous-main-runs.json"
+            runs_json.write_text(json.dumps(runs), encoding="utf-8")
             tag_probe_json = runner / "tag-probe.json"
             tag_probe_json.write_text(
                 json.dumps({"ref": ref_script, "tag": tag_script}), encoding="utf-8"
@@ -3569,6 +3606,7 @@ sys.stdout.write(str(entry["status"]))
                     "GITHUB_API_URL": "https://api.github.example.invalid",
                     "GITHUB_EVENT_PATH": str(event_path),
                     "ARTIFACTS_JSON": str(artifacts_json),
+                    "RUNS_JSON": str(runs_json),
                     "VERDICT_ZIP": str(verdict_zip),
                     "TAG_PROBE_JSON": str(tag_probe_json),
                     "CALL_LOG": str(call_log),
@@ -3663,16 +3701,20 @@ sys.stdout.write(str(entry["status"]))
         parameterised by claimed_base and is therefore NOT independent of
         the verdict, exactly as in naranjo.online's sibling attack.
 
-        What defeats the forgery in THIS repository is not that
-        re-derivation and not a git-recovered boundary (which would move
-        WITH the forgery and land on the bump commit too): it is that the
-        retained tag is computed from HEAD's tree alone. Here that tree
-        still reads version 0.1.10 -- the version THIS VERY PUSH was
-        itself supposed to release -- so the demanded tag v0.1.10 can
-        never already exist, the poll exhausts its full 90-attempt budget
-        against an all-404 fixture, and the job denies. This is the proof
-        that the TAG ANCHOR, not the class re-derivation, is what makes
-        the verdict safe against untrustworthy input.
+        Anchor A (the retained tag) is computed from HEAD's tree alone, so
+        the forgery cannot change WHICH tag is demanded: that tree reads
+        0.1.10, the version THIS VERY PUSH was supposed to release, so
+        v0.1.10 cannot already exist and anchor A is unavailable.
+
+        Anchor A being unavailable is therefore the attack's own
+        signature, which is exactly why the fallback may not be a bypass.
+        This test proves it is not: with an all-404 tag fixture the step
+        falls through to anchor B -- the last gated main head, straight
+        from the Actions record, which the verdict also cannot choose --
+        and the four-lock equality DENIES, because the disguised artifact
+        merge carries its version bump and that head still reads 0.1.9.
+
+        The attack is caught on BOTH paths, by two independent anchors.
         """
         block = self.workflow_run_block(self.STEP)
         with tempfile.TemporaryDirectory() as temporary:
@@ -3690,74 +3732,179 @@ sys.stdout.write(str(entry["status"]))
                 root=root,
                 completed_sha=docs_head,
                 verdict=verdict,
-                ref_script=[{"status": 404}] * 90,
-                timeout=60.0,
+                ref_script=[{"status": 404}],
+                runs=self._gated_runs(base),
             )
             self.assertNotEqual(completed.returncode, 0, completed.stdout + completed.stderr)
             self.assertIn(
-                "DENY: retained release tag v0.1.10 never appeared for the no-artifact gap",
+                f"DENY: VERSION changed since the last gated main head {base}",
                 completed.stderr,
             )
             self.assertNotIn("class=", output)
-            self.assertEqual(len(calls), 90, "must exhaust the full poll budget, not bail early")
+            # The tag probe answered definitively on its FIRST call and the
+            # step went straight to anchor B: no 90-attempt wait survives.
+            self.assertEqual(calls, ["ref 404", "runs"])
 
-    # --- scenario 4: an honest history whose retained tag never appears ----
+    # --- scenario 4: THE OWNER-REQUIRED PATH -- absent tag must not block --
 
-    def test_retained_tag_never_appears_denies_after_exhausting_the_budget(self):
+    def test_absent_retained_tag_falls_back_to_the_gated_run_anchor(self):
+        """An honest documentation merge is NOT blocked by a missing tag.
+
+        This repository's release job denies on duplicated exact-SHA
+        CodeQL runs when GitHub double-delivers the merge-push event
+        (issue #81), which left six of the twelve main commits before this
+        change with no tag at all. Anchoring solely on the tag therefore
+        made the documentation fast path dead whenever an UNRELATED
+        release had flaked, and that stickiness is the friction this class
+        exists to remove.
+
+        Here the retained tag is absent, anchor B supplies the proof
+        instead, and the merge classifies no-artifact and succeeds.
+        """
         block = self.workflow_run_block(self.STEP)
         with tempfile.TemporaryDirectory() as temporary:
             root, base, release_head, docs_head = self._seed_documentation_push(temporary)
             self._install_release_contract(root)
             verdict = {"class": "no-artifact", "base_sha": release_head, "source_sha": docs_head}
-            completed, output, _summary, calls = self.execute(
+            completed, output, summary, calls = self.execute(
                 block,
                 root=root,
                 completed_sha=docs_head,
                 verdict=verdict,
-                ref_script=[{"status": 404}] * 90,
-                timeout=60.0,
-            )
-            self.assertNotEqual(completed.returncode, 0, completed.stdout + completed.stderr)
-            self.assertIn(
-                "DENY: retained release tag v0.1.10 never appeared for the no-artifact gap",
-                completed.stderr,
-            )
-            self.assertNotIn("class=", output)
-            self.assertEqual(len(calls), 90, "must exhaust the full poll budget, not bail early")
-
-    # --- scenario 5: the tag appears only after several 404s ---------------
-
-    def test_tag_appearing_after_several_404s_still_succeeds(self):
-        """Proves the poll's purpose: a slow-to-mint tag is not a denial."""
-        block = self.workflow_run_block(self.STEP)
-        with tempfile.TemporaryDirectory() as temporary:
-            root, base, release_head, docs_head = self._seed_documentation_push(temporary)
-            self._install_release_contract(root)
-            verdict = {"class": "no-artifact", "base_sha": release_head, "source_sha": docs_head}
-            tag_object_sha = "b" * 40
-            ref_script = [{"status": 404}] * 5 + [
-                {
-                    "status": 200,
-                    "body": {
-                        "ref": "refs/tags/v0.1.10",
-                        "object": {"type": "tag", "sha": tag_object_sha},
-                    },
-                }
-            ]
-            tag_script = {"status": 200, "body": {"object": {"type": "commit", "sha": release_head}}}
-            completed, output, _summary, calls = self.execute(
-                block,
-                root=root,
-                completed_sha=docs_head,
-                verdict=verdict,
-                ref_script=ref_script,
-                tag_script=tag_script,
+                ref_script=[{"status": 404}],
+                runs=self._gated_runs(release_head),
             )
             self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
             self.assertIn("class=no-artifact\n", output)
-            # Proves the loop genuinely retried five times before the
-            # sixth call succeeded, not that it got lucky on the first try.
-            self.assertEqual(calls, ["ref 404"] * 5 + ["ref 200", "tag 200"])
+            self.assertIn("No-artifact merge", summary)
+            self.assertIn("last gated main head", completed.stdout)
+            self.assertEqual(calls, ["ref 404", "runs"])
+
+    def test_absent_tag_and_no_earlier_gated_run_denies(self):
+        """BOTH anchors unavailable is the only case that still denies."""
+        block = self.workflow_run_block(self.STEP)
+        with tempfile.TemporaryDirectory() as temporary:
+            root, base, release_head, docs_head = self._seed_documentation_push(temporary)
+            self._install_release_contract(root)
+            verdict = {"class": "no-artifact", "base_sha": release_head, "source_sha": docs_head}
+            completed, output, _summary, calls = self.execute(
+                block,
+                root=root,
+                completed_sha=docs_head,
+                verdict=verdict,
+                ref_script=[{"status": 404}],
+                runs={"workflow_runs": []},
+            )
+            self.assertNotEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            self.assertIn(
+                "neither the retained tag nor an earlier gated main run is available",
+                completed.stderr,
+            )
+            self.assertNotIn("class=", output)
+            self.assertEqual(calls, ["ref 404", "runs"])
+
+    def test_lock_free_artifact_commit_denies_on_the_gated_run_anchor(self):
+        """The four-lock check cannot see a code-only change; the
+        cumulative re-classification must.
+
+        A commit touching only ``cmd/server`` moves no VERSION, chart or
+        changelog byte, so the four-lock equality passes it. Anchor B is
+        only sound because the cumulative proof runs over the same range
+        and sees the non-allowlisted path. Deleting either check must turn
+        this red.
+        """
+        block = self.workflow_run_block(self.STEP)
+        with tempfile.TemporaryDirectory() as temporary:
+            root, base, release_head, docs_head = self._seed_documentation_push(temporary)
+            self._install_release_contract(root)
+            code_head = self.paths_commit(
+                root, {"cmd/server/extra.go": "package server\n"}, "lock-free code change"
+            )
+            final_head = self.paths_commit(root, {"AGENTS.md": "more docs\n"}, "docs again")
+            verdict = {"class": "no-artifact", "base_sha": code_head, "source_sha": final_head}
+            completed, output, _summary, _calls = self.execute(
+                block,
+                root=root,
+                completed_sha=final_head,
+                verdict=verdict,
+                ref_script=[{"status": 404}],
+                runs=self._gated_runs(docs_head),
+            )
+            self.assertNotEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            self.assertNotIn("class=", output)
+
+    def test_gated_run_anchor_equal_to_the_completed_sha_denies(self):
+        """A run record naming this very push as its own anchor is refused."""
+        block = self.workflow_run_block(self.STEP)
+        with tempfile.TemporaryDirectory() as temporary:
+            root, base, release_head, docs_head = self._seed_documentation_push(temporary)
+            self._install_release_contract(root)
+            verdict = {"class": "no-artifact", "base_sha": release_head, "source_sha": docs_head}
+            completed, output, _summary, _calls = self.execute(
+                block,
+                root=root,
+                completed_sha=docs_head,
+                verdict=verdict,
+                ref_script=[{"status": 404}],
+                runs=self._gated_runs(docs_head),
+            )
+            self.assertNotEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            self.assertNotIn("class=", output)
+
+    def test_gated_run_anchor_uses_the_newest_earlier_run_not_the_oldest(self):
+        """``max_by`` versus ``min_by`` is only visible on a SUCCESS case.
+
+        Both orderings deny every attack, so an attack fixture cannot tell
+        them apart. Two earlier gated runs are supplied; selecting the
+        OLDER one spans the artifact release and false-denies a legitimate
+        documentation merge.
+        """
+        block = self.workflow_run_block(self.STEP)
+        with tempfile.TemporaryDirectory() as temporary:
+            root, base, release_head, docs_head = self._seed_documentation_push(temporary)
+            self._install_release_contract(root)
+            verdict = {"class": "no-artifact", "base_sha": release_head, "source_sha": docs_head}
+            completed, output, _summary, _calls = self.execute(
+                block,
+                root=root,
+                completed_sha=docs_head,
+                verdict=verdict,
+                ref_script=[{"status": 404}],
+                # Newest first: release_head is the correct anchor, base
+                # (0.1.9) would span the 0.1.10 release and false-deny.
+                runs=self._gated_runs(release_head, base),
+            )
+            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            self.assertIn("class=no-artifact\n", output)
+
+    # --- scenario 5: a definitive 404 must not be polled -------------------
+
+    def test_a_404_is_definitive_and_is_never_polled(self):
+        """The old 90x10s poll is gone; a missing tag answers immediately.
+
+        Waiting fifteen minutes for a tag that may never arrive bought no
+        security once anchor B existed -- it only charged every
+        documentation merge the wait. Exactly one ref call may happen.
+        """
+        block = self.workflow_run_block(self.STEP)
+        with tempfile.TemporaryDirectory() as temporary:
+            root, base, release_head, docs_head = self._seed_documentation_push(temporary)
+            self._install_release_contract(root)
+            verdict = {"class": "no-artifact", "base_sha": release_head, "source_sha": docs_head}
+            completed, _output, _summary, calls = self.execute(
+                block,
+                root=root,
+                completed_sha=docs_head,
+                verdict=verdict,
+                # Clamped: if a mutation turned 404 back into a retry, the
+                # stub would serve this entry forever and `calls` would grow.
+                ref_script=[{"status": 404}],
+                runs=self._gated_runs(release_head),
+            )
+            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            self.assertEqual(
+                calls.count("ref 404"), 1, "a definitive 404 must not be retried"
+            )
 
     # --- scenario 6: transient statuses are retried, never treated fatal ---
 
@@ -3768,15 +3915,11 @@ sys.stdout.write(str(entry["status"]))
             self._install_release_contract(root)
             verdict = {"class": "no-artifact", "base_sha": release_head, "source_sha": docs_head}
             tag_object_sha = "c" * 40
-            # Every transient code the case statement's retry arm names,
-            # in one sequence, proving none of them is fatal.
+            # Transient codes the retry arm names, then the success. The
+            # budget is three attempts, so two transients fit before it.
             ref_script = [
                 {"status": 403},
-                {"status": 429},
-                {"status": 500},
-                {"status": 502},
                 {"status": 503},
-                {"status": 504},
                 {
                     "status": 200,
                     "body": {
@@ -3796,9 +3939,9 @@ sys.stdout.write(str(entry["status"]))
             )
             self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
             self.assertIn("class=no-artifact\n", output)
-            # Six transient ref attempts, then the terminal success, then
-            # the one tag-object resolve the success triggers.
-            self.assertEqual(len(calls), 8)
+            # Two transient attempts, the terminal success, then the one
+            # tag-object resolve — and NO fallback, because anchor A won.
+            self.assertEqual(calls, ["ref 403", "ref 503", "ref 200", "tag 200"])
 
     # --- scenario 7: a hard status denies immediately, never retried -------
 
@@ -3817,12 +3960,19 @@ sys.stdout.write(str(entry["status"]))
                 completed_sha=docs_head,
                 verdict=verdict,
                 ref_script=[{"status": status}],
+                # A perfectly usable fallback anchor is deliberately made
+                # available: a hard status must deny ANYWAY. Routing a
+                # broken credential around to anchor B would hide real
+                # breakage behind the merge-friction fallback.
+                runs=self._gated_runs(release_head),
             )
             self.assertNotEqual(completed.returncode, 0, completed.stdout + completed.stderr)
             self.assertIn(f"DENY: retained-tag probe returned HTTP {status}", completed.stderr)
             self.assertNotIn("class=", output)
             self.assertEqual(
-                calls, [f"ref {status}"], "a hard status must deny on the FIRST attempt"
+                calls,
+                [f"ref {status}"],
+                "a hard status must deny on the FIRST attempt and never reach anchor B",
             )
 
     def test_unauthorized_status_denies_immediately(self):
@@ -5001,34 +5151,49 @@ class NoArtifactWiringTests(unittest.TestCase):
         self.assertIn(
             "overwrite: true", (ROOT / ".github/workflows/pr-gate.yml").read_text(encoding="utf-8")
         )
-        self.assertIn("DENY: retained release tag", orchestrator)
         self.assertIn("publisher not dispatched", orchestrator)
         self.assertLess(
             orchestrator.index("id: classify"),
             orchestrator.index("Dispatch the successful-main-bound publisher"),
         )
         cumulative = orchestrator.split("no-artifact)", 1)[1].split("DENY: unknown transition class", 1)[0]
-        self.assertIn('--base "${tag_target}"', cumulative)
+        self.assertIn('--base "${anchor}"', cumulative)
         self.assertIn("= no-artifact", cumulative)
         # The gap re-proof must anchor on evidence the VERDICT CANNOT CHOOSE.
         # The class re-derivation is parameterised by claimed_base, so a
         # verdict naming a base inside the push re-derives a genuine artifact
-        # merge as documentation. What defeats that here is the retained tag:
-        # it is computed from HEAD's tree alone, so the forgery cannot change
-        # which tag must already exist, and the tag for a release this push
-        # never made does not exist. Anchoring the cumulative proof on
-        # claimed_base — or on a boundary recovered from git, which would move
-        # with the forgery — reopens that hole silently.
-        # Assert over EXECUTABLE lines only: the comment above explains the
-        # attack and necessarily names claimed_base, and prose must never be
+        # merge as documentation. TWO anchors defeat that, and the cumulative
+        # proof must use one of them and never claimed_base: the retained tag
+        # (computed from HEAD's tree alone) or the last gated main head (read
+        # from the Actions record). Anchoring on claimed_base — or on a
+        # boundary recovered from git, which would move with the forgery —
+        # reopens that hole silently.
+        # Assert over EXECUTABLE lines only: the comments above explain the
+        # attack and necessarily name claimed_base, and prose must never be
         # able to satisfy or break a guard.
         cumulative_code = "\n".join(
             line for line in cumulative.splitlines() if not line.lstrip().startswith("#")
         )
         self.assertNotIn("claimed_base", cumulative_code)
-        self.assertNotIn("release-window", cumulative_code)
+        # Anchor A.
         self.assertIn("git/ref/tags/${retained_tag}", cumulative_code)
-        self.assertIn("DENY: retained release tag", cumulative_code)
+        # Anchor B, with the four-lock equality that denies a forged base on
+        # that path, plus the ancestry and self-anchor refusals.
+        self.assertIn("workflows/pr-gate.yml/runs?branch=main", cumulative_code)
+        self.assertIn("max_by(.id)", cumulative_code)
+        self.assertIn(
+            "for lock in VERSION chart/Chart.yaml chart/values.yaml CHANGELOG.md; do",
+            cumulative_code,
+        )
+        self.assertIn('git merge-base --is-ancestor "${previous_head}"', cumulative_code)
+        self.assertIn('test "${previous_head}" != "${COMPLETED_SHA}"', cumulative_code)
+        # The sibling repository's boundary-recovery WALK must never be
+        # ported here. Both of its fail-opens lived in that walk, and this
+        # repository has no need of it: anchor B is the immediately
+        # preceding gated head, so the range is exactly this merge.
+        self.assertNotIn("release-window", cumulative_code)
+        self.assertNotIn("boundary_sha", cumulative_code)
+        self.assertNotIn("advancing", cumulative_code)
 
     def test_agents_contract_names_the_exact_code_allowlist(self):
         agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")

@@ -106,13 +106,28 @@ Numbered for citation, repo-scoped, none negotiable in code:
     an unparseable diff entry, or a non-regular file mode all deny; renames
     decompose into add plus delete, so a rename crossing the allowlist
     boundary denies through its non-allowlisted side. Widening the allowlist
-    is itself an artifact-classified gate change that releases. One consequence
-    is deliberate and must not be mistaken for a bug: the orchestrator proves
-    the retained release actually happened by requiring its tag to exist, so a
-    documentation merge whose retained release never completed fails red — and
-    that red is STICKY. Every later documentation merge fails the same way
-    until an artifact merge succeeds and moves the retained version forward.
-    That is the intended trade: loud and recoverable, never a wrong release. PR, protected-main,
+    is itself an artifact-classified gate change that releases. The gap
+    re-proof anchors on ONE OF TWO bases, and the property that matters is
+    that the verdict can choose NEITHER: the retained release tag, computed
+    from the merged tree alone; or, when that tag does not exist, the head of
+    the newest earlier successful protected-main gate run, read from the
+    Actions record and pinned by requiring all four release locks to be
+    byte-identical between it and the merged head. The fallback is not a
+    relaxation and must never be simplified into one — a missing tag is
+    precisely the signature of a verdict naming a base inside its own push,
+    so "no tag, proceed" would be a fail-open; the second anchor is a FULL
+    independent proof that denies that same forgery through the four-lock
+    equality instead. Both anchors run the identical cumulative
+    re-classification; only the base differs. A denial happens when BOTH
+    anchors are unavailable, never when one is, so a release that failed to
+    tag — this repository's ordinary condition while #81 is open — no longer
+    blocks documentation merges. Two things are deliberately NOT promised: a
+    hard credential or request failure on the tag probe (401, 422) still
+    denies outright rather than falling through, because that is real
+    breakage rather than merge friction; and a denial on the gated-run anchor
+    is not guaranteed to clear on the very next merge, because main pushes
+    each get their own concurrency group and gate runs can therefore complete
+    out of order. Every outcome remains red rather than a wrong release. PR, protected-main,
     and recovery validation inspect every intermediate state: retain or advance
     one patch only; skip, reversion, transient future, or multiple integration
     boundaries are denied. Successful main CI binds one exact-SHA,

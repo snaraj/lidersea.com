@@ -20,12 +20,20 @@ const stylesCode = styles.replace(/\/\*[\s\S]*?\*\//g, '');
 // shell is trimmed, never up to accommodate a regression on an unchanged
 // surface.
 //
-// These three were raised when the ratings strip landed, under the
-// new-surface carve-out in AGENTS.md: the caps measured a shell that no
-// longer exists. Old caps 1600 / 2800 / 7400; measured 1421 / 6945 / 9092;
-// new caps 1800 / 7600 / 9800 — 21% / 9% / 7% headroom. The raise is
-// disclosed in the PR body so the headroom can be checked as working room.
-const sourceByteBudgets = { fallback: 1800, component: 7600, styles: 9800 };
+// They were raised once when the ratings strip landed, and again for the
+// sepia reading mode and the icon appearance menu — both under the same
+// new-surface carve-out in AGENTS.md, because each time the old cap
+// measured a shell that no longer exists. The static fallback did not gain
+// a surface, so its cap does not move.
+//
+//   surface     old cap   measured   new cap   headroom
+//   fallback       1800       1421      1800        27%
+//   component      7600       8854      9600         8%
+//   styles         9800      12724     13600         7%
+//
+// Both raises are disclosed in the PR body so a reviewer can check the
+// headroom is working room and not cover for a regression.
+const sourceByteBudgets = { fallback: 1800, component: 9600, styles: 13600 };
 
 // Every declaration block in the stylesheet, as { selector, body } pairs.
 // The parser is deliberately small: this stylesheet is hand-written, flat,
@@ -189,11 +197,13 @@ test('every theme defines the same token set', () => {
 
   const light = tokensOf((block) => block.selector.includes("[data-theme='light']"));
   const dark = tokensOf((block) => block.selector.includes("[data-theme='dark']"));
+  const sepia = tokensOf((block) => block.selector.includes("[data-theme='sepia']"));
   const system = tokensOf((block) =>
     block.atRules.some((rule) => rule.includes('prefers-color-scheme')),
   );
   assert.ok(light.length > 0, 'the light theme defines no tokens');
   assert.deepEqual(dark, light, 'the dark theme does not define the light theme token set');
+  assert.deepEqual(sepia, light, 'the sepia theme does not define the light theme token set');
   assert.deepEqual(system, light, 'the system mapping does not define the light theme token set');
 });
 
@@ -229,7 +239,7 @@ test('both palettes clear their contrast floors', () => {
     ['accent', 'canvas'],
     ['accent', 'raised'],
   ];
-  for (const theme of ['light', 'dark']) {
+  for (const theme of ['light', 'dark', 'sepia']) {
     for (const [foreground, background, floor] of [
       ...textPairs.map((pair) => [...pair, 4.5]),
       ...interfacePairs.map((pair) => [...pair, 3]),
@@ -293,7 +303,7 @@ test('the theme switcher is accessible and origin-led', () => {
   assert.match(component, /aria-label="Appearance"/);
   assert.match(component, /aria-pressed=\{active === option\.id\}/);
   assert.match(component, /type="button"/);
-  for (const id of ['system', 'light', 'dark']) {
+  for (const id of ['system', 'light', 'dark', 'sepia']) {
     assert.ok(component.includes(`id: '${id}'`), `the switcher is missing the ${id} option`);
   }
   assert.match(
@@ -320,6 +330,59 @@ test('the theme switcher is accessible and origin-led', () => {
       );
     }
   }
+});
+
+// The switcher is ONE icon now, so the reading modes live behind a
+// disclosure. A disclosure that cannot be dismissed is a trap, and one that
+// tells its modes apart by colour alone is unreadable to anyone who cannot
+// separate the swatches — so both properties are pinned here rather than
+// left to a reviewer's eye.
+test('the appearance menu is a dismissible disclosure, not a colour-only control', () => {
+  assert.match(component, /aria-haspopup="true"/);
+  assert.match(component, /aria-expanded=\{open\}/);
+  // The trigger names the mode currently in force, so its accessible name
+  // is never a bare "Appearance" with the state hidden inside the popover.
+  assert.match(component, /aria-label="Appearance: \{activeLabel\}"/);
+
+  // Two dismissal paths, because neither alone covers every target browser:
+  // Safari does not focus a button when it is clicked, so a blur-only close
+  // would leave the popover stuck open there.
+  assert.match(component, /event\.key === 'Escape'/);
+  assert.match(component, /addEventListener\('pointerdown'/);
+  assert.match(
+    component,
+    /removeEventListener\('pointerdown'/,
+    'the dismiss listener must be torn down with the open state',
+  );
+
+  // Every mode is named in text and ticked when active. The swatch previews
+  // the canvas that mode paints; it is never the only way to tell them apart.
+  assert.match(component, /\{option\.label\}/);
+  assert.match(component, /data-swatch=\{option\.id\}/);
+  assert.match(component, /active === option\.id \? '✓' : ''/);
+
+  // The icon button is a touch target like every other control here.
+  const trigger = declarationBlocks(styles).find(
+    (block) => block.selector === '.theme-menu__trigger',
+  );
+  assert.ok(trigger, 'the trigger rule is missing');
+  const bounds = declarations(trigger.body).filter(({ property }) =>
+    ['min-block-size', 'min-inline-size'].includes(property),
+  );
+  assert.equal(bounds.length, 2, 'the icon trigger must bound both of its axes');
+  for (const { property, value } of bounds) {
+    assert.equal(value, 'var(--tap-target)', `${property} must use the tap-target token`);
+  }
+
+  // The tick column is fixed width, so moving the tick to another mode
+  // cannot resize the popover — the zero-layout-shift rule, applied inside
+  // the control this time.
+  const check = declarationBlocks(styles).find((block) => block.selector === '.theme-menu__check');
+  assert.ok(check, 'the tick column rule is missing');
+  assert.ok(
+    declarations(check.body).some(({ property }) => property === 'inline-size'),
+    'the tick column must claim a fixed inline size',
+  );
 });
 
 // The chrome exists in BOTH shells so the switcher's arrival at hydration

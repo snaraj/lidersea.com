@@ -32,6 +32,18 @@
   --palette-light-accent: #0f5f57;
   --palette-light-accent-ink: #ffffff;
 
+  /* Sepia is a third EXPLICIT choice, not a warmer dark: the same low-light
+     comfort on a paper-toned surface rather than a cool one. Its values are
+     derived for THIS palette and validated against the same contrast floors
+     the other two clear — nothing here is carried over from anywhere else. */
+  --palette-sepia-canvas: #1c1714;
+  --palette-sepia-raised: #29221d;
+  --palette-sepia-ink: #f3ece4;
+  --palette-sepia-ink-muted: #c7b49c;
+  --palette-sepia-edge: #8a765f;
+  --palette-sepia-accent: #e0b578;
+  --palette-sepia-accent-ink: #1c1714;
+
   /* Scale tokens: theme-independent by construction, because a theme rule
      may only declare custom properties that carry colour. */
   --space-2xs: 0.25rem;
@@ -116,6 +128,20 @@
   --accent-ink: var(--palette-dark-accent-ink);
 }
 
+/* Sepia declares the dark UI scheme because it IS a low-light surface: form
+   controls and scrollbars the page does not paint itself must come back
+   dark, or the browser's own chrome would fight the page. */
+:root[data-theme='sepia'] {
+  --ui-scheme: dark;
+  --canvas: var(--palette-sepia-canvas);
+  --raised: var(--palette-sepia-raised);
+  --ink: var(--palette-sepia-ink);
+  --ink-muted: var(--palette-sepia-ink-muted);
+  --edge: var(--palette-sepia-edge);
+  --accent: var(--palette-sepia-accent);
+  --accent-ink: var(--palette-sepia-accent-ink);
+}
+
 * {
   box-sizing: border-box;
 }
@@ -157,20 +183,73 @@ body,
   gap: var(--space-sm);
 }
 
-.theme-switch {
+/* The appearance control is ONE icon button. The reading modes live in the
+   popover it opens, so the chrome holds a single round target at every
+   viewport instead of a row of labels that had to wrap on a narrow phone. */
+.theme-menu {
+  position: relative;
+  display: inline-flex;
+}
+
+.theme-menu__trigger {
   display: flex;
-  align-items: stretch;
+  align-items: center;
+  justify-content: center;
+  min-block-size: var(--tap-target);
+  min-inline-size: var(--tap-target);
+  padding: 0;
+  border: var(--border-hairline) solid var(--edge);
+  border-radius: 50%;
+  background: var(--raised);
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.theme-menu__trigger:focus-visible,
+.theme-menu__option:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.theme-menu__icon {
+  inline-size: 1.25rem;
+  block-size: 1.25rem;
+}
+
+/* Half hollow, half filled: the icon means "appearance" by SHAPE and takes
+   its colour from the text around it, so it stays legible in every mode. */
+.theme-menu__icon-ring {
+  fill: none;
+  stroke: currentcolor;
+  stroke-width: 2;
+}
+
+.theme-menu__icon-half {
+  fill: currentcolor;
+}
+
+/* Absolutely positioned, so opening the popover cannot reflow the page, and
+   anchored to the trigger's end edge so it can never run off a 320px
+   viewport the way an inline row of options would. */
+.theme-menu__popover {
+  position: absolute;
+  inset-block-start: calc(100% + var(--space-2xs));
+  inset-inline-end: 0;
+  z-index: 1;
+  display: grid;
   gap: var(--space-2xs);
   padding: var(--space-2xs);
   border: var(--border-hairline) solid var(--edge);
   border-radius: var(--radius-md);
   background: var(--raised);
-  max-inline-size: 100%;
 }
 
-.theme-switch__option {
+.theme-menu__option {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: var(--space-xs);
   min-block-size: var(--tap-target);
-  min-inline-size: var(--tap-target);
   padding-inline: var(--space-sm);
   border: var(--border-hairline) solid transparent;
   border-radius: var(--radius-sm);
@@ -182,18 +261,54 @@ body,
      and a wider label is a layout shift. */
   font-weight: 500;
   line-height: 1;
+  text-align: start;
+  white-space: nowrap;
   cursor: pointer;
   transition: background-color var(--motion-fast) ease, color var(--motion-fast) ease;
 }
 
-.theme-switch__option[aria-pressed='true'] {
+.theme-menu__option[aria-pressed='true'] {
   background: var(--accent);
   color: var(--accent-ink);
 }
 
-.theme-switch__option:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
+/* Each mode is named in text and previewed as a swatch of the canvas it
+   actually paints, and the active one also carries a tick — so the choice
+   is readable by text and shape, never by colour alone. */
+.theme-menu__swatch {
+  inline-size: 1rem;
+  block-size: 1rem;
+  border: var(--border-hairline) solid var(--edge);
+  border-radius: 50%;
+}
+
+/* "System" previews both sides of the choice it defers, because that is
+   exactly what it does: the device decides which half the visitor gets. */
+.theme-menu__swatch[data-swatch='system'] {
+  background: linear-gradient(
+    90deg,
+    var(--palette-light-canvas) 0 50%,
+    var(--palette-dark-canvas) 50%
+  );
+}
+
+.theme-menu__swatch[data-swatch='light'] {
+  background: var(--palette-light-canvas);
+}
+
+.theme-menu__swatch[data-swatch='dark'] {
+  background: var(--palette-dark-canvas);
+}
+
+.theme-menu__swatch[data-swatch='sepia'] {
+  background: var(--palette-sepia-canvas);
+}
+
+/* The tick column is always present and always this wide, so moving the
+   tick to another mode cannot change the popover's width. */
+.theme-menu__check {
+  inline-size: 0.75rem;
+  text-align: end;
 }
 
 main {

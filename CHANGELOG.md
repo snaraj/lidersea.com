@@ -7,6 +7,44 @@ Git, image, and GitHub Release tags use the exact plain `vX.Y.Z` form.
 
 ## [Unreleased]
 
+## [0.1.26] - 2026-08-22
+
+### Added
+
+- Sepia reading mode, a third EXPLICIT choice alongside light and dark rather
+  than a variant of either: the same low-light comfort on a paper-toned
+  surface instead of a cool one. It lands as a `theme.Catalog` entry, its own
+  `[data-theme='sepia']` token block, and its own switcher option - the three
+  places the reading-theme contract says a theme is made of - so the origin
+  stamps and caches it exactly like the other two, and
+  `TestEachThemeHasItsOwnCacheIdentity` covers its distinct ETag with no test
+  change at all.
+- Every value in the sepia palette is VALIDATED, not asserted: the contrast
+  battery now runs light, dark, and sepia through the same nine pairs. Its
+  measured floors are text 15.17 / 13.37 / 8.83 / 7.78 / 9.35:1 against the
+  4.5:1 requirement, and interface 4.09 / 3.61 / 9.35 / 8.24:1 against 3:1.
+- A pin proving the appearance menu is a dismissible disclosure and not a
+  colour-only control: both dismissal paths, the text label and tick beside
+  every swatch, the trigger's tap-target bounds, and the fixed-width tick
+  column that keeps the popover from resizing when the tick moves.
+
+### Changed
+
+- The appearance switcher is one round icon button that opens a popover of
+  four swatched modes (System, Light, Dark, Sepia), replacing the row of
+  three text buttons. The row had to wrap on a narrow phone; a single
+  44px target does not. The popover is absolutely positioned and anchored to
+  the trigger's end edge, so opening it reflows nothing and cannot run off a
+  320px viewport.
+- Dismissal covers two real browser behaviours rather than one: Safari does
+  not focus a button when it is clicked, so a blur-only close would leave the
+  popover stuck open there. The pointer listener exists only while the menu is
+  open and is torn down with it; Escape closes it from the keyboard.
+- Source-size caps raised under the new-surface carve-out, disclosed here and
+  in the PR body so the headroom can be checked as working room: component
+  7600 -> 9600 (measured 8854, 8%), styles 9800 -> 13600 (measured 12724,
+  7%). The static fallback gained no surface, so its 1800 cap does not move.
+
 ## [0.1.25] - 2026-08-22
 
 ### Added

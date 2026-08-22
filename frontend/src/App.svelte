@@ -18,15 +18,39 @@
     { id: 'system', label: 'System' },
     { id: 'light', label: 'Light' },
     { id: 'dark', label: 'Dark' },
+    { id: 'sepia', label: 'Sepia' },
   ];
 
   const stamped = document.documentElement.getAttribute(themeAttribute) ?? '';
   let active = $state(
     options.some((option) => option.id === stamped) ? stamped : options[0].id,
   );
+  let open = $state(false);
+  let menu = $state<HTMLElement | undefined>(undefined);
+
+  const activeLabel = $derived(
+    options.find((option) => option.id === active)?.label ?? options[0].label,
+  );
+
+  /*
+    Dismissal has to survive two real browser behaviours. Safari does not
+    focus a button when it is clicked, so closing on blur would leave the
+    popover stuck open there; and a listener that outlives the open state
+    would keep firing for nothing. So the pointer listener exists only while
+    the menu is open, and Escape closes it from the keyboard.
+  */
+  $effect(() => {
+    if (!open) return;
+    const dismiss = (event: PointerEvent) => {
+      if (!menu?.contains(event.target as Node)) open = false;
+    };
+    window.addEventListener('pointerdown', dismiss);
+    return () => window.removeEventListener('pointerdown', dismiss);
+  });
 
   function choose(id: string): void {
     active = id;
+    open = false;
     document.documentElement.setAttribute(themeAttribute, id);
     /*
       A display preference and nothing else: no identifier, no session, and
@@ -111,19 +135,47 @@
   />
 </svelte:head>
 
+<svelte:window
+  onkeydown={(event) => {
+    if (open && event.key === 'Escape') open = false;
+  }}
+/>
+
 <div class="shell">
   <header class="chrome">
-    <div class="theme-switch" role="group" aria-label="Appearance">
-      {#each options as option (option.id)}
-        <button
-          type="button"
-          class="theme-switch__option"
-          aria-pressed={active === option.id}
-          onclick={() => choose(option.id)}
-        >
-          {option.label}
-        </button>
-      {/each}
+    <div class="theme-menu" bind:this={menu}>
+      <button
+        type="button"
+        class="theme-menu__trigger"
+        aria-haspopup="true"
+        aria-expanded={open}
+        aria-label="Appearance: {activeLabel}"
+        onclick={() => (open = !open)}
+      >
+        <svg class="theme-menu__icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <circle class="theme-menu__icon-ring" cx="12" cy="12" r="9" />
+          <path class="theme-menu__icon-half" d="M12 3a9 9 0 0 1 0 18Z" />
+        </svg>
+      </button>
+
+      {#if open}
+        <div class="theme-menu__popover" role="group" aria-label="Appearance">
+          {#each options as option (option.id)}
+            <button
+              type="button"
+              class="theme-menu__option"
+              aria-pressed={active === option.id}
+              onclick={() => choose(option.id)}
+            >
+              <span class="theme-menu__swatch" data-swatch={option.id} aria-hidden="true"></span>
+              <span>{option.label}</span>
+              <span class="theme-menu__check" aria-hidden="true"
+                >{active === option.id ? '✓' : ''}</span
+              >
+            </button>
+          {/each}
+        </div>
+      {/if}
     </div>
   </header>
 

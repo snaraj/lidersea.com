@@ -2,10 +2,11 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
-const [fallback, component, styles] = await Promise.all([
+const [fallback, component, styles, themeSource] = await Promise.all([
   readFile(new URL('../index.html', import.meta.url), 'utf8'),
   readFile(new URL('../src/App.svelte', import.meta.url), 'utf8'),
   readFile(new URL('../src/styles.css', import.meta.url), 'utf8'),
+  readFile(new URL('../../internal/theme/types.go', import.meta.url), 'utf8'),
 ]);
 
 const sources = { fallback, component, styles };
@@ -14,54 +15,134 @@ const sources = { fallback, component, styles };
 // those rules ban, so every source-fact assertion reads the code alone.
 const stylesCode = styles.replace(/\/\*[\s\S]*?\*\//g, '');
 
-// The same treatment for the component, and for the same reason twice
-// over. The delta review defeated the focus-return pin by writing the
-// sentence "Escape closes through here too." into dismissMenu's own doc
-// comment: the old assertion scanned a 200-character window for the words
-// "Escape" and "dismissMenu()" co-occurring, and `function dismissMenu():
-// void` contains the literal `dismissMenu()`, so a comment satisfied an
-// assertion about a call. Code-only reading is what makes the call-site
-// extractors below test calls instead of proximity. The `:` guard keeps a
-// protocol-relative URL from being mistaken for a line comment.
-const componentCode = component
-  .replace(/\/\*[\s\S]*?\*\//g, '')
-  .replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+// Comments and string literals are not code, and an assertion about code
+// that reads either is not testing what its message says. The delta review
+// proved both directions on the previous spelling of this file: '/*' and
+// '*/' in two string literals spliced two function bodies together, which
+// revived a repaired bug at 14/14 green, while `const s = "}"` in ordinary
+// correct code produced a FALSE RED.
+//
+// So the component is read through two offset-preserving masks. Both blank
+// comments; the SHAPE additionally blanks the contents of string and
+// template literals, but only inside <script>, because outside it the
+// quotes are markup attribute delimiters rather than JavaScript strings and
+// blanking them would hide the markup this file has to read.
+function maskComponent(source, blankScriptStrings) {
+  const out = source.split('');
+  const scriptStart = source.indexOf('>', source.indexOf('<script')) + 1;
+  const scriptEnd = source.indexOf('</script>');
+  const blank = (from, to) => {
+    for (let k = from; k < to && k < out.length; k += 1) if (out[k] !== '\n') out[k] = ' ';
+  };
+  let i = 0;
+  while (i < source.length) {
+    const pair = source.slice(i, i + 2);
+    if (pair === '/*') {
+      const end = source.indexOf('*/', i + 2);
+      const stop = end < 0 ? source.length : end + 2;
+      blank(i, stop);
+      i = stop;
+      continue;
+    }
+    if (pair === '//' && source[i - 1] !== ':') {
+      let stop = source.indexOf('\n', i);
+      if (stop < 0) stop = source.length;
+      blank(i, stop);
+      i = stop;
+      continue;
+    }
+    const quote = source[i];
+    if ((quote === '"' || quote === "'" || quote === '`') && (blankScriptStrings || false)) {
+      const inScript = i > scriptStart && i < scriptEnd;
+      let k = i + 1;
+      while (k < source.length) {
+        if (source[k] === '\\') { k += 2; continue; }
+        if (source[k] === quote) break;
+        k += 1;
+      }
+      if (inScript) blank(i + 1, k);
+      i = k + 1;
+      continue;
+    }
+    i += 1;
+  }
+  return out.join('');
+}
+const componentCode = maskComponent(component, false);
+const componentShape = maskComponent(component, true);
 
-// The brace-matched block that follows a marker. Used to ask whether a
-// handler CALLS something, which a windowed regex cannot answer.
-function blockAfter(source, marker) {
-  const start = source.indexOf(marker);
+// The brace-matched block that follows a marker, located and matched in the
+// SHAPE so neither a decoy marker in a string nor a brace in one can move
+// it. Used to ask whether a handler CALLS something, which a windowed regex
+// cannot answer.
+function blockAfter(marker, opener = '{') {
+  const closer = opener === '[' ? ']' : '}';
+  const start = componentShape.indexOf(marker);
   assert.notEqual(start, -1, `the component has no ${marker}`);
-  const open = source.indexOf('{', start + marker.length - 1);
-  assert.notEqual(open, -1, `${marker} opens no block`);
+  const open = componentShape.indexOf(opener, start + marker.length - 1);
+  assert.notEqual(open, -1, `${marker} opens no ${opener}${closer} block`);
   let depth = 0;
-  for (let i = open; i < source.length; i += 1) {
-    if (source[i] === '{') depth += 1;
-    else if (source[i] === '}') {
+  for (let i = open; i < componentShape.length; i += 1) {
+    if (componentShape[i] === opener) depth += 1;
+    else if (componentShape[i] === closer) {
       depth -= 1;
-      if (depth === 0) return source.slice(open + 1, i);
+      // Offsets are preserved by the mask, so the SHAPE locates the span and
+      // the CODE supplies its text: structure is read where strings cannot
+      // interfere, content is read where strings are still real.
+      if (depth === 0) return componentCode.slice(open + 1, i);
     }
   }
-  assert.fail(`${marker} has an unbalanced block`);
+  return assert.fail(`${marker} has an unbalanced ${opener}${closer} block`);
 }
 
-// The catalog as the STYLESHEET declares it. AGENTS.md says adding a
-// reading mode is "a catalog entry, its [data-theme] token block, and its
-// switcher option; nothing else changes" — so the assertions below have to
-// find the new mode by themselves or that sentence is false. The review
-// that forced this proved the hazard by adding a fifth theme at roughly
-// 1.0:1 contrast with six of its seven tokens missing: every test passed.
-// This is not circular. The stylesheet declares which modes EXIST; the
-// contrast, token-set, and switcher assertions then validate each one, and
-// the switcher check binds the two files against each other so neither can
-// quietly shrink alone.
-const stampedThemes = [
-  ...new Set(
-    declarationBlocks(styles)
-      .flatMap((block) => [...block.selector.matchAll(/\[data-theme='([a-z-]+)'\]/g)])
-      .map((match) => match[1]),
-  ),
-].sort();
+// Every theme the ORIGIN can stamp must be one this stylesheet paints, and
+// exactly one — the device-following mode — resolves through the
+// prefers-color-scheme mapping instead of a block of its own. A fifth theme
+// with no block would otherwise simply fall out of every loop below, which
+// is precisely how an unvalidated palette shipped green.
+function assertCatalogIsFullyStamped() {
+  const unblocked = catalogThemes.filter((theme) => !themeBlockPattern(theme).test(stylesCode));
+  assert.deepEqual(
+    unblocked.length,
+    1,
+    `${unblocked.join(', ') || 'no theme'} has no [data-theme] block; exactly one catalog theme (the one that follows the device) may resolve through prefers-color-scheme`
+  );
+  assert.ok(
+    stampedThemes.length >= 2,
+    `only ${stampedThemes.length} catalog themes have a [data-theme] block`
+  );
+}
+
+// THE CATALOG IS THE ORIGIN'S, not the stylesheet's and not the switcher's.
+// Deriving it from either presentation file was the previous repair and it
+// was not enough: both derivations failed SYMMETRICALLY on a double-quoted
+// attribute selector — which is Prettier's default output — so the
+// cross-check could not see the disagreement and a fifth theme at 1.00:1
+// shipped with the whole gate green. internal/theme/types.go is what the
+// server actually stamps, so it is the only non-circular anchor, and
+// AGENTS.md agrees: "Adding a theme means adding a catalog entry, its
+// [data-theme] token block, and its switcher option."
+function catalogFromGo(source) {
+  const values = new Map();
+  for (const [, ident, value] of source.matchAll(/(\w+)\s+Theme\s*=\s*"([^"]+)"/g)) {
+    values.set(ident, value);
+  }
+  const list = /var\s+Catalog\s*=\s*\[\]Theme\{([^}]*)\}/.exec(source);
+  assert.ok(list, 'internal/theme/types.go declares no Catalog for the frontend to follow');
+  const names = list[1].split(',').map((part) => part.trim()).filter(Boolean);
+  assert.ok(names.length >= 3, `Catalog lists only ${names.length} themes; it cannot have shrunk this far`);
+  return names.map((name) => {
+    const value = values.get(name);
+    assert.ok(value, `Catalog names ${name}, which is not a Theme constant in the same file`);
+    return value;
+  });
+}
+const catalogThemes = catalogFromGo(themeSource);
+
+// Quote-agnostic and whitespace-tolerant on purpose: the attribute selector
+// a formatter emits is not the frontend's choice to make.
+const themeBlockPattern = (theme) => new RegExp(`\\[data-theme\\s*=\\s*['"]${theme}['"]\\s*\\]`);
+const stampedThemes = catalogThemes.filter((theme) => themeBlockPattern(theme).test(stylesCode));
 
 // Source-size budgets. Perf budgets are tests here, so a shell that grows
 // past its cap is a red build rather than a discussion. The caps are the
@@ -258,7 +339,7 @@ test('every theme defines the same token set', () => {
     block.atRules.some((rule) => rule.includes('prefers-color-scheme')),
   );
   assert.ok(light.length > 0, 'the light theme defines no tokens');
-  assert.ok(stampedThemes.length >= 3, `only ${stampedThemes.length} themes found in the stylesheet`);
+  assertCatalogIsFullyStamped();
   for (const theme of stampedThemes) {
     assert.deepEqual(
       tokensOf((block) => block.selector.includes(`[data-theme='${theme}']`)),
@@ -301,7 +382,7 @@ test('both palettes clear their contrast floors', () => {
     ['accent', 'canvas'],
     ['accent', 'raised'],
   ];
-  assert.ok(stampedThemes.length >= 3, `only ${stampedThemes.length} themes found in the stylesheet`);
+  assertCatalogIsFullyStamped();
   for (const theme of stampedThemes) {
     for (const [foreground, background, floor] of [
       ...textPairs.map((pair) => [...pair, 4.5]),
@@ -370,11 +451,15 @@ test('the theme switcher is accessible and origin-led', () => {
   // exactly the modes the stylesheet stamps. A mode with a token block and
   // no way to reach it, and an option that stamps an attribute no block
   // answers, are both caught — and neither file can shrink on its own.
-  const offered = [...componentCode.matchAll(/id: '([a-z-]+)'/g)].map((match) => match[1]);
+  // Bounded to the options array itself, not scanned across the file: the
+  // review deleted the sepia option outright and stayed green because the
+  // string `id: 'sepia'` survived elsewhere in the component.
+  const optionsBlock = blockAfter('const options', '[');
+  const offered = [...optionsBlock.matchAll(/id:\s*['"]([a-z0-9-]+)['"]/g)].map((match) => match[1]);
   assert.deepEqual(
     offered.slice().sort(),
-    ['system', ...stampedThemes].sort(),
-    'the switcher options and the stylesheet disagree about which reading modes exist',
+    catalogThemes.slice().sort(),
+    'the switcher options and internal/theme/types.go disagree about which reading modes exist',
   );
   assert.match(
     component,
@@ -433,7 +518,7 @@ test('the appearance menu is a dismissible disclosure, not a colour-only control
   // comment. A binding on the wrong element, a call in the wrong function,
   // and a mention that is not a call are all now red.
   assert.match(
-    blockAfter(componentCode, 'function dismissMenu(): void'),
+    blockAfter('function dismissMenu(): void'),
     /trigger\?\.focus\(\)/,
     'dismissMenu must hand focus back to the trigger, not merely set open to false',
   );
@@ -449,7 +534,7 @@ test('the appearance menu is a dismissible disclosure, not a colour-only control
     ['Escape', 'onkeydown='],
   ]) {
     assert.match(
-      blockAfter(componentCode, marker),
+      blockAfter(marker),
       /dismissMenu\(\)/,
       `the ${path} path must close through dismissMenu so focus returns`,
     );

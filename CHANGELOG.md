@@ -17,6 +17,13 @@ Git, image, and GitHub Release tags use the exact plain `vX.Y.Z` form.
   one-exact-patch release contract unchanged. Nothing is relaxed - an
   unchanged artifact has nothing to version, sign, scan, or attest, and a
   documentation PR still runs the full gate (#85).
+- Prove that class against either of two anchors the merge cannot choose -
+  the retained release tag, or the last successful protected-main gate head
+  from the Actions record with every release lock required byte-identical to
+  it - so a release that failed to tag no longer blocks documentation merges
+  (the condition #81 causes). Denial requires BOTH anchors to be unavailable;
+  a tag probe that never returns a definitive answer is treated as unknown,
+  not absent, and denies (#85).
 
 ## [0.1.23] - 2026-08-21
 

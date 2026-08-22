@@ -202,6 +202,19 @@ jobs:
               ref_json="${RUNNER_TEMP}/retained-ref.json"
               tag_json="${RUNNER_TEMP}/retained-tag.json"
               tag_target=''
+              # Anchor A has THREE outcomes, not two, and conflating the last
+              # two is a fail-open against this step's own contract:
+              #   found            -> tag_target set, use anchor A
+              #   definitively 404 -> tag_absent set, anchor A is unavailable,
+              #                       fall through to anchor B
+              #   anything else    -> anchor A's state is UNKNOWN, which is
+              #                       NOT the same as unavailable, so DENY
+              # A persistent 403 (the commonest shape of a GITHUB_TOKEN
+              # permission regression) must not be laundered into "the tag is
+              # absent" - the step never learned that, and saying so on the
+              # one line an operator reads while debugging a broken token is
+              # exactly the dishonest state this repository forbids.
+              tag_absent=''
               # No long poll. A tag that has not appeared yet is simply anchor
               # A being unavailable right now, and anchor B is already
               # sufficient - so waiting buys no security and charges every
@@ -241,7 +254,7 @@ jobs:
                 # merge-friction case the fallback exists for, and silently
                 # routing around a broken token would hide it.
                 case "${status}" in
-                  404) break ;;
+                  404) tag_absent=1; break ;;
                   403|429|500|502|503|504) ;;
                   *)
                     printf 'DENY: retained-tag probe returned HTTP %s\n' "${status}" >&2
@@ -254,6 +267,15 @@ jobs:
                 [[ "${tag_target}" =~ ^[0-9a-f]{40}$ ]]
                 anchor="${tag_target}"
                 anchor_kind="retained release tag ${retained_tag}"
+              elif [ -z "${tag_absent}" ]; then
+                # Retries exhausted without a definitive answer. Anchor A's
+                # state is unknown, so the "deny only when BOTH anchors are
+                # unavailable" invariant is not satisfied and this must deny
+                # exactly like 401/422 does. Falling through here would hide
+                # a broken credential behind the merge-friction fallback.
+                printf 'DENY: retained-tag probe never returned a definitive answer for %s; anchor availability is unknown\n' \
+                  "${retained_tag}" >&2
+                exit 1
               else
                 # ANCHOR B. Unavailable only for a fresh repository or one
                 # whose run records have aged out of retention - and then
@@ -273,8 +295,21 @@ jobs:
                      else (max_by(.id) | .head_sha) end' \
                   "${previous_json}")"
                 [[ "${previous_head}" =~ ^[0-9a-f]{40}$ ]]
-                test "${previous_head}" != "${COMPLETED_SHA}"
-                git merge-base --is-ancestor "${previous_head}" "${COMPLETED_SHA}"
+                # Both refusals below print a DISTINCT message on purpose. As
+                # bare `test`/`git` calls they denied silently via set -e, and
+                # a downstream failure then looked identical to them - which
+                # made a test that named one of them pass even with the guard
+                # deleted, because the denial merely relocated.
+                if [ "${previous_head}" = "${COMPLETED_SHA}" ]; then
+                  printf 'DENY: the gated-run anchor resolves to this very push %s; it cannot anchor itself\n' \
+                    "${COMPLETED_SHA}" >&2
+                  exit 1
+                fi
+                if ! git merge-base --is-ancestor "${previous_head}" "${COMPLETED_SHA}"; then
+                  printf 'DENY: the gated-run anchor %s is not an ancestor of %s; the range is not a fast-forward\n' \
+                    "${previous_head}" "${COMPLETED_SHA}" >&2
+                  exit 1
+                fi
                 # A documentation-only push moves no release lock. THIS is
                 # what denies a forged base on this path: a disguised
                 # artifact merge carries its version bump, so the locks
@@ -306,6 +341,13 @@ jobs:
                 --repository . --base "${anchor}" --head "${COMPLETED_SHA}" \
                 --first-parent)"
               test "$(jq -er '.class' <<<"${cumulative}")" = no-artifact
+              # SAME-TREE CONSISTENCY ASSERTION, NOT AN INDEPENDENT CHECK -
+              # labelled so nobody mistakes it for one. `rederived` and
+              # `cumulative` both classify with head=COMPLETED_SHA, and the
+              # no-artifact branch derives `tag` from that head tree alone, so
+              # no input can make these two disagree. It is kept as a
+              # structural backstop against a future change that makes the tag
+              # depend on the base, and deliberately not counted as coverage.
               test "$(jq -er '.tag' <<<"${cumulative}")" = "${retained_tag}"
               printf 'NO-ARTIFACT: %s is documentation-only (anchored on the %s); no tag, no Release, publisher not dispatched.\n' \
                 "${COMPLETED_SHA}" "${anchor_kind}"

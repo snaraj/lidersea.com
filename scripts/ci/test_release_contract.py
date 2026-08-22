@@ -3810,8 +3810,15 @@ sys.stdout.write(str(entry["status"]))
         A commit touching only ``cmd/server`` moves no VERSION, chart or
         changelog byte, so the four-lock equality passes it. Anchor B is
         only sound because the cumulative proof runs over the same range
-        and sees the non-allowlisted path. Deleting either check must turn
-        this red.
+        and sees the non-allowlisted path.
+
+        Scope, stated honestly: this test kills the CUMULATIVE check only.
+        Deleting the four-lock loop leaves it green -- the cumulative
+        re-classification catches a code-only commit unaided -- and an
+        earlier version of this docstring wrongly claimed otherwise. The
+        four-lock loop is killed by
+        ``test_forged_base_inside_the_push_is_caught_by_the_tag_anchor``,
+        where the disguised merge moves VERSION and only that loop sees it.
         """
         block = self.workflow_run_block(self.STEP)
         with tempfile.TemporaryDirectory() as temporary:
@@ -3833,8 +3840,103 @@ sys.stdout.write(str(entry["status"]))
             self.assertNotEqual(completed.returncode, 0, completed.stdout + completed.stderr)
             self.assertNotIn("class=", output)
 
+    def test_transient_exhaustion_denies_instead_of_reaching_the_gated_run_anchor(self):
+        """Anchor A UNKNOWN is not anchor A ABSENT.
+
+        A persistent 403 -- the commonest shape of a GITHUB_TOKEN
+        permission regression -- exhausts the retry budget without ever
+        learning whether the tag exists. Falling through to anchor B then
+        both breaks the stated "deny when BOTH anchors are unavailable"
+        invariant and prints "the tag is absent", which the step never
+        established. A perfectly usable anchor B is supplied here on
+        purpose: the step must deny ANYWAY, and must never call the runs
+        endpoint.
+        """
+        block = self.workflow_run_block(self.STEP)
+        with tempfile.TemporaryDirectory() as temporary:
+            root, base, release_head, docs_head = self._seed_documentation_push(temporary)
+            self._install_release_contract(root)
+            verdict = {"class": "no-artifact", "base_sha": release_head, "source_sha": docs_head}
+            completed, output, _summary, calls = self.execute(
+                block,
+                root=root,
+                completed_sha=docs_head,
+                verdict=verdict,
+                # Clamped: the stub serves this entry for every attempt.
+                ref_script=[{"status": 403}],
+                runs=self._gated_runs(release_head),
+            )
+            self.assertNotEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            self.assertIn("never returned a definitive answer", completed.stderr)
+            self.assertNotIn("is absent", completed.stderr)
+            self.assertNotIn("class=", output)
+            self.assertNotIn("runs", calls, "must never reach anchor B on an unknown outcome")
+
+    # --- anchor B's run FILTER: the fixture helper cannot express a
+    # non-conforming run, so these tests pass raw listings instead. Without
+    # them, dropping the jq branch/event/conclusion predicates leaves the
+    # whole suite green -- and an anchor taken from a FAILED gate run is the
+    # one route to a silently skipped release, because a main tip that was
+    # never proven docs-only would sit before the anchor and escape the
+    # cumulative proof entirely.
+
+    def _assert_nonconforming_run_is_not_anchored(self, run: dict[str, object]) -> None:
+        block = self.workflow_run_block(self.STEP)
+        with tempfile.TemporaryDirectory() as temporary:
+            root, base, release_head, docs_head = self._seed_documentation_push(temporary)
+            self._install_release_contract(root)
+            verdict = {"class": "no-artifact", "base_sha": release_head, "source_sha": docs_head}
+            entry = {
+                "id": 999,
+                "head_branch": "main",
+                "event": "push",
+                "conclusion": "success",
+                "head_sha": release_head,
+            }
+            entry.update(run)
+            completed, output, _summary, _calls = self.execute(
+                block,
+                root=root,
+                completed_sha=docs_head,
+                verdict=verdict,
+                ref_script=[{"status": 404}],
+                # The ONLY run on offer violates one predicate, so a correct
+                # filter finds nothing and the jq error denies.
+                runs={"workflow_runs": [entry]},
+            )
+            self.assertNotEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            self.assertIn(
+                "neither the retained tag nor an earlier gated main run is available",
+                completed.stderr,
+            )
+            self.assertNotIn("class=", output)
+
+    def test_a_failed_gate_run_is_never_anchored(self):
+        self._assert_nonconforming_run_is_not_anchored({"conclusion": "failure"})
+
+    def test_a_cancelled_gate_run_is_never_anchored(self):
+        self._assert_nonconforming_run_is_not_anchored({"conclusion": "cancelled"})
+
+    def test_a_non_main_branch_run_is_never_anchored(self):
+        self._assert_nonconforming_run_is_not_anchored({"head_branch": "opus5/topic"})
+
+    def test_a_pull_request_run_is_never_anchored(self):
+        self._assert_nonconforming_run_is_not_anchored({"event": "pull_request"})
+
+    def test_a_run_at_or_above_the_current_run_is_never_anchored(self):
+        # MAIN_RUN_ID defaults to 1000; `.id < $current` must exclude these.
+        self._assert_nonconforming_run_is_not_anchored({"id": 1000})
+        self._assert_nonconforming_run_is_not_anchored({"id": 1001})
+
     def test_gated_run_anchor_equal_to_the_completed_sha_denies(self):
-        """A run record naming this very push as its own anchor is refused."""
+        """A run record naming this very push as its own anchor is refused.
+
+        Asserts the guard's OWN message. Previously this asserted only a
+        non-zero exit, so deleting the refusal left it green -- the denial
+        merely relocated to the cumulative call raising on an empty range,
+        which is indistinguishable from the outside. Same decorative class
+        as the original gitlink test.
+        """
         block = self.workflow_run_block(self.STEP)
         with tempfile.TemporaryDirectory() as temporary:
             root, base, release_head, docs_head = self._seed_documentation_push(temporary)
@@ -3849,6 +3951,35 @@ sys.stdout.write(str(entry["status"]))
                 runs=self._gated_runs(docs_head),
             )
             self.assertNotEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            self.assertIn("it cannot anchor itself", completed.stderr)
+            self.assertNotIn("class=", output)
+
+    def test_a_gated_run_head_off_the_mainline_denies_on_ancestry(self):
+        """The anchor must be an ancestor of the merged head.
+
+        Builds a genuinely divergent commit so the ancestry refusal is
+        reached on its own terms, and asserts ITS message rather than a
+        bare non-zero exit.
+        """
+        block = self.workflow_run_block(self.STEP)
+        with tempfile.TemporaryDirectory() as temporary:
+            root, base, release_head, docs_head = self._seed_documentation_push(temporary)
+            self._install_release_contract(root)
+            # A sibling commit off `base`, never merged into docs_head.
+            self.git(root, "checkout", "-q", "-b", "sidebranch", base)
+            divergent = self.paths_commit(root, {"AGENTS.md": "side\n"}, "divergent")
+            self.git(root, "checkout", "-q", "main")
+            verdict = {"class": "no-artifact", "base_sha": release_head, "source_sha": docs_head}
+            completed, output, _summary, _calls = self.execute(
+                block,
+                root=root,
+                completed_sha=docs_head,
+                verdict=verdict,
+                ref_script=[{"status": 404}],
+                runs=self._gated_runs(divergent),
+            )
+            self.assertNotEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            self.assertIn("is not an ancestor of", completed.stderr)
             self.assertNotIn("class=", output)
 
     def test_gated_run_anchor_uses_the_newest_earlier_run_not_the_oldest(self):
@@ -5179,14 +5310,38 @@ class NoArtifactWiringTests(unittest.TestCase):
         self.assertIn("git/ref/tags/${retained_tag}", cumulative_code)
         # Anchor B, with the four-lock equality that denies a forged base on
         # that path, plus the ancestry and self-anchor refusals.
-        self.assertIn("workflows/pr-gate.yml/runs?branch=main", cumulative_code)
+        # Pin the FULL query, not just the path. The server-side
+        # `event=push&status=success` narrowing cannot be observed through
+        # the test stub (which serves its fixture regardless of query), so
+        # dropping it is invisible to every behavioural test. This is the
+        # one place it can be caught.
+        self.assertIn(
+            "workflows/pr-gate.yml/runs?branch=main&event=push&status=success&per_page=100",
+            cumulative_code,
+        )
+        # The client-side predicates ARE behaviourally tested (see the
+        # non-conforming-run tests); pinned here too so a silent removal is
+        # caught twice.
+        self.assertIn('.head_branch == "main"', cumulative_code)
+        self.assertIn('.event == "push"', cumulative_code)
+        self.assertIn('.conclusion == "success"', cumulative_code)
         self.assertIn("max_by(.id)", cumulative_code)
         self.assertIn(
             "for lock in VERSION chart/Chart.yaml chart/values.yaml CHANGELOG.md; do",
             cumulative_code,
         )
+        # Both refusals are explicit `if` blocks with their own DENY
+        # message, not bare `test` calls: a silent denial is
+        # indistinguishable from a downstream failure, which is what made
+        # the self-anchor test decorative.
         self.assertIn('git merge-base --is-ancestor "${previous_head}"', cumulative_code)
-        self.assertIn('test "${previous_head}" != "${COMPLETED_SHA}"', cumulative_code)
+        self.assertIn('if [ "${previous_head}" = "${COMPLETED_SHA}" ]; then', cumulative_code)
+        self.assertIn("it cannot anchor itself", cumulative_code)
+        self.assertIn("is not an ancestor of", cumulative_code)
+        # Anchor A's three outcomes must stay distinct: an exhausted
+        # transient probe is UNKNOWN, not absent, and must deny.
+        self.assertIn("tag_absent", cumulative_code)
+        self.assertIn("never returned a definitive answer", cumulative_code)
         # The sibling repository's boundary-recovery WALK must never be
         # ported here. Both of its fail-opens lived in that walk, and this
         # repository has no need of it: anchor B is the immediately

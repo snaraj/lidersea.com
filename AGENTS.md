@@ -815,7 +815,7 @@ or changed frontend surface, retrofitted by the rendering-lanes arc
   browser-emulated smoke lanes in CI — is an owner decision, gated in
   that issue.
 - **Reading themes.** The site serves one shell per theme in
-  `internal/theme`'s catalog (`system`, `light`, `dark`), each stamped
+  `internal/theme`'s catalog (`system`, `light`, `dark`, `sepia`), each stamped
   with its `data-theme` attribute during `NewSite` and chosen per request
   by the `lidersea_theme` cookie. The invariants, each pinned by tests:
   the origin NEVER sets a cookie (the browser writes the preference, the

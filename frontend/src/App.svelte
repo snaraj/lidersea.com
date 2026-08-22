@@ -27,6 +27,18 @@
   );
   let open = $state(false);
   let menu = $state<HTMLElement | undefined>(undefined);
+  let trigger = $state<HTMLButtonElement | undefined>(undefined);
+
+  /*
+    Closing the popover unmounts whatever the keyboard was on, so focus must
+    be handed back to the trigger deliberately. Without this it falls to
+    <body> and the next Tab restarts at the top of the page — the segmented
+    control this replaced had no such trap, and neither may this.
+  */
+  function dismissMenu(): void {
+    open = false;
+    trigger?.focus();
+  }
 
   const activeLabel = $derived(
     options.find((option) => option.id === active)?.label ?? options[0].label,
@@ -50,7 +62,7 @@
 
   function choose(id: string): void {
     active = id;
-    open = false;
+    dismissMenu();
     document.documentElement.setAttribute(themeAttribute, id);
     /*
       A display preference and nothing else: no identifier, no session, and
@@ -137,7 +149,7 @@
 
 <svelte:window
   onkeydown={(event) => {
-    if (open && event.key === 'Escape') open = false;
+    if (open && event.key === 'Escape') dismissMenu();
   }}
 />
 
@@ -147,7 +159,7 @@
       <button
         type="button"
         class="theme-menu__trigger"
-        aria-haspopup="true"
+        bind:this={trigger}
         aria-expanded={open}
         aria-label="Appearance: {activeLabel}"
         onclick={() => (open = !open)}

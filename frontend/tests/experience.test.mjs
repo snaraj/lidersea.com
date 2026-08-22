@@ -26,10 +26,13 @@ const stylesCode = styles.replace(/\/\*[\s\S]*?\*\//g, '');
 // measured a shell that no longer exists. The static fallback did not gain
 // a surface, so its cap does not move.
 //
+// Headroom is stated as a fraction of the CAP, the same basis the previous
+// raise used, so the rows stay comparable across raises:
+//
 //   surface     old cap   measured   new cap   headroom
-//   fallback       1800       1421      1800        27%
+//   fallback       1800       1421      1800        21%
 //   component      7600       8854      9600         8%
-//   styles         9800      12724     13600         7%
+//   styles         9800      12724     13600         6%
 //
 // Both raises are disclosed in the PR body so a reviewer can check the
 // headroom is working room and not cover for a regression.
@@ -338,8 +341,29 @@ test('the theme switcher is accessible and origin-led', () => {
 // separate the swatches — so both properties are pinned here rather than
 // left to a reviewer's eye.
 test('the appearance menu is a dismissible disclosure, not a colour-only control', () => {
-  assert.match(component, /aria-haspopup="true"/);
   assert.match(component, /aria-expanded=\{open\}/);
+  // NOT aria-haspopup. ARIA 1.2 maps aria-haspopup="true" to "menu", and a
+  // menu promises menu semantics — arrow-key roving focus, menuitem roles.
+  // What actually opens is a role="group" of toggle buttons, so claiming the
+  // menu mapping would announce an interaction model that is not there. A
+  // plain disclosure is what this is, and aria-expanded says exactly that.
+  assert.doesNotMatch(
+    component,
+    /aria-haspopup/,
+    'the popup is a group of toggles, not a menu; do not promise menu semantics',
+  );
+
+  // Closing unmounts whatever the keyboard was on, so focus must be handed
+  // back deliberately. Without this it lands on <body> and the next Tab
+  // restarts at the top of the page.
+  assert.match(component, /trigger\?\.focus\(\)/, 'the trigger must take focus back on close');
+  assert.match(component, /bind:this=\{trigger\}/);
+  for (const path of ['choose', 'Escape']) {
+    assert.ok(
+      new RegExp(`${path}[\\s\\S]{0,200}?dismissMenu\\(\\)`).test(component),
+      `the ${path} path must close through dismissMenu so focus returns`,
+    );
+  }
   // The trigger names the mode currently in force, so its accessible name
   // is never a bare "Appearance" with the state hidden inside the popover.
   assert.match(component, /aria-label="Appearance: \{activeLabel\}"/);

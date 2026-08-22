@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/snaraj/lidersea.com/internal/server"
+	"github.com/snaraj/lidersea.com/internal/theme"
 	website "github.com/snaraj/lidersea.com/internal/web"
 )
 
@@ -233,10 +234,19 @@ func TestBundleStaysInsideItsPerformanceBudget(t *testing.T) {
 		t.Fatalf("server.New() error = %v; run the pinned frontend build before Go tests", err)
 	}
 
-	for _, preference := range []string{"", "system", "light", "dark"} {
+	// Derived from theme.Catalog, never listed by hand. A hardcoded list is a
+	// budget that silently stops covering the shell the moment a theme is
+	// added: the suite still passes, because it simply never asks for the new
+	// variant. The empty preference is prepended so the first-visit shell —
+	// which names no theme at all — is measured alongside the named ones.
+	preferences := []string{""}
+	for _, candidate := range theme.Catalog {
+		preferences = append(preferences, string(candidate))
+	}
+	for _, preference := range preferences {
 		request := edgeRequest(http.MethodGet, "/")
 		if preference != "" {
-			request.Header.Set("Cookie", "lidersea_theme="+preference)
+			request.Header.Set("Cookie", theme.CookieName+"="+preference)
 		}
 		response := httptest.NewRecorder()
 		siteHandler.ServeHTTP(response, request)

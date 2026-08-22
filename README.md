@@ -35,10 +35,11 @@ Public traffic is HTTPS-only: TLS terminates at the Cloudflare edge, and
 the tunnel carries plain HTTP to an origin that is never itself publicly
 reachable; the edge already redirects plain `http://` to `https://`
 (`301`). This origin's own `Strict-Transport-Security: max-age=31536000`
-is overwritten by the edge's before a visitor ever sees it — moving HSTS
-to the edge widened scope (`includeSubDomains`) but roughly halved
-lifetime: 180 days (`max-age=15552000`, preload off) versus the origin's
-365, a deployment fact recorded here, not enforced by this repository.
+is overwritten by the edge's before a visitor ever sees it, and the edge
+now serves `max-age=31536000; includeSubDomains`. The two lifetimes are
+therefore identical — 365 days on each side — and the only difference a
+visitor can observe is the scope the edge adds; `preload` is absent.
+That is a deployment fact recorded here, not enforced by this repository.
 
 A first-level subdomain proxied through Cloudflare already gets valid TLS
 from the apex wildcard cert, so the real trap is one level deeper: a
@@ -46,14 +47,18 @@ wildcard covers exactly one label, so `api.staging.lidersea.com` has no
 free TLS path — only Cloudflare's paid Advanced Certificate Manager
 reaches it, colliding with this repo's zero-spend requirement. The very
 first visit to an unknown host is where HSTS cannot help: with no cached
-policy, its `http://` request leaves in the clear, and only the edge's
-`301` — a mitigation, not a guarantee — can act on it (RFC 6797's
-bootstrap gap; only `preload` closes it, and it needs a 1-year max-age to
-qualify — reaching that would mean raising the edge's lifetime back
-toward the origin's 365). HSTS's real value is every visit after: once
-cached, the browser rewrites any later `http://` link, typed hostname, or
-downgrade attempt to `https://` itself for as long as `max-age` lasts —
-no plaintext request ever leaves.
+policy, its `http://` request leaves in the clear, and a longer lifetime
+changes nothing about that, so only the edge's `301` — a mitigation, not
+a guarantee — can act on it (RFC 6797's bootstrap gap; only `preload`
+closes it, and only once the domain is actually submitted and shipped in
+browsers). The edge now clears that bar on lifetime and scope, since the
+preload list wants at least `max-age=31536000` plus `includeSubDomains`,
+and the edge response carries both. What is left is the `preload`
+directive itself and a deliberate decision to submit — not a lifetime to
+raise. HSTS's real value is every visit after: once cached, the browser
+rewrites any later `http://` link, typed hostname, or downgrade attempt
+to `https://` itself for as long as `max-age` lasts — no plaintext
+request ever leaves.
 
 ## Development
 

@@ -41,6 +41,11 @@ const (
 	Light Theme = "light"
 	// Dark is the explicit low-light theme.
 	Dark Theme = "dark"
+	// Sepia is the explicit warm low-light theme — the same reading comfort
+	// as Dark on a paper-toned surface rather than a cool one. It is a third
+	// EXPLICIT choice, not a variant of Dark: a visitor who picks it is
+	// answered with it whatever their device prefers.
+	Sepia Theme = "sepia"
 )
 
 // Default is the theme served when a request expresses no valid preference:
@@ -53,7 +58,7 @@ const Default = System
 // the switcher presents them in, and it is the ONLY source of legal theme
 // values: Parse rejects everything outside it and Stamp refuses to write
 // anything outside it.
-var Catalog = []Theme{System, Light, Dark}
+var Catalog = []Theme{System, Light, Dark, Sepia}
 
 // Stamp failure modes. A shell that cannot be stamped is a broken build,
 // not a request-time condition, so these surface during construction and

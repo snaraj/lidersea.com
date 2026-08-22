@@ -29,12 +29,13 @@ func TestParseAcceptsOnlyCatalogValues(t *testing.T) {
 		{name: "system", value: "system", want: System, wantOK: true},
 		{name: "light", value: "light", want: Light, wantOK: true},
 		{name: "dark", value: "dark", want: Dark, wantOK: true},
+		{name: "sepia", value: "sepia", want: Sepia, wantOK: true},
 		{name: "absent", value: "", want: Default},
 		{name: "capitalised", value: "Dark", want: Default},
 		{name: "uppercase", value: "DARK", want: Default},
 		{name: "leading space", value: " dark", want: Default},
 		{name: "trailing space", value: "dark ", want: Default},
-		{name: "unknown word", value: "sepia", want: Default},
+		{name: "unknown word", value: "browntown", want: Default},
 		{name: "attribute injection", value: `dark" onload="alert(1)`, want: Default},
 		{name: "tag injection", value: "dark><script>", want: Default},
 		{name: "oversized", value: strings.Repeat("d", MaxCookieValueBytes+1), want: Default},
@@ -66,13 +67,13 @@ func TestCatalogIsTheClosedSetOfThemes(t *testing.T) {
 		}
 		seen[candidate] = true
 	}
-	for _, required := range []Theme{Default, Light, Dark} {
+	for _, required := range []Theme{Default, Light, Dark, Sepia} {
 		if !seen[required] {
 			t.Errorf("catalog is missing %q", required)
 		}
 	}
-	if Known("sepia") {
-		t.Error(`Known("sepia") = true, want false`)
+	if Known("browntown") {
+		t.Error(`Known("browntown") = true, want false`)
 	}
 }
 
@@ -116,7 +117,7 @@ func TestStampFailsClosed(t *testing.T) {
 		theme    Theme
 		want     error
 	}{
-		{name: "theme outside the catalog", document: shell, theme: "sepia", want: ErrUnknownTheme},
+		{name: "theme outside the catalog", document: shell, theme: "browntown", want: ErrUnknownTheme},
 		{name: "empty theme", document: shell, theme: "", want: ErrUnknownTheme},
 		{name: "no document", document: "", theme: Dark, want: ErrNoRootElement},
 		{

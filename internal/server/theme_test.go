@@ -50,7 +50,8 @@ func TestShellVariantFollowsTheThemeCookie(t *testing.T) {
 		{name: "system", cookie: "system", want: theme.System},
 		{name: "light", cookie: "light", want: theme.Light},
 		{name: "dark", cookie: "dark", want: theme.Dark},
-		{name: "unknown theme", cookie: "sepia", want: theme.Default, rejected: true},
+		{name: "sepia", cookie: "sepia", want: theme.Sepia},
+		{name: "unknown theme", cookie: "browntown", want: theme.Default, rejected: true},
 		{name: "capitalised", cookie: "Dark", want: theme.Default, rejected: true},
 		// Two cookies of the same name: the first wins, deterministically,
 		// so a second injected copy cannot change the answer.
@@ -180,7 +181,7 @@ func TestOriginNeverSetsACookie(t *testing.T) {
 		"/", "/assets/app-abc123.js", "/api/board", "/api/reviews", "/api/ratings",
 		"/livez", "/readyz", "/missing",
 	} {
-		for _, cookie := range []string{"", "dark", "sepia"} {
+		for _, cookie := range []string{"", "dark", "sepia", "browntown"} {
 			response := httptest.NewRecorder()
 			siteHandler.ServeHTTP(response, themedRequest(http.MethodGet, path, cookie))
 			if got := response.Header().Values("Set-Cookie"); len(got) != 0 {

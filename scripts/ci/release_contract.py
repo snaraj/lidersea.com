@@ -302,6 +302,137 @@ def validate_version_states(
     return boundaries
 
 
+DOCUMENTATION_FILES = frozenset({"AGENTS.md", "README.md", ".gitignore"})
+DOCUMENTATION_TREE = "docs/"
+RELEASE_LOCK_PATHS = ("VERSION", "chart/Chart.yaml", "chart/values.yaml", "CHANGELOG.md")
+_DOCUMENTATION_DIFF_MODES = frozenset({"000000", "100644", "100755"})
+_DOCUMENTATION_DIFF_STATUSES = frozenset({"A", "D", "M"})
+
+
+def is_documentation_path(path: str) -> bool:
+    """Classify one repo-relative path as documentation-only surface.
+
+    The allowlist is deliberately closed: root AGENTS.md, README.md, and
+    .gitignore, plus Markdown files under docs/. Everything else — release
+    locks, scripts, workflows, application and chart trees, LICENSE — is an
+    artifact surface, so widening this set is itself a released gate change.
+    """
+    if path in DOCUMENTATION_FILES:
+        return True
+    return path.startswith(DOCUMENTATION_TREE) and path.endswith(".md")
+
+
+def _diff_entries(repository: Path, base: str, commit: str) -> list[tuple[str, str, str, str]]:
+    """Return (src_mode, dst_mode, status, path) for one commit-over-base diff."""
+    completed = subprocess.run(
+        ["git", "-C", str(repository), "diff", "--raw", "-z", "--no-renames", "--no-color", base, commit],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if completed.returncode != 0:
+        raise ContractError(f"git diff walk failed between {base} and {commit}")
+    try:
+        raw = completed.stdout.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ContractError(f"diff between {base} and {commit} carries undecodable paths") from exc
+    fields = raw.split("\0")
+    if fields and fields[-1] == "":
+        fields.pop()
+    if len(fields) % 2 != 0:
+        raise ContractError(f"diff between {base} and {commit} is not meta/path paired")
+    entries: list[tuple[str, str, str, str]] = []
+    for meta, path in zip(fields[0::2], fields[1::2]):
+        # --no-renames guarantees two-field records; an R/C record would
+        # carry a second path and silently shift this pairing, so the meta
+        # shape is pinned strictly enough that any such record denies.
+        if not re.fullmatch(r":[0-7]{6} [0-7]{6} [0-9a-f]{7,64} [0-9a-f]{7,64} [ACDMTUX]", meta) or not path:
+            raise ContractError(f"diff entry between {base} and {commit} is malformed")
+        parts = meta.split(" ")
+        entries.append((parts[0][1:], parts[1], parts[4], path))
+    return entries
+
+
+def _undocumented_paths(repository: Path, base: str, commit: str) -> list[str]:
+    """Return every changed path that is not a plain-file documentation edit."""
+    offending: list[str] = []
+    for src_mode, dst_mode, status, path in _diff_entries(repository, base, commit):
+        if status not in _DOCUMENTATION_DIFF_STATUSES:
+            offending.append(path)
+            continue
+        if src_mode not in _DOCUMENTATION_DIFF_MODES or dst_mode not in _DOCUMENTATION_DIFF_MODES:
+            offending.append(path)
+            continue
+        if not is_documentation_path(path):
+            offending.append(path)
+    return offending
+
+
+def classify_transition(repository: Path, base_sha: str, head_sha: str, *, first_parent: bool) -> dict[str, object]:
+    """Classify one protected range as artifact or no-artifact, fail closed.
+
+    Any path anywhere in the range outside the documentation allowlist puts
+    the whole range under the unchanged one-exact-patch release contract via
+    ``validate_transition``. Only a range whose every commit is individually
+    confined to documentation surfaces — so the artifact cannot have changed —
+    classifies as no-artifact, and even then every release lock must be
+    byte-identical from base to head and the retained head snapshot must
+    still validate. There is no flag, environment variable, or third verdict.
+    """
+    base_sha = require_sha(base_sha, "base SHA")
+    head_sha = require_sha(head_sha, "head SHA")
+    if _git(repository, "rev-parse", f"{base_sha}^{{commit}}") != base_sha:
+        raise ContractError("base SHA did not resolve exactly")
+    if _git(repository, "rev-parse", f"{head_sha}^{{commit}}") != head_sha:
+        raise ContractError("head SHA did not resolve exactly")
+    commits = _linear_commits(repository, base_sha, head_sha)
+    offending: list[str] = []
+    previous = base_sha
+    for commit in commits:
+        offending.extend(_undocumented_paths(repository, previous, commit))
+        previous = commit
+    if offending:
+        states = [(base_sha, Version.parse(_git_file(repository, base_sha, "VERSION")))]
+        states.extend(
+            (commit, Version.parse(_git_file(repository, commit, "VERSION")))
+            for commit in commits
+        )
+        if not validate_version_states(states, exact_boundaries=None):
+            raise ContractError(
+                "artifact-surface paths changed without one exact release patch: "
+                + ", ".join(sorted(set(offending))[:8])
+            )
+        intent = validate_transition(repository, base_sha, head_sha, first_parent=first_parent)
+        return {
+            "class": "artifact",
+            "base_sha": base_sha,
+            "source_sha": intent.source_sha,
+            "version": str(intent.version),
+            "tag": intent.tag,
+        }
+    states = [(base_sha, Version.parse(_git_file(repository, base_sha, "VERSION")))]
+    states.extend(
+        (commit, Version.parse(_git_file(repository, commit, "VERSION")))
+        for commit in commits
+    )
+    validate_version_states(states, exact_boundaries=0)
+    for path in RELEASE_LOCK_PATHS:
+        if _git_file(repository, base_sha, path) != _git_file(repository, head_sha, path):
+            raise ContractError(f"documentation-only range mutated release lock {path}")
+    head_files = {
+        path: _git_file(repository, head_sha, path) for path in RELEASE_LOCK_PATHS
+    }
+    retained = validate_snapshot(head_files)
+    return {
+        "class": "no-artifact",
+        "base_sha": base_sha,
+        "source_sha": head_sha,
+        "version": str(retained.version),
+        "tag": retained.tag,
+        "commits": len(commits),
+    }
+
+
 def validate_transition(repository: Path, base_sha: str, head_sha: str, *, first_parent: bool) -> ReleaseIntent:
     base_sha = require_sha(base_sha, "base SHA")
     head_sha = require_sha(head_sha, "head SHA")
@@ -2023,7 +2154,14 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         if args.command == "transition":
-            _emit(validate_transition(args.repository, args.base, args.head, first_parent=args.first_parent))
+            print(
+                json.dumps(
+                    classify_transition(
+                        args.repository, args.base, args.head, first_parent=args.first_parent
+                    ),
+                    sort_keys=True,
+                )
+            )
         elif args.command == "release-window":
             window = discover_transition_window(args.repository, args.head)
             print(

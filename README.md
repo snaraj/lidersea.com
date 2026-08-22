@@ -52,8 +52,22 @@ CI is authoritative.
 
 ## Releases
 
-Every protected-main merge publishes exactly one patch release only after the
-merged SHA's exact main CI succeeds. The orchestrator paginates the PR-gate
+Every protected-main merge that changes an artifact publishes exactly one patch
+release only after the merged SHA's exact main CI succeeds. A merge whose every
+commit is confined to the documentation allowlist — root `AGENTS.md`,
+`README.md`, `.gitignore`, and Markdown under `docs/` — changes no artifact, so
+it advances no version and publishes nothing; the orchestrator re-proves the
+whole gap as documentation against an anchor the merge cannot choose, and logs
+an explicit verdict instead of dispatching the publisher. There are two such
+anchors and either will do: the retained release tag, or — when that tag does
+not exist, which is common while a release-pipeline defect is open — the last
+successful protected-main gate head from the Actions record, which additionally
+requires every release lock to be byte-identical to it. A merge is denied only
+when BOTH anchors are unavailable, and a tag probe that never returns a
+definitive answer counts as unknown rather than absent, so it denies too.
+Nothing is
+relaxed by that: an unchanged artifact has nothing to version, sign, scan, or
+attest, and documentation merges still run the entire PR gate. The orchestrator paginates the PR-gate
 jobs and requires `security`, `application`, `chart`, `container`, and
 main-only `coverage-badges` to succeed while `dependency-review` is explicitly
 skipped on a push. It separately waits for the same-SHA main CodeQL run and

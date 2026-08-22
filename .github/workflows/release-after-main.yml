@@ -77,7 +77,291 @@ jobs:
           ref: ${{ github.event.workflow_run.head_sha }}
           persist-credentials: false
           fetch-depth: 0
+      - name: Classify the completed range from its authorized gate verdict
+        # A documentation-only merge changes no artifact, so there is nothing
+        # to version, sign, scan, or release. The gate that validated the
+        # exact pushed range published its verdict as a run artifact on the
+        # run this event names; this step re-derives the entire class from
+        # git before trusting one byte of it, and a no-artifact verdict must
+        # additionally re-prove the whole tag-to-head gap as documentation.
+        # Every other outcome — absent verdict, foreign class, mismatch,
+        # missing tag — fails this job red. There is no third path.
+        id: classify
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COMPLETED_SHA: ${{ github.event.workflow_run.head_sha }}
+          MAIN_RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          set -euo pipefail
+          event_sha="$(python3 -I -B scripts/ci/release_contract.py workflow-run \
+            --event "${GITHUB_EVENT_PATH}" --repository "${GITHUB_REPOSITORY}")"
+          test "${event_sha}" = "${COMPLETED_SHA}"
+          test "$(git rev-parse HEAD)" = "${COMPLETED_SHA}"
+          [[ "${MAIN_RUN_ID}" =~ ^[1-9][0-9]*$ ]]
+          artifacts_json="${RUNNER_TEMP}/gate-artifacts.json"
+          # Run-scoped listing, deliberately. There is no per-attempt
+          # artifacts endpoint: .../runs/{id}/attempts/{n}/artifacts returns
+          # 404 (verified against the live API, with .../attempts/{n}/jobs
+          # returning 200 as the control), so scoping the fetch that way
+          # would fail this step on every merge and take releases down.
+          # Re-attempt safety does not need it: the gate uploads with
+          # overwrite, so one run holds exactly one transition-verdict
+          # artifact - the latest attempt's - and the exactly-one assertion
+          # below fails closed if that ever stops being true.
+          gh api --method GET --paginate --slurp \
+            --header 'Accept: application/vnd.github+json' \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/${GITHUB_REPOSITORY}/actions/runs/${MAIN_RUN_ID}/artifacts?per_page=100" \
+            > "${artifacts_json}"
+          artifact_id="$(jq -er \
+            '[.[].artifacts[] | select(.name == "transition-verdict" and .expired == false)]
+             | if length == 1 then .[0].id else error("expected exactly one transition-verdict artifact") end' \
+            "${artifacts_json}")"
+          archive="${RUNNER_TEMP}/transition-verdict.zip"
+          curl --silent --show-error --location --fail \
+            --proto '=https' --tlsv1.2 \
+            --header 'Accept: application/vnd.github+json' \
+            --header 'X-GitHub-Api-Version: 2026-03-10' \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            --output "${archive}" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}/zip"
+          verdict_dir="${RUNNER_TEMP}/transition-verdict"
+          mkdir -p "${verdict_dir}"
+          unzip -q -o "${archive}" -d "${verdict_dir}"
+          verdict="${verdict_dir}/transition-verdict.json"
+          test "$(find "${verdict_dir}" -type f | wc -l)" -eq 1
+          test -s "${verdict}"
+          claimed_class="$(jq -er '.class' "${verdict}")"
+          claimed_base="$(jq -er '.base_sha' "${verdict}")"
+          claimed_source="$(jq -er '.source_sha' "${verdict}")"
+          test "${claimed_source}" = "${COMPLETED_SHA}"
+          [[ "${claimed_base}" =~ ^[0-9a-f]{40}$ ]]
+          rederived="$(python3 -I -B scripts/ci/release_contract.py transition \
+            --repository . --base "${claimed_base}" --head "${COMPLETED_SHA}" \
+            --first-parent)"
+          rederived_class="$(jq -er '.class' <<<"${rederived}")"
+          test "${rederived_class}" = "${claimed_class}"
+          case "${claimed_class}" in
+            artifact) ;;
+            no-artifact)
+              retained_tag="$(jq -er '.tag' <<<"${rederived}")"
+              [[ "${retained_tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+              # TWO INDEPENDENT ANCHORS, NEITHER CHOOSABLE BY THE VERDICT.
+              #
+              # The class re-derivation above is PARAMETERISED by the
+              # verdict's claimed_base, so it is not independent of the
+              # verdict: a base naming a commit INSIDE this push makes a
+              # genuine artifact merge re-derive as documentation. Everything
+              # below exists to defeat that with evidence the verdict cannot
+              # influence. A git-recovered boundary would move WITH the
+              # forgery and agree with the lie, silently skipping a release -
+              # the wrong failure direction, because nothing announces it.
+              #
+              # ANCHOR A - the retained release tag. Computed from HEAD's
+              # tree alone: the forged base can change the CLASS but not
+              # WHICH TAG must already exist. Under the attack the demanded
+              # tag is the version this very push was supposed to release, so
+              # no such tag exists and anchor A is unavailable.
+              #
+              # ANCHOR B - the head of the newest EARLIER successful
+              # protected-main gate run, straight from the Actions record.
+              # Also unforgeable, and it does NOT depend on the release
+              # pipeline having succeeded, only on the gate having run.
+              #
+              # WHY A FALLBACK IS NOT A BYPASS. Anchor A being unavailable is
+              # exactly the signature of the forged-base attack, so "no tag,
+              # proceed" would be a fail-open. Anchor B is therefore not a
+              # relaxation but a FULL independent proof that catches the same
+              # attack by a different route: a disguised artifact merge moved
+              # a release lock, so the four-lock equality below denies it, and
+              # a lock-free artifact change is caught by the cumulative
+              # re-classification. Both paths run the same cumulative proof;
+              # only their ANCHOR differs. Deny happens when BOTH anchors are
+              # unavailable, never when one is.
+              #
+              # WHY BOTH, RATHER THAN EITHER ALONE. Their failure modes are
+              # complementary. Anchor A survives run records ageing out of
+              # retention but not a release that never tagged; anchor B
+              # survives a broken release pipeline but not retention loss.
+              # Requiring only one to be available is strictly more available
+              # than either, with no loss of strength - and the missing-tag
+              # case is not hypothetical here: six of the twelve main commits
+              # before this change carried no tag, because a double-delivered
+              # merge-push event makes the release job deny on duplicated
+              # exact-SHA CodeQL runs (issue #81). Blocking every
+              # documentation merge behind an unrelated release failure is
+              # precisely the friction this class exists to remove.
+              #
+              # DELIBERATE DELTA from the sibling repository, which anchors on
+              # B alone: its publisher creates tags 15-20 minutes after merge,
+              # past this job's timeout, so it can never poll for A. It pays
+              # for that with a boundary-recovery walk this repository does
+              # not need - and that walk is where both of its fail-opens
+              # lived. Do not port the walk here.
+              api="${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}"
+              ref_json="${RUNNER_TEMP}/retained-ref.json"
+              tag_json="${RUNNER_TEMP}/retained-tag.json"
+              tag_target=''
+              # Anchor A has THREE outcomes, not two, and conflating the last
+              # two is a fail-open against this step's own contract:
+              #   found            -> tag_target set, use anchor A
+              #   definitively 404 -> tag_absent set, anchor A is unavailable,
+              #                       fall through to anchor B
+              #   anything else    -> anchor A's state is UNKNOWN, which is
+              #                       NOT the same as unavailable, so DENY
+              # A persistent 403 (the commonest shape of a GITHUB_TOKEN
+              # permission regression) must not be laundered into "the tag is
+              # absent" - the step never learned that, and saying so on the
+              # one line an operator reads while debugging a broken token is
+              # exactly the dishonest state this repository forbids.
+              tag_absent=''
+              # No long poll. A tag that has not appeared yet is simply anchor
+              # A being unavailable right now, and anchor B is already
+              # sufficient - so waiting buys no security and charges every
+              # documentation merge the wait. Retry only genuinely transient
+              # transport failures, which say nothing about whether the tag
+              # exists.
+              for _ in $(seq 1 3); do
+                status="$(curl --silent --show-error --location \
+                  --proto '=https' --tlsv1.2 \
+                  --output "${ref_json}" --write-out '%{http_code}' \
+                  --header 'Accept: application/vnd.github+json' \
+                  --header 'X-GitHub-Api-Version: 2026-03-10' \
+                  --header "Authorization: Bearer ${GH_TOKEN}" \
+                  "${api}/git/ref/tags/${retained_tag}")"
+                if [ "${status}" = 200 ]; then
+                  tag_object="$(python3 -I -B scripts/ci/release_contract.py tag-ref-object \
+                    --ref-json "${ref_json}" --tag "${retained_tag}")"
+                  object_status="$(curl --silent --show-error --location \
+                    --proto '=https' --tlsv1.2 \
+                    --output "${tag_json}" --write-out '%{http_code}' \
+                    --header 'Accept: application/vnd.github+json' \
+                    --header 'X-GitHub-Api-Version: 2026-03-10' \
+                    --header "Authorization: Bearer ${GH_TOKEN}" \
+                    "${api}/git/tags/${tag_object}")"
+                  test "${object_status}" = 200
+                  test "$(jq -er '.object.type' "${tag_json}")" = commit
+                  tag_target="$(jq -er '.object.sha' "${tag_json}")"
+                  break
+                fi
+                # 404 is a DEFINITIVE answer - the tag does not exist - so
+                # stop immediately and use anchor B rather than sleeping.
+                # Throttles and server errors are transport noise that say
+                # nothing about existence, so they get another attempt.
+                # Anything else (401, 422, ...) still DENIES HARD and is not
+                # allowed to reach anchor B: those mean the credential or the
+                # request is broken, which is real breakage rather than the
+                # merge-friction case the fallback exists for, and silently
+                # routing around a broken token would hide it.
+                case "${status}" in
+                  404) tag_absent=1; break ;;
+                  403|429|500|502|503|504) ;;
+                  *)
+                    printf 'DENY: retained-tag probe returned HTTP %s\n' "${status}" >&2
+                    exit 1
+                    ;;
+                esac
+                sleep 5
+              done
+              if [ -n "${tag_target}" ]; then
+                [[ "${tag_target}" =~ ^[0-9a-f]{40}$ ]]
+                anchor="${tag_target}"
+                anchor_kind="retained release tag ${retained_tag}"
+              elif [ -z "${tag_absent}" ]; then
+                # Retries exhausted without a definitive answer. Anchor A's
+                # state is unknown, so the "deny only when BOTH anchors are
+                # unavailable" invariant is not satisfied and this must deny
+                # exactly like 401/422 does. Falling through here would hide
+                # a broken credential behind the merge-friction fallback.
+                printf 'DENY: retained-tag probe never returned a definitive answer for %s; anchor availability is unknown\n' \
+                  "${retained_tag}" >&2
+                exit 1
+              else
+                # ANCHOR B. Unavailable only for a fresh repository or one
+                # whose run records have aged out of retention - and then
+                # NEITHER anchor exists, so the class is unprovable and the
+                # jq expression below errors the step closed.
+                previous_json="${RUNNER_TEMP}/previous-main-runs.json"
+                gh api --method GET \
+                  --header 'Accept: application/vnd.github+json' \
+                  --header 'X-GitHub-Api-Version: 2026-03-10' \
+                  "repos/${GITHUB_REPOSITORY}/actions/workflows/pr-gate.yml/runs?branch=main&event=push&status=success&per_page=100" \
+                  > "${previous_json}"
+                previous_head="$(jq -er --argjson current "${MAIN_RUN_ID}" \
+                  '[.workflow_runs[]
+                    | select(.id < $current and .head_branch == "main"
+                             and .event == "push" and .conclusion == "success")]
+                   | if length == 0 then error("neither the retained tag nor an earlier gated main run is available")
+                     else (max_by(.id) | .head_sha) end' \
+                  "${previous_json}")"
+                [[ "${previous_head}" =~ ^[0-9a-f]{40}$ ]]
+                # Both refusals below print a DISTINCT message on purpose. As
+                # bare `test`/`git` calls they denied silently via set -e, and
+                # a downstream failure then looked identical to them - which
+                # made a test that named one of them pass even with the guard
+                # deleted, because the denial merely relocated.
+                if [ "${previous_head}" = "${COMPLETED_SHA}" ]; then
+                  printf 'DENY: the gated-run anchor resolves to this very push %s; it cannot anchor itself\n' \
+                    "${COMPLETED_SHA}" >&2
+                  exit 1
+                fi
+                if ! git merge-base --is-ancestor "${previous_head}" "${COMPLETED_SHA}"; then
+                  printf 'DENY: the gated-run anchor %s is not an ancestor of %s; the range is not a fast-forward\n' \
+                    "${previous_head}" "${COMPLETED_SHA}" >&2
+                  exit 1
+                fi
+                # A documentation-only push moves no release lock. THIS is
+                # what denies a forged base on this path: a disguised
+                # artifact merge carries its version bump, so the locks
+                # differ here and the step exits non-zero.
+                for lock in VERSION chart/Chart.yaml chart/values.yaml CHANGELOG.md; do
+                  if ! git diff --quiet "${previous_head}" "${COMPLETED_SHA}" -- "${lock}"; then
+                    printf 'DENY: %s changed since the last gated main head %s; this is not a documentation-only push\n' \
+                      "${lock}" "${previous_head}" >&2
+                    exit 1
+                  fi
+                done
+                anchor="${previous_head}"
+                anchor_kind="last gated main head ${previous_head}"
+                # Recovery, stated precisely rather than optimistically. This
+                # denial does NOT require an artifact merge to clear, which
+                # the missing-tag denial it replaces did. But it is NOT
+                # guaranteed to clear on the very next merge either: main
+                # pushes each get their own concurrency group, so gate runs
+                # can complete OUT OF ORDER, and `select(.id < $current)`
+                # then filters a newer run out of an older orchestration -
+                # so two documentation merges racing can both deny with the
+                # same anchor. Every outcome here is red, never a wrong
+                # release; do not upgrade that to a promise of green.
+                printf 'NOTICE: retained tag %s is absent; anchoring on the last gated main head %s\n' \
+                  "${retained_tag}" "${previous_head}" >&2
+              fi
+              [[ "${anchor}" =~ ^[0-9a-f]{40}$ ]]
+              cumulative="$(python3 -I -B scripts/ci/release_contract.py transition \
+                --repository . --base "${anchor}" --head "${COMPLETED_SHA}" \
+                --first-parent)"
+              test "$(jq -er '.class' <<<"${cumulative}")" = no-artifact
+              # SAME-TREE CONSISTENCY ASSERTION, NOT AN INDEPENDENT CHECK -
+              # labelled so nobody mistakes it for one. `rederived` and
+              # `cumulative` both classify with head=COMPLETED_SHA, and the
+              # no-artifact branch derives `tag` from that head tree alone, so
+              # no input can make these two disagree. It is kept as a
+              # structural backstop against a future change that makes the tag
+              # depend on the base, and deliberately not counted as coverage.
+              test "$(jq -er '.tag' <<<"${cumulative}")" = "${retained_tag}"
+              printf 'NO-ARTIFACT: %s is documentation-only (anchored on the %s); no tag, no Release, publisher not dispatched.\n' \
+                "${COMPLETED_SHA}" "${anchor_kind}"
+              printf '## No-artifact merge\n\nCommit %s changed documentation surfaces only; the retained release stays %s and the publisher was not dispatched.\n' \
+                "${COMPLETED_SHA}" "${retained_tag}" >> "${GITHUB_STEP_SUMMARY}"
+              ;;
+            *)
+              printf 'DENY: unknown transition class %s\n' "${claimed_class}" >&2
+              exit 1
+              ;;
+          esac
+          printf 'class=%s\n' "${claimed_class}" >> "${GITHUB_OUTPUT}"
       - name: Bind event, source, and exact next patch
+        if: steps.classify.outputs.class == 'artifact'
         id: release
         env:
           COMPLETED_SHA: ${{ github.event.workflow_run.head_sha }}
@@ -98,6 +382,7 @@ jobs:
           printf 'base_sha=%s\nsource_sha=%s\nversion=%s\ntag=%s\n' \
             "${base_sha}" "${source_sha}" "${version}" "${tag}" >> "${GITHUB_OUTPUT}"
       - name: Authorize exact successful PR-gate and CodeQL main jobs
+        if: steps.classify.outputs.class == 'artifact'
         id: main_ci
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -170,6 +455,7 @@ jobs:
             --jobs-json "${codeql_jobs}" --workflow codeql --run-id "${codeql_run_id}")" = 2
           printf 'codeql_run_id=%s\n' "${codeql_run_id}" >> "${GITHUB_OUTPUT}"
       - name: Create or verify the exact immutable annotated tag
+        if: steps.classify.outputs.class == 'artifact'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SOURCE_SHA: ${{ steps.release.outputs.source_sha }}
@@ -251,6 +537,7 @@ jobs:
           fi
           classify_tag exact >/dev/null
       - name: Dispatch the successful-main-bound publisher explicitly
+        if: steps.classify.outputs.class == 'artifact'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SOURCE_SHA: ${{ steps.release.outputs.source_sha }}

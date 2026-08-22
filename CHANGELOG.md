@@ -7,6 +7,35 @@ Git, image, and GitHub Release tags use the exact plain `vX.Y.Z` form.
 
 ## [Unreleased]
 
+## [0.1.25] - 2026-08-22
+
+### Added
+
+- Embed the resolved image digest into the chart the publisher packages, so a
+  published chart is deployable as published instead of shipping the
+  all-zeros sentinel no registry can resolve. The digest comes only from the
+  one value the Trivy HIGH/CRITICAL gate, cosign signing, and both the SLSA
+  provenance and SPDX SBOM attestations already accepted - never re-derived
+  from a mutable tag (#91).
+- Perform the identical substitution on BOTH chart packaging paths - the
+  chart-state classifier's reproduction and the publish step - so a re-run of
+  an already-published version still classifies `complete` rather than a
+  false `burned` (#91).
+- Fail closed around the substitution: the digest must match
+  `^sha256:[0-9a-f]{64}$` and must not be the sentinel, the working copy must
+  hold the sentinel or that same digest, and the packaged archive is re-read
+  before any registry effect, so a run that would publish the sentinel fails
+  instead (#91).
+
+### Changed
+
+- The committed `chart/values.yaml` keeps the sentinel and says so: only the
+  published artifact carries a real digest, and the `pr-gate` chart checks
+  stay exactly as strict (#91).
+- Read the release version, registry password, and actor from the publish
+  step's environment instead of interpolating workflow expressions into its
+  privileged shell (#91).
+
 ## [0.1.24] - 2026-08-21
 
 ### Added

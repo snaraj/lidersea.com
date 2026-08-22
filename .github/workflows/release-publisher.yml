@@ -546,6 +546,7 @@ jobs:
         env:
           VERSION: ${{ steps.release.outputs.version }}
           GHCR_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
         run: |
           set -euo pipefail
           repository="${CHART#ghcr.io/}"
@@ -585,10 +586,22 @@ jobs:
           expected_tree="${RUNNER_TEMP}/expected-chart-tree"
           published_tree="${RUNNER_TEMP}/published-chart-tree"
           mkdir -p "${expected_archives}" "${published_archives}" "${expected_tree}" "${published_tree}"
+          # The published chart carries the release image digest, so the
+          # reproduction must embed the SAME digest before packaging or an
+          # already-published version diffs as changed and misclassifies
+          # `burned`. This substitution and the publish step's are one
+          # behaviour deliberately performed twice, because the two paths are
+          # mutually exclusive: the classifier returns early when the chart
+          # version is absent, and the publish step never runs when it is not.
+          python3 -I -B scripts/ci/release_contract.py chart-digest-embed \
+            --values chart/values.yaml --digest "${IMAGE_DIGEST}" >/dev/null
           helm package chart --version "${VERSION}" --app-version "${VERSION}" -d "${expected_archives}"
           helm pull "oci://${CHART}" --version "${VERSION}" -d "${published_archives}"
           tar -xzf "${expected_archives}/${chart_name}-${VERSION}.tgz" -C "${expected_tree}"
           tar -xzf "${published_archives}/${chart_name}-${VERSION}.tgz" -C "${published_tree}"
+          python3 -I -B scripts/ci/release_contract.py chart-digest-verify \
+            --values "${expected_tree}/${chart_name}/values.yaml" \
+            --digest "${IMAGE_DIGEST}" >/dev/null
           source_match=true
           if ! diff -ru --no-dereference "${expected_tree}/${chart_name}" "${published_tree}/${chart_name}" >/dev/null; then
             source_match=false
@@ -619,12 +632,29 @@ jobs:
         id: chart_publish
         env:
           GHCR_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.release.outputs.version }}
+          IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
         run: |
           set -euo pipefail
-          version="${{ steps.release.outputs.version }}"
+          version="${VERSION}"
           chart_name="$(awk '/^name:/{print $2; exit}' chart/Chart.yaml)"
+          # ADR 0016 step 1: the published chart must be deployable as
+          # published, so the archive carries the ONE image digest the Trivy
+          # HIGH/CRITICAL gate, cosign signing, and both attestations already
+          # accepted — never a value re-derived from a mutable tag. The
+          # committed values.yaml keeps its sentinel; only this runner copy is
+          # rewritten, and it is never committed.
+          python3 -I -B scripts/ci/release_contract.py chart-digest-embed \
+            --values chart/values.yaml --digest "${IMAGE_DIGEST}" >/dev/null
           helm package chart --version "${version}" --app-version "${version}" -d "${RUNNER_TEMP}"
-          printf '%s' "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
+          # Re-read the ARCHIVE, before any registry effect: a chart that would
+          # ship the sentinel fails the run instead of being published.
+          packaged_values="${RUNNER_TEMP}/packaged-chart-values.yaml"
+          tar -xzOf "${RUNNER_TEMP}/${chart_name}-${version}.tgz" \
+            "${chart_name}/values.yaml" > "${packaged_values}"
+          python3 -I -B scripts/ci/release_contract.py chart-digest-verify \
+            --values "${packaged_values}" --digest "${IMAGE_DIGEST}" >/dev/null
+          printf '%s' "${GHCR_PASSWORD}" | helm registry login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
           push_log="${RUNNER_TEMP}/chart-push.log"
           set +e
           helm push "${RUNNER_TEMP}/${chart_name}-${version}.tgz" "oci://${CHART%/*}" 2>&1 | tee "${push_log}"

@@ -14,6 +14,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import unittest
 import zipfile
@@ -4819,6 +4820,449 @@ curl() {
         self.assertIn("remained unavailable after five observations", lost.stderr)
 
 
+class ChartImageDigestTests(unittest.TestCase):
+    """ADR 0016 step 1: only the PUBLISHED chart may carry a real digest."""
+
+    DIGEST = "sha256:" + "ab" * 32
+    OTHER = "sha256:" + "cd" * 32
+
+    @staticmethod
+    def committed_values() -> str:
+        return (ROOT / "chart" / "values.yaml").read_text(encoding="utf-8")
+
+    @staticmethod
+    def run_cli(*args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, "-I", "-B", str(HERE / "release_contract.py"), *args],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            timeout=60,
+        )
+
+    def test_the_reviewed_tree_keeps_the_fail_closed_sentinel(self):
+        # Acceptance 4. If this ever goes green with a real digest committed,
+        # an unscanned, unattested value has entered the reviewed tree and the
+        # fail-closed default is gone.
+        self.assertEqual(RC.CHART_IMAGE_DIGEST_SENTINEL, "sha256:" + "0" * 64)
+        text = self.committed_values()
+        self.assertEqual(
+            RC._direct_child_scalar(text, "image", "digest"),
+            RC.CHART_IMAGE_DIGEST_SENTINEL,
+        )
+        with self.assertRaises(RC.ContractError) as denial:
+            RC.require_embedded_chart_digest(text, self.DIGEST)
+        self.assertIn("still carries the fail-closed digest sentinel", str(denial.exception))
+
+    def test_embedding_rewrites_exactly_one_line_and_re_applies_as_a_no_op(self):
+        text = self.committed_values()
+        embedded = RC.embed_chart_image_digest(text, self.DIGEST)
+        self.assertEqual(
+            RC.require_embedded_chart_digest(embedded, self.DIGEST), self.DIGEST
+        )
+        before = text.split("\n")
+        after = embedded.split("\n")
+        self.assertEqual(len(before), len(after))
+        changed = [
+            index for index, pair in enumerate(zip(before, after)) if pair[0] != pair[1]
+        ]
+        self.assertEqual(len(changed), 1)
+        self.assertEqual(
+            before[changed[0]], f"  digest: {RC.CHART_IMAGE_DIGEST_SENTINEL}"
+        )
+        self.assertEqual(after[changed[0]], f"  digest: {self.DIGEST}")
+        # Both publisher packaging paths run the identical substitution, so a
+        # second application must change nothing rather than rewrite again.
+        self.assertEqual(RC.embed_chart_image_digest(embedded, self.DIGEST), embedded)
+
+    def test_every_malformed_digest_denies_in_both_directions(self):
+        text = self.committed_values()
+        embedded = RC.embed_chart_image_digest(text, self.DIGEST)
+        for malformed in (
+            "sha256:" + "a" * 63,
+            "sha256:" + "a" * 65,
+            "a" * 64,
+            "sha512:" + "a" * 64,
+            "SHA256:" + "a" * 64,
+            "sha256:" + "A" * 64,
+            "sha256:" + "g" * 64,
+            " " + self.DIGEST,
+            self.DIGEST + "\n",
+            "",
+            RC.CHART_IMAGE_DIGEST_SENTINEL,
+            None,
+        ):
+            with self.subTest(digest=malformed):
+                with self.assertRaises(RC.ContractError):
+                    RC.embed_chart_image_digest(text, malformed)
+                with self.assertRaises(RC.ContractError):
+                    RC.require_embedded_chart_digest(embedded, malformed)
+
+    def test_a_foreign_or_unlocatable_image_digest_never_gets_overwritten(self):
+        text = self.committed_values()
+        embedded = RC.embed_chart_image_digest(text, self.DIGEST)
+        with self.assertRaises(RC.ContractError) as foreign:
+            RC.embed_chart_image_digest(embedded, self.OTHER)
+        self.assertIn("neither the sentinel nor this release digest", str(foreign.exception))
+        with self.assertRaises(RC.ContractError):
+            RC.require_embedded_chart_digest(embedded, self.OTHER)
+        sentinel_line = f"  digest: {RC.CHART_IMAGE_DIGEST_SENTINEL}"
+        for label, mutant in (
+            ("renamed key", text.replace(sentinel_line, "  digestx: x", 1)),
+            ("empty value", text.replace(sentinel_line, "  digest:", 1)),
+            ("duplicated key", text.replace("\nimage:\n", f"\nimage:\n{sentinel_line}\n", 1)),
+            ("no image mapping", text.replace("\nimage:\n", "\n", 1)),
+            ("ambiguous line breaks", text.replace("\n", "\r\n")),
+        ):
+            with self.subTest(values=label):
+                with self.assertRaises(RC.ContractError):
+                    RC.embed_chart_image_digest(mutant, self.DIGEST)
+
+    def test_the_cli_writes_the_working_copy_and_proves_its_own_postcondition(self):
+        with tempfile.TemporaryDirectory(dir=ROOT, prefix=".chart-digest-cli-") as temporary:
+            values = Path(temporary) / "values.yaml"
+            values.write_text(self.committed_values(), encoding="utf-8")
+            sentinel = self.run_cli(
+                "chart-digest-verify", "--values", str(values), "--digest", self.DIGEST
+            )
+            self.assertNotEqual(sentinel.returncode, 0)
+            self.assertIn("still carries the fail-closed digest sentinel", sentinel.stderr)
+            embed = self.run_cli(
+                "chart-digest-embed", "--values", str(values), "--digest", self.DIGEST
+            )
+            self.assertEqual(embed.returncode, 0, embed.stderr)
+            self.assertEqual(embed.stdout.strip(), self.DIGEST)
+            verify = self.run_cli(
+                "chart-digest-verify", "--values", str(values), "--digest", self.DIGEST
+            )
+            self.assertEqual(verify.returncode, 0, verify.stderr)
+            self.assertEqual(verify.stdout.strip(), self.DIGEST)
+            settled = values.read_text(encoding="utf-8")
+            again = self.run_cli(
+                "chart-digest-embed", "--values", str(values), "--digest", self.DIGEST
+            )
+            self.assertEqual(again.returncode, 0, again.stderr)
+            self.assertEqual(values.read_text(encoding="utf-8"), settled)
+            for label, digest in (
+                ("63 hex", "sha256:" + "a" * 63),
+                ("no algorithm prefix", "a" * 64),
+                ("sentinel", RC.CHART_IMAGE_DIGEST_SENTINEL),
+                ("foreign digest", self.OTHER),
+            ):
+                with self.subTest(denied=label):
+                    denied = self.run_cli(
+                        "chart-digest-embed", "--values", str(values), "--digest", digest
+                    )
+                    self.assertNotEqual(denied.returncode, 0)
+                    self.assertIn("DENY:", denied.stderr)
+                    # A denied embed leaves the working copy untouched.
+                    self.assertEqual(values.read_text(encoding="utf-8"), settled)
+
+
+class ChartDigestShellPathTests(unittest.TestCase):
+    """Both real packaging blocks, executed with stubbed registry tooling."""
+
+    VERSION = "0.1.25"
+    DIGEST = "sha256:" + "ab" * 32
+    CHART = "ghcr.io/owner/charts/site"
+    MANIFEST_BODY = (
+        b'{"mediaType":"application/vnd.oci.image.manifest.v1+json","schemaVersion":2}'
+    )
+    PRELUDE = r'''
+python3() { "${TEST_PYTHON}" "$@"; }
+export -f python3
+sleep() { :; }
+
+curl() {
+  local all="$*" output='' headers=''
+  if [[ "${all}" == *'https://ghcr.io/token'* ]]; then
+    printf '{"token":"fixture-token"}'
+    return 0
+  fi
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --output) output="$2"; shift 2 ;;
+      --dump-header) headers="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  cp "${MOCK_MANIFEST_BODY}" "${output}"
+  printf 'HTTP/2 200\r\ndocker-content-digest: %s\r\n' "${MOCK_MANIFEST_DIGEST}" \
+    > "${headers}"
+  printf '200'
+}
+export -f curl
+
+helm() {
+  local subcommand="$1"; shift
+  case "${subcommand}" in
+    package)
+      local source='' version='' destination=''
+      while [ "$#" -gt 0 ]; do
+        case "$1" in
+          --version) version="$2"; shift 2 ;;
+          --app-version) shift 2 ;;
+          -d) destination="$2"; shift 2 ;;
+          -*) shift ;;
+          *) source="$1"; shift ;;
+        esac
+      done
+      local staging="${MOCK_STAGING}/package-$$"
+      rm -rf -- "${staging}"
+      mkdir -p "${staging}"
+      cp -R "${source}" "${staging}/${MOCK_CHART_NAME}"
+      tar -czf "${destination}/${MOCK_CHART_NAME}-${version}.tgz" \
+        -C "${staging}" "${MOCK_CHART_NAME}"
+      rm -rf -- "${staging}"
+      printf 'Successfully packaged chart\n'
+      ;;
+    pull)
+      local destination=''
+      while [ "$#" -gt 0 ]; do
+        case "$1" in
+          -d) destination="$2"; shift 2 ;;
+          *) shift ;;
+        esac
+      done
+      cp "${MOCK_REGISTRY_CHART}" \
+        "${destination}/${MOCK_CHART_NAME}-${MOCK_VERSION}.tgz"
+      ;;
+    registry)
+      cat >/dev/null
+      printf 'Login Succeeded\n'
+      ;;
+    push)
+      cp "$1" "${MOCK_REGISTRY_CHART}"
+      printf 'Pushed: fixture\nDigest: %s\n' "${MOCK_CHART_DIGEST}"
+      ;;
+    *) return 2 ;;
+  esac
+}
+
+cosign() { return 0; }
+'''
+
+    @classmethod
+    def chart_name(cls) -> str:
+        return RC._top_level_scalar(
+            (ROOT / "chart" / "Chart.yaml").read_text(encoding="utf-8"), "name"
+        )
+
+    def execute(
+        self,
+        block: str,
+        *,
+        digest: str | None = None,
+        published: str | None = None,
+    ) -> tuple[subprocess.CompletedProcess[str], str, str | None]:
+        """Run one packaging block in a sandbox holding its own chart copy.
+
+        `published` is the digest the already-published archive carries, or
+        None for the sentinel; it is left unstaged entirely when the block is
+        the publish path, so a run that pushes nothing is observable.
+        """
+        name = self.chart_name()
+        manifest_digest = "sha256:" + hashlib.sha256(self.MANIFEST_BODY).hexdigest()
+        with tempfile.TemporaryDirectory(dir=ROOT, prefix=".chart-digest-shell-") as temporary:
+            sandbox = Path(temporary)
+            shutil.copytree(ROOT / "chart", sandbox / "chart")
+            (sandbox / "scripts" / "ci").mkdir(parents=True)
+            for helper in ("release_contract.py", "verify-registry-alias.sh"):
+                shutil.copy2(HERE / helper, sandbox / "scripts" / "ci" / helper)
+            runner = sandbox / "runner"
+            staging = sandbox / "staging"
+            for directory in (runner, staging):
+                directory.mkdir()
+            body = sandbox / "manifest-body.json"
+            body.write_bytes(self.MANIFEST_BODY)
+            registry_chart = sandbox / "registry-chart.tgz"
+            # The classifier READS an already-published archive; the publish
+            # path CREATES one, so leaving it unstaged there makes "this run
+            # pushed nothing at all" directly observable.
+            if "helm push" not in block:
+                source = sandbox / "published" / name
+                shutil.copytree(sandbox / "chart", source)
+                values = source / "values.yaml"
+                if published is not None:
+                    values.write_text(
+                        RC.embed_chart_image_digest(
+                            values.read_text(encoding="utf-8"), published
+                        ),
+                        encoding="utf-8",
+                    )
+                with tarfile.open(registry_chart, "w:gz") as bundle:
+                    bundle.add(source, arcname=name)
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "TEST_PYTHON": ExistingImageShellPathTests.bash_path(sys.executable),
+                    "RUNNER_TEMP": ExistingImageShellPathTests.bash_path(str(runner)),
+                    "GITHUB_OUTPUT": ExistingImageShellPathTests.bash_path(
+                        str(runner / "github-output.txt")
+                    ),
+                    "GITHUB_ACTOR": "release-fixture",
+                    "GHCR_PASSWORD": "fixture-password",
+                    "GITHUB_SERVER_URL": "https://github.com",
+                    "GITHUB_REPOSITORY": "owner/site",
+                    "CHART": self.CHART,
+                    "VERSION": self.VERSION,
+                    "IMAGE_DIGEST": self.DIGEST if digest is None else digest,
+                    "MOCK_CHART_NAME": name,
+                    "MOCK_VERSION": self.VERSION,
+                    "MOCK_STAGING": ExistingImageShellPathTests.bash_path(str(staging)),
+                    "MOCK_MANIFEST_BODY": ExistingImageShellPathTests.bash_path(str(body)),
+                    "MOCK_MANIFEST_DIGEST": manifest_digest,
+                    "MOCK_CHART_DIGEST": manifest_digest,
+                    "MOCK_REGISTRY_CHART": ExistingImageShellPathTests.bash_path(
+                        str(registry_chart)
+                    ),
+                }
+            )
+            completed = subprocess.run(
+                [ExistingImageShellPathTests.bash_executable(), "-s"],
+                cwd=sandbox,
+                env=environment,
+                input=self.PRELUDE + "\n" + block,
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                timeout=120,
+            )
+            output_file = runner / "github-output.txt"
+            output = output_file.read_text(encoding="utf-8") if output_file.exists() else ""
+            pushed: str | None = None
+            if registry_chart.exists():
+                with tarfile.open(registry_chart, "r:gz") as bundle:
+                    member = bundle.extractfile(f"{name}/values.yaml")
+                    assert member is not None
+                    pushed = member.read().decode("utf-8")
+            return completed, output, pushed
+
+    @staticmethod
+    def classifier_block() -> str:
+        return ExistingImageShellPathTests.workflow_run_block(
+            "Classify an absent, complete, or burned chart version"
+        )
+
+    @staticmethod
+    def publish_block() -> str:
+        return ExistingImageShellPathTests.workflow_run_block(
+            "Publish and sign an absent chart version"
+        )
+
+    EMBED = (
+        "python3 -I -B scripts/ci/release_contract.py chart-digest-embed \\\n"
+        '  --values chart/values.yaml --digest "${IMAGE_DIGEST}" >/dev/null\n'
+    )
+
+    def test_a_republished_version_stays_complete_only_because_both_paths_embed(self):
+        block = self.classifier_block()
+        self.assertIn(self.EMBED, block)
+        verify = (
+            "python3 -I -B scripts/ci/release_contract.py chart-digest-verify \\\n"
+            '  --values "${expected_tree}/${chart_name}/values.yaml" \\\n'
+            '  --digest "${IMAGE_DIGEST}" >/dev/null\n'
+        )
+        self.assertIn(verify, block)
+
+        exact, output, _pushed = self.execute(block, published=self.DIGEST)
+        self.assertEqual(exact.returncode, 0, exact.stdout + exact.stderr)
+        self.assertIn("existing chart state: complete", exact.stdout)
+        self.assertIn("state=complete\n", output)
+
+        # The mutation the issue names: a fix that only edits the publish step
+        # leaves this path packaging the sentinel, and the reproduction diff
+        # then reports a false `burned` for an intact publication.
+        skipped, _output, _pushed = self.execute(
+            block.replace(self.EMBED, "", 1).replace(verify, "", 1),
+            published=self.DIGEST,
+        )
+        self.assertNotEqual(skipped.returncode, 0, skipped.stdout + skipped.stderr)
+        self.assertIn("existing chart state: burned", skipped.stdout)
+
+        # Dropping only the substitution is caught earlier still, by the
+        # packaged-archive re-read, before the diff is ever consulted.
+        unverified, _output, _pushed = self.execute(
+            block.replace(self.EMBED, "", 1), published=self.DIGEST
+        )
+        self.assertNotEqual(unverified.returncode, 0)
+        self.assertIn("still carries the fail-closed digest sentinel", unverified.stderr)
+        self.assertNotIn("existing chart state:", unverified.stdout)
+
+        # A malformed digest denies before anything is packaged.
+        for label, malformed in (
+            ("63 hex", "sha256:" + "a" * 63),
+            ("no algorithm prefix", "a" * 64),
+            ("sentinel", RC.CHART_IMAGE_DIGEST_SENTINEL),
+        ):
+            with self.subTest(classifier_digest=label):
+                denied, _output, _pushed = self.execute(
+                    block, digest=malformed, published=self.DIGEST
+                )
+                self.assertNotEqual(denied.returncode, 0)
+                self.assertIn("DENY:", denied.stderr)
+
+        # Honest consequence, pinned rather than hidden: re-running against a
+        # chart published BEFORE this change (sentinel in the published tree)
+        # denies `burned` instead of publishing anything. It fails closed.
+        legacy, _output, _pushed = self.execute(block, published=None)
+        self.assertNotEqual(legacy.returncode, 0)
+        self.assertIn("existing chart state: burned", legacy.stdout)
+
+    def test_the_published_archive_carries_the_digest_and_never_the_sentinel(self):
+        block = self.publish_block()
+        self.assertIn(self.EMBED, block)
+        verify = (
+            "python3 -I -B scripts/ci/release_contract.py chart-digest-verify \\\n"
+            '  --values "${packaged_values}" --digest "${IMAGE_DIGEST}" >/dev/null\n'
+        )
+        self.assertIn(verify, block)
+
+        published, output, pushed = self.execute(block)
+        self.assertEqual(published.returncode, 0, published.stdout + published.stderr)
+        self.assertIn(
+            "digest=sha256:" + hashlib.sha256(self.MANIFEST_BODY).hexdigest(), output
+        )
+        self.assertIsNotNone(pushed)
+        self.assertEqual(
+            RC.require_embedded_chart_digest(pushed, self.DIGEST), self.DIGEST
+        )
+        self.assertNotIn(RC.CHART_IMAGE_DIGEST_SENTINEL, pushed)
+
+        # Substitution turned into a no-op: the post-package re-read fails the
+        # run, and nothing reaches the registry at all.
+        no_op, _output, unpushed = self.execute(block.replace(self.EMBED, "", 1))
+        self.assertNotEqual(no_op.returncode, 0, no_op.stdout + no_op.stderr)
+        self.assertIn("still carries the fail-closed digest sentinel", no_op.stderr)
+        self.assertIsNone(unpushed)
+
+        # The defect this change repairs, reproduced: with BOTH the embed and
+        # the re-read removed the run is green and publishes the sentinel, so
+        # the post-package check is what makes that state unreachable.
+        defect, _output, sentinel_push = self.execute(
+            block.replace(self.EMBED, "", 1).replace(verify, "", 1)
+        )
+        self.assertEqual(defect.returncode, 0, defect.stdout + defect.stderr)
+        self.assertIsNotNone(sentinel_push)
+        self.assertIn(RC.CHART_IMAGE_DIGEST_SENTINEL, sentinel_push)
+
+        for label, malformed in (
+            ("63 hex", "sha256:" + "a" * 63),
+            ("no algorithm prefix", "a" * 64),
+            ("uppercase hex", "sha256:" + "A" * 64),
+            ("sentinel", RC.CHART_IMAGE_DIGEST_SENTINEL),
+        ):
+            with self.subTest(publish_digest=label):
+                denied, _output, never_pushed = self.execute(block, digest=malformed)
+                self.assertNotEqual(denied.returncode, 0)
+                self.assertIn("DENY:", denied.stderr)
+                self.assertIsNone(never_pushed)
+
+
 class PublicationShellTransactionTests(unittest.TestCase):
     TAG = "v0.1.10"
     SOURCE = "a" * 40
@@ -5446,6 +5890,33 @@ class WorkflowStructureTests(unittest.TestCase):
                 raise ValueError(f"Trivy frontend source gate lost: {required}")
 
     @staticmethod
+    def require_chart_digest_embed(publisher: str) -> None:
+        """Every chart packaging path binds the archive to the scanned digest."""
+        embed = "release_contract.py chart-digest-embed"
+        verify = "release_contract.py chart-digest-verify"
+        package = "helm package chart"
+        segments = publisher.split(package)
+        if len(segments) != 3:
+            raise ValueError("publisher must package the chart exactly twice")
+        head, middle, tail = segments
+        if embed not in head or embed not in middle:
+            raise ValueError("every helm package must be preceded by the digest embed")
+        if verify not in middle or verify not in tail:
+            raise ValueError("every helm package must be followed by an archive re-read")
+        if middle.index(verify) > middle.index(embed):
+            raise ValueError("the first packaged chart must be re-read before the second embed")
+        if publisher.count('--digest "${IMAGE_DIGEST}"') != 4:
+            raise ValueError("both packaging paths must embed and re-read the SAME resolved digest")
+        sources = set(re.findall(r"(?m)^\s*IMAGE_DIGEST: (.+)$", publisher))
+        if sources != {"${{ steps.image.outputs.digest }}"}:
+            raise ValueError("the chart digest may only come from the resolved image digest")
+        scan = publisher.index("Gate the final image digest at HIGH and CRITICAL")
+        sign = publisher.index("Sign the immutable image digest")
+        attest = publisher.index("Attach and verify exact BuildKit SLSA and SPDX SBOM attestations")
+        if not scan < sign < attest < publisher.index(embed):
+            raise ValueError("the chart digest embed must follow the scan, signing, and attestations")
+
+    @staticmethod
     def require_alias_and_sbom_closure(publisher: str) -> None:
         for required in (
             "registry-manifest",
@@ -6047,6 +6518,44 @@ class WorkflowStructureTests(unittest.TestCase):
         ):
             with self.subTest(audit_mutant=token), self.assertRaises(ValueError):
                 self.require_integrity_audit(audit.replace(token, ""))
+
+    def test_both_chart_packaging_paths_embed_and_re_read_the_release_digest(self):
+        publisher = (ROOT / ".github/workflows/release-publisher.yml").read_text(
+            encoding="utf-8"
+        )
+        self.require_chart_digest_embed(publisher)
+        embed = "release_contract.py chart-digest-embed"
+        verify = "release_contract.py chart-digest-verify"
+        embeds = publisher.split(embed)
+        self.assertEqual(len(embeds), 3)
+        for label, mutant in (
+            ("classifier embed removed", publisher.replace(embed, "", 1)),
+            ("publish embed removed", embed.join(embeds[:2]) + embeds[2]),
+            ("classifier re-read removed", publisher.replace(verify, "", 1)),
+            ("one packaging path removed", publisher.replace("helm package chart", "", 1)),
+            (
+                "digest re-derived from the tag",
+                publisher.replace('--digest "${IMAGE_DIGEST}"', '--digest "${TAG}"', 1),
+            ),
+            (
+                "digest no longer the resolved image digest",
+                publisher.replace(
+                    "IMAGE_DIGEST: ${{ steps.image.outputs.digest }}",
+                    "IMAGE_DIGEST: ${{ steps.image_state.outputs.digest }}",
+                    1,
+                ),
+            ),
+            (
+                "embed hoisted ahead of the scan and attestation gates",
+                publisher.replace(
+                    "      - name: Gate the final image digest at HIGH and CRITICAL",
+                    f"      # {embed}\n      - name: Gate the final image digest at HIGH and CRITICAL",
+                    1,
+                ),
+            ),
+        ):
+            with self.subTest(chart_digest_mutant=label), self.assertRaises(ValueError):
+                self.require_chart_digest_embed(mutant)
 
 
 if __name__ == "__main__":

@@ -40,6 +40,13 @@ INTOTO_STATEMENT_TYPE = "https://in-toto.io/Statement/v0.1"
 SLSA_PREDICATE_TYPE = "https://slsa.dev/provenance/v1"
 SPDX_PREDICATE_TYPE = "https://spdx.dev/Document"
 DIGEST_RE = re.compile(r"^sha256:([0-9a-f]{64})$")
+# The COMMITTED chart keeps this all-zeros digest forever: no registry can
+# resolve it, so a chart that reached a cluster without the publisher's
+# substitution fails closed at pull time instead of running unidentified bytes.
+# Only the PACKAGED artifact carries a real digest, embedded by the publisher
+# from the one image digest that the Trivy HIGH/CRITICAL gate, cosign signing,
+# and the SLSA/SPDX attestations already accepted (ADR 0016 step 1).
+CHART_IMAGE_DIGEST_SENTINEL = "sha256:" + "0" * 64
 GITHUB_API_VERSION = "2026-03-10"
 EXPECTED_MAIN_RULESET = "Protect-Main"
 GITHUB_ACTIONS_INTEGRATION_ID = 15368
@@ -167,20 +174,30 @@ def _top_level_scalar(text: str, key: str) -> str:
     return values[0]
 
 
-def _direct_child_scalar(text: str, parent: str, key: str) -> str:
+def _direct_child_entries(text: str, parent: str, key: str) -> list[tuple[int, str]]:
+    """Locate every direct child scalar of one top-level mapping, by line."""
     parents = [index for index, line in enumerate(text.splitlines()) if line.rstrip() == f"{parent}:"]
     if len(parents) != 1:
         raise ContractError(f"expected exactly one top-level {parent!r} mapping")
     lines = text.splitlines()
-    values: list[str] = []
-    for line in lines[parents[0] + 1 :]:
+    entries: list[tuple[int, str]] = []
+    for offset, line in enumerate(lines[parents[0] + 1 :], start=parents[0] + 1):
         if line and not line[0].isspace() and not line.lstrip().startswith("#"):
             break
         if line.startswith(f"  {key}:"):
-            values.append(line.split(":", 1)[1].strip().strip("\"'"))
-    if len(values) != 1 or not values[0]:
+            entries.append((offset, line.split(":", 1)[1].strip().strip("\"'")))
+    return entries
+
+
+def _direct_child_entry(text: str, parent: str, key: str) -> tuple[int, str]:
+    entries = _direct_child_entries(text, parent, key)
+    if len(entries) != 1 or not entries[0][1]:
         raise ContractError(f"expected exactly one non-empty {parent}.{key} scalar")
-    return values[0]
+    return entries[0]
+
+
+def _direct_child_scalar(text: str, parent: str, key: str) -> str:
+    return _direct_child_entry(text, parent, key)[1]
 
 
 def validate_snapshot(files: Mapping[str, str]) -> ReleaseIntent:
@@ -1306,6 +1323,51 @@ def require_digest(raw: object, field: str) -> str:
     return raw
 
 
+def require_released_image_digest(digest: object) -> str:
+    """Accept only a well-formed digest that is not the fail-closed sentinel."""
+    resolved = require_digest(digest, "chart image digest")
+    if resolved == CHART_IMAGE_DIGEST_SENTINEL:
+        raise ContractError("chart image digest must not be the fail-closed sentinel")
+    return resolved
+
+
+def embed_chart_image_digest(text: str, digest: object) -> str:
+    """Bind one packaged chart to the exact scanned, signed, attested digest.
+
+    The committed tree keeps the sentinel (requirement 4), so the ONLY
+    accepted starting values are the sentinel itself or this same digest —
+    the latter because both packaging paths in the publisher run the identical
+    substitution and a re-applied embed must be a no-op rather than a second,
+    unreviewed rewrite. Any other value means the working copy already carries
+    a foreign digest, which denies instead of being overwritten.
+    """
+    resolved = require_released_image_digest(digest)
+    lines = text.split("\n")
+    # _direct_child_entries indexes by str.splitlines(), which also breaks on
+    # \r, \x0b, \x0c and the Unicode separators. Rewriting by that index into a
+    # \n-split list would edit the WRONG line for any such file, so an ambiguous
+    # line structure denies rather than being silently normalized.
+    if text.splitlines() != (lines[:-1] if text.endswith("\n") else lines):
+        raise ContractError("chart values are not exactly newline separated")
+    index, current = _direct_child_entry(text, "image", "digest")
+    if current not in (CHART_IMAGE_DIGEST_SENTINEL, resolved):
+        raise ContractError("chart values image.digest is neither the sentinel nor this release digest")
+    lines[index] = f"  digest: {resolved}"
+    return "\n".join(lines)
+
+
+def require_embedded_chart_digest(text: str, digest: object) -> str:
+    """Prove a PACKAGED chart carries the exact released image digest."""
+    resolved = require_released_image_digest(digest)
+    observed = _direct_child_scalar(text, "image", "digest")
+    if observed == CHART_IMAGE_DIGEST_SENTINEL:
+        raise ContractError("packaged chart still carries the fail-closed digest sentinel")
+    require_digest(observed, "packaged chart image digest")
+    if observed != resolved:
+        raise ContractError("packaged chart image digest is not the released image digest")
+    return observed
+
+
 def validate_release_destinations(repository: str, image: str, chart: str) -> None:
     """Bind dotted repository identity to explicit, non-derived GHCR packages."""
     if repository != EXPECTED_REPOSITORY:
@@ -2110,6 +2172,12 @@ def _parser() -> argparse.ArgumentParser:
     registry_manifest.add_argument("--body", type=Path, required=True)
     registry_manifest.add_argument("--headers", type=Path, required=True)
     registry_manifest.add_argument("--expected-digest")
+    chart_digest_embed = commands.add_parser("chart-digest-embed")
+    chart_digest_embed.add_argument("--values", type=Path, required=True)
+    chart_digest_embed.add_argument("--digest", required=True)
+    chart_digest_verify = commands.add_parser("chart-digest-verify")
+    chart_digest_verify.add_argument("--values", type=Path, required=True)
+    chart_digest_verify.add_argument("--digest", required=True)
     json_keys = commands.add_parser("json-keys")
     json_keys.add_argument("--json", type=Path, required=True)
     statement = commands.add_parser("attestation-statement")
@@ -2370,6 +2438,26 @@ def main(argv: list[str] | None = None) -> int:
                     args.body.read_bytes(),
                     args.headers.read_text(encoding="utf-8"),
                     expected_digest=args.expected_digest,
+                )
+            )
+        elif args.command == "chart-digest-embed":
+            # The runner's working copy only. Nothing is committed: the
+            # reviewed tree keeps the sentinel, and the writer re-reads its
+            # own output so a successful exit already proves the postcondition
+            # the packaged archive is about to inherit.
+            embedded = embed_chart_image_digest(
+                args.values.read_text(encoding="utf-8"), args.digest
+            )
+            args.values.write_text(embedded, encoding="utf-8", newline="\n")
+            print(
+                require_embedded_chart_digest(
+                    args.values.read_text(encoding="utf-8"), args.digest
+                )
+            )
+        elif args.command == "chart-digest-verify":
+            print(
+                require_embedded_chart_digest(
+                    args.values.read_text(encoding="utf-8"), args.digest
                 )
             )
         elif args.command == "json-keys":

@@ -16,7 +16,15 @@ image:
   # It is locked to this chart's appVersion by the release gate's four-way
   # lock (numeric VERSION/chart version/appVersion <-> plain-v image tag), so a chart
   # claiming one release can never ship the tag of another.
-  tag: v0.1.24
+  tag: v0.1.25
+  # THIS FILE KEEPS THE SENTINEL. The release publisher rewrites its own
+  # runner copy immediately before `helm package` with the one image digest
+  # the Trivy HIGH/CRITICAL gate, cosign signing, and the SLSA and SPDX
+  # attestations already accepted, and re-reads the packaged archive to prove
+  # the sentinel is gone, so only the PUBLISHED chart carries a real digest
+  # (ADR 0016 step 1). Committing one here would put an unscanned,
+  # unattested digest into the reviewed tree and retire the fail-closed
+  # default; an operator overriding it does so per deployment, not in git.
   digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
   pullPolicy: IfNotPresent
 

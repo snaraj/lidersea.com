@@ -9,6 +9,13 @@ RUN test "$(node --version)" = "v24.19.0" && \
     test "$(npm --version)" = "11.17.0" && \
     npm ci --ignore-scripts --no-audit --no-fund
 COPY frontend/ ./
+# The frontend suite reads the theme catalog from the Go source that defines
+# it, because internal/theme is what the origin actually stamps and deriving
+# the catalog from the stylesheet or the switcher instead let an unvalidated
+# theme ship. That anchor has to exist in THIS stage too: the frontend job in
+# CI has the whole checkout, but this stage deliberately does not, so without
+# this line the container build fails on a file the test correctly demands.
+COPY internal/theme/types.go /src/internal/theme/types.go
 RUN npm run check && npm test && npm run build
 
 # Compile and test a static Go binary for both amd64 CI and arm64 production;

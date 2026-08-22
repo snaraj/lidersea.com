@@ -42,8 +42,11 @@ Git, image, and GitHub Release tags use the exact plain `vX.Y.Z` form.
   open and is torn down with it; Escape closes it from the keyboard.
 - Source-size caps raised under the new-surface carve-out, disclosed here and
   in the PR body so the headroom can be checked as working room: component
-  7600 -> 9600 (measured 8854, 8%), styles 9800 -> 13600 (measured 12724,
-  7%). The static fallback gained no surface, so its 1800 cap does not move.
+  7600 -> 9600 (measured 9303, 3%), styles 9800 -> 13600 (measured 12724,
+  6%). Both headroom figures are stated on the same basis, (cap - measured)
+  / cap, and both are measured at this release rather than at the head that
+  first proposed the raise. The static fallback gained no surface, so its
+  1800 cap does not move.
 
 ## [0.1.25] - 2026-08-22
 

@@ -36,6 +36,23 @@ function maskComponent(source, blankScriptStrings) {
   };
   let i = 0;
   while (i < source.length) {
+    const quote = source[i];
+    // Strings are ALWAYS walked, never only when they are being blanked.
+    // The previous version gated the whole quote branch on the caller's
+    // request, so the code mask walked straight into a string and treated
+    // `const opener = '/*';` as the start of a comment — a FALSE RED on
+    // ordinary correct code, which is the worse half of getting this wrong.
+    if (quote === '"' || quote === "'" || quote === '`') {
+      let k = i + 1;
+      while (k < source.length) {
+        if (source[k] === '\\') { k += 2; continue; }
+        if (source[k] === quote) break;
+        k += 1;
+      }
+      if (blankScriptStrings && i > scriptStart && i < scriptEnd) blank(i + 1, k);
+      i = k + 1;
+      continue;
+    }
     const pair = source.slice(i, i + 2);
     if (pair === '/*') {
       const end = source.indexOf('*/', i + 2);
@@ -44,24 +61,11 @@ function maskComponent(source, blankScriptStrings) {
       i = stop;
       continue;
     }
-    if (pair === '//' && source[i - 1] !== ':') {
+    if (pair === '//') {
       let stop = source.indexOf('\n', i);
       if (stop < 0) stop = source.length;
       blank(i, stop);
       i = stop;
-      continue;
-    }
-    const quote = source[i];
-    if ((quote === '"' || quote === "'" || quote === '`') && (blankScriptStrings || false)) {
-      const inScript = i > scriptStart && i < scriptEnd;
-      let k = i + 1;
-      while (k < source.length) {
-        if (source[k] === '\\') { k += 2; continue; }
-        if (source[k] === quote) break;
-        k += 1;
-      }
-      if (inScript) blank(i + 1, k);
-      i = k + 1;
       continue;
     }
     i += 1;
@@ -75,7 +79,7 @@ const componentShape = maskComponent(component, true);
 // SHAPE so neither a decoy marker in a string nor a brace in one can move
 // it. Used to ask whether a handler CALLS something, which a windowed regex
 // cannot answer.
-function blockAfter(marker, opener = '{') {
+function blockAfter(marker, opener = '{', content = false) {
   const closer = opener === '[' ? ']' : '}';
   const start = componentShape.indexOf(marker);
   assert.notEqual(start, -1, `the component has no ${marker}`);
@@ -89,7 +93,14 @@ function blockAfter(marker, opener = '{') {
       // Offsets are preserved by the mask, so the SHAPE locates the span and
       // the CODE supplies its text: structure is read where strings cannot
       // interfere, content is read where strings are still real.
-      if (depth === 0) return componentCode.slice(open + 1, i);
+      if (depth === 0) {
+        // Shape by default: an assertion about a CALL must not be satisfied
+        // by a string that merely spells one. `const why = 'trigger?.focus()'`
+        // survived the previous head for exactly that reason. Content is
+        // requested explicitly, and only where real string values are the
+        // thing being read — the switcher's option ids.
+        return content ? componentCode.slice(open + 1, i) : componentShape.slice(open + 1, i);
+      }
     }
   }
   return assert.fail(`${marker} has an unbalanced ${opener}${closer} block`);
@@ -127,6 +138,15 @@ function catalogFromGo(source) {
   for (const [, ident, value] of source.matchAll(/(\w+)\s+Theme\s*=\s*"([^"]+)"/g)) {
     values.set(ident, value);
   }
+  // Extension is the SILENT direction: `Catalog = append(Catalog, Amber)` in
+  // an init() serves and ETags a fifth theme while this literal still reads
+  // four, so the frontend validates a catalog the origin no longer has.
+  // Shrinking and reassignment are already loud; this closes the quiet one.
+  assert.doesNotMatch(
+    source,
+    /Catalog\s*=\s*append\(/,
+    'Catalog is extended at run time; the frontend reads the literal, so the two would silently disagree'
+  );
   const list = /var\s+Catalog\s*=\s*\[\]Theme\{([^}]*)\}/.exec(source);
   assert.ok(list, 'internal/theme/types.go declares no Catalog for the frontend to follow');
   const names = list[1].split(',').map((part) => part.trim()).filter(Boolean);
@@ -334,7 +354,7 @@ test('every theme defines the same token set', () => {
       .filter((property) => property.startsWith('--') && !property.startsWith('--palette-'))
       .sort();
 
-  const light = tokensOf((block) => block.selector.includes("[data-theme='light']"));
+  const light = tokensOf((block) => themeBlockPattern('light').test(block.selector));
   const system = tokensOf((block) =>
     block.atRules.some((rule) => rule.includes('prefers-color-scheme')),
   );
@@ -342,7 +362,7 @@ test('every theme defines the same token set', () => {
   assertCatalogIsFullyStamped();
   for (const theme of stampedThemes) {
     assert.deepEqual(
-      tokensOf((block) => block.selector.includes(`[data-theme='${theme}']`)),
+      tokensOf((block) => themeBlockPattern(theme).test(block.selector)),
       light,
       `the ${theme} theme does not define the light theme token set`,
     );
@@ -454,7 +474,7 @@ test('the theme switcher is accessible and origin-led', () => {
   // Bounded to the options array itself, not scanned across the file: the
   // review deleted the sepia option outright and stayed green because the
   // string `id: 'sepia'` survived elsewhere in the component.
-  const optionsBlock = blockAfter('const options', '[');
+  const optionsBlock = blockAfter('const options', '[', true);
   const offered = [...optionsBlock.matchAll(/id:\s*['"]([a-z0-9-]+)['"]/g)].map((match) => match[1]);
   assert.deepEqual(
     offered.slice().sort(),

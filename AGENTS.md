@@ -150,7 +150,7 @@ another.
 
 ### Release-lock closure
 
-Requirement 10's one-patch advance touches a CLOSED set of five locations,
+Requirement 10's one-patch advance touches a CLOSED set of four locations,
 every one bumped in the same commit:
 
 1. `VERSION` — the numeric `X.Y.Z`.
@@ -158,23 +158,22 @@ every one bumped in the same commit:
 3. `chart/values.yaml` — `image.tag`, plain `vX.Y.Z`, matching (1).
 4. `CHANGELOG.md` — a new `## [X.Y.Z] - <ISO date>` heading immediately
    after the empty `## [Unreleased]` heading.
-5. `scripts/ci/test_release_contract.py` — `GovernanceReceiptTests`' own
-   live-snapshot pin (currently the hardcoded literal at ~line 803), which
-   asserts the tag `validate_snapshot` computes from the real
-   VERSION/chart/values/CHANGELOG tree against that literal.
 
-CI proves (1)-(4) mechanically: the `chart` job's numeric `VERSION` ↔
+CI proves all four mechanically: the `chart` job's numeric `VERSION` ↔
 numeric chart `version` ↔ numeric `appVersion` ↔ plain-v `image.tag`
 four-way lock, plus `test_release_contract.py`'s own changelog-format
-assertions over the same four files. Location (5) is the easiest to miss
-precisely because the checker enforces the other four without enforcing
-its own copy — it is a literal inside the checker, not a source-of-truth
-file the checker reads. Missing it is not hypothetical: it broke PR #53's
-first head, failing the `security` job's
-`test_governance_docs_pin_receipts_milestone_parity_and_generic_owner_wording`
-until a second commit advanced the live pin. Treat all five as one closed
-set — a PR that advances the release bumps all five in the same commit,
-never four.
+assertions over the same four files. The set used to hold a fifth
+location — a hand-advanced tag literal inside `GovernanceReceiptTests`'
+live-snapshot assertion — retired because a literal inside the checker is
+the one lock the checker cannot enforce on itself: it broke PR #53's
+first head as a bare assertion diff rather than a `DENY:` message. The
+pin is now derived from the raw bytes of `VERSION` behind a strict
+full-match on `X.Y.Z` plus exactly one trailing newline, so the assertion
+still refuses an internally inconsistent snapshot, a malformed `VERSION`,
+and any parse-normalization drift between the file bytes and the computed
+tag — while the value that used to be hand-advanced can no longer be
+missed. A PR that advances the release bumps all four in the same commit,
+never three.
 
 ## Testing doctrine
 

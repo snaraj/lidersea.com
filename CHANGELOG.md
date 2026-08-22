@@ -7,6 +7,14 @@ Git, image, and GitHub Release tags use the exact plain `vX.Y.Z` form.
 
 ## [Unreleased]
 
+## [0.1.23] - 2026-08-21
+
+### Changed
+
+- Derive the `GovernanceReceiptTests` release-tag pin from the raw bytes of
+  `VERSION`; the release-lock closure shrinks from five surfaces to four and
+  release PRs stop editing the checker (#84).
+
 ## [0.1.22] - 2026-08-21
 
 ### Added

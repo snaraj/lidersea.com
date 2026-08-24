@@ -1,5 +1,9 @@
 # Build outputs and local artifacts
 frontend/node_modules/
+# Playwright's per-run output directory (issue #22's browser lanes). Traces,
+# videos, and screenshots are all off, so this holds only the last-run marker
+# and any failure context — run state, never source.
+frontend/test-results/
 internal/web/dist/*
 !internal/web/dist/.gitkeep
 coverage.out

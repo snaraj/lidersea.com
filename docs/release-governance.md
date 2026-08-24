@@ -213,12 +213,23 @@ read-only and unable to approve reviews, and secret scanning plus push
 protection remain enabled. The `platform-release` environment exists with a
 custom selected-branch policy containing exactly `main`.
 
-The active ruleset is still the inexact `Only-Owner-Push` rule rather than the
-closed `Protect-Main` matrix. The environment currently has no App ID variable
-and no App private-key secret because provisioning authority is still pending.
-Those are external Ready blockers, not invitations for a workflow, author, or
-reviewer to create credentials or change settings. Until all blockers are
-resolved, the App-backed recheck fails closed before publication side effects.
+The inexact `Only-Owner-Push` rule this section once named as active has been
+retired. A read-only observation on 2026-08-23 —
+`gh api repos/snaraj/lidersea.com/rulesets` — returns the closed `Protect-Main`
+matrix as the one active branch ruleset, numeric ID `20724383`. The
+`platform-release` environment now carries both its App ID variable and its App
+private-key secret, so the App-backed recheck runs rather than failing for want
+of a credential: the `immutable_settings` job succeeded at `main`
+(`60076910fa9812f758e7c2721eea4ed8b808b174`) on 2026-08-22. Those two
+provisioning items are therefore cleared. Clearing them changes nothing about
+authority — provisioning remains the owner's, and no workflow, author, or
+reviewer creates credentials or changes settings.
+
+One boundary is unchanged and permanent by design: `bypass_actors` is withheld
+from the CI credential, so the zero-bypass state above is an OWNER preflight
+repeated per release, never a CI fact and never durable. Any control that is
+not exact at the pull request's head is an external Ready blocker, and the
+App-backed recheck fails closed before publication side effects.
 
 Missing, extra, duplicated, name-only, foreign-integration, inverted, or stale
 state fails closed in the CI recheck; bypass-bearing state fails closed in the

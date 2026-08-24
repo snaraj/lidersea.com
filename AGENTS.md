@@ -29,13 +29,55 @@ the owner. In order:
 
 lidersea.com is the web home of Lidersea — luxury yacht maintenance,
 customization, and detailing. It is a Svelte frontend embedded into a single
-dependency-free Go binary (`cmd/server`, `internal/server`, `internal/web`),
-shipped as a distroless multi-arch container plus a Helm chart, and deployed
-by digest onto a self-hosted Kubernetes platform. The origin speaks standard
-HTTP (RFC 9110/9111) only and is provider-neutral per the
-deployment-provider contract below. Unlike its sibling naranjo.online, this
-repository has NO media subsystem: `src/lib/media.ts` and
-`frontend/src/assets/` are naranjo.online structures that do not exist here.
+dependency-free Go binary, shipped as a distroless multi-arch container plus
+a Helm chart, and deployed by digest onto a self-hosted Kubernetes platform.
+The origin speaks standard HTTP (RFC 9110/9111) only and is provider-neutral
+per the deployment-provider contract below.
+
+The Go module is `github.com/snaraj/lidersea.com`, and the enumeration below is
+EXHAUSTIVE: `go list ./...` returns exactly these fifteen packages. A package
+this list does not name is drift, and adding or removing one updates this list
+in the same PR.
+
+- `cmd/server` — the process entrypoint: `run(ctx, lookupEnv)`, the listener,
+  and the SIGTERM drain. The visitor user-story suites live here.
+- `internal/server` — the production HTTP handler: routes, the security-header
+  baseline, the live/ready probes, and the composition of domain payloads into
+  surface envelopes.
+- `internal/web` — the compiled frontend bundle embedded into the binary, plus
+  the budgets measured against that real built artifact.
+- `internal/surface` — the `surface/v1` envelope vocabulary and the registry of
+  the surfaces this site serves; a contract package, not a logic package.
+- `internal/board` — the `media-mosaic/v1` domain: the mosaic data model, its
+  embedded sample content, and cursor pagination.
+- `internal/media` — the media pipeline: the digest-immutable URL class
+  `/media/immutable/<sha256>/<name>`, served from an env-gated directory with
+  HTTP Range support, a media-type allowlist, immutable cache headers, and a
+  concurrency bound.
+- `internal/reviews` — the `reviews/v1` domain: embedded sample reviews, the
+  server-computed aggregate, and submission validation for the gated write
+  path.
+- `internal/estimates`, `internal/estimates/render`,
+  `internal/estimates/delivery` — the `estimates/v1` domain: float-free
+  integer-cent computation, a closed markdown/HTML render registry, and a
+  delivery contract that deliberately ships an honest refusal instead of a
+  transport.
+- `internal/ratings`, `internal/ratings/collect` — the `ratings/v1` domain and
+  its default-off, gated outbound collector.
+- `internal/theme` — the reading-theme catalog, the cookie value contract, and
+  the pure document stamp.
+- `internal/doctrine` — repository pins that exist only as tests.
+- `internal/testsupport` — test scaffolding: the shared API-level fixtures and
+  the mock-browser harness; the ONE package filtered out of the coverage
+  denominator.
+
+The "no media subsystem" line this section used to carry was about FRONTEND
+structures, and it holds in exactly that scope: `frontend/src/lib/media.ts` and
+`frontend/src/assets/` are naranjo.online structures that do not exist here,
+while `internal/media` above is this repository's own Go pipeline. Heavy media
+still never enters git, the bundle, the embed, the image, or a
+ConfigMap/Secret.
+
 The current hello-world shell is temporary placeholder content headed for
 the real site, and the test suite is built so that growth is a conscious
 edit, never a fight (see Sanctioned evolution).
@@ -80,9 +122,12 @@ Numbered for citation, repo-scoped, none negotiable in code:
    in chart values defaults; `TestProviderNeutrality` enforces zero
    occurrences anywhere else. See the deployment-provider contract below.
 7. **Ratchet-only coverage floor.** The PR gate enforces
-   `GO_COVERAGE_FLOOR` (currently 95.0%, measured 97.6%). Raise it as
-   coverage grows; lowering it weakens an enforced check and is out of
-   policy.
+   `GO_COVERAGE_FLOOR` (currently 95.0%). On CI's pinned toolchain the
+   gate's scaffolding-filtered profile measures 97.9% at `main` — the
+   same number the `coverage-badges` job publishes to the generated
+   `badges` branch, which is therefore the citable figure; a local run
+   on a different Go release may differ. Raise it as coverage grows;
+   lowering it weakens an enforced check and is out of policy.
 8. **Truthful serving contract.** Port 8080; `/livez` and `/readyz` stay
    truthful — readiness reflects real serving ability, never a hardcoded
    yes.
@@ -358,11 +403,21 @@ different lane is better. The reviewer works in a disposable worktree at
 the PR head, stays read-only toward the author's workspace, reverts every
 experiment, and removes the worktree afterward.
 
-**Exact-head receipt.** Review identity is textual because agents share the
-owner's GitHub account; it is not a claim of separate GitHub principals. The
-reviewer posts one normal PR comment using this complete shape, with exactly one
-mutation audit, exactly one claim audit, and the signature as the final nonblank
-line (numbered findings or explicit no-finding scope may appear between them):
+**Exact-head receipt.** Review identity has two layers, and only the second one
+is textual. The ACTOR is no longer necessarily the same account that pushed the
+branch: since 2026-08-18 a role-scoped review App posts receipts as
+`snaraj-agent-reviews[bot]`, a genuinely separate GitHub principal, and merged
+PRs #79 and #89 carry receipts from it. The SIGNATURE LINE stays textual anyway,
+because one role principal serves every model in the fleet — the actor cannot
+say WHICH context reviewed, and that line is where the context is declared. This
+repository's validator (`scripts/ci/release_contract.py::validate_review_receipt`)
+reads the textual layer only and has no same-lane rule; making the actor an
+enforced condition here would be a code change, not a prose one.
+
+The reviewer posts one normal PR comment using this complete shape, with
+exactly one mutation audit, exactly one claim audit, and the signature as the
+final nonblank line (numbered findings or explicit no-finding scope may appear
+between them):
 
 ```text
 HEAD: <40-lowercase-hex>

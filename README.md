@@ -94,15 +94,15 @@ successful protected-main gate head from the Actions record, which additionally
 requires every release lock to be byte-identical to it. A merge is denied only
 when BOTH anchors are unavailable, and a tag probe that never returns a
 definitive answer counts as unknown rather than absent, so it denies too.
-Nothing is
-relaxed by that: an unchanged artifact has nothing to version, sign, scan, or
-attest, and documentation merges still run the entire PR gate. The orchestrator paginates the PR-gate
-jobs and requires `security`, `application`, `chart`, `container`, and
-main-only `coverage-badges` to succeed while `dependency-review` is explicitly
-skipped on a push. It separately waits for the same-SHA main CodeQL run and
-requires both analyze jobs to succeed. The merged source carries numeric `X.Y.Z` in
-`VERSION`, chart `version`, `appVersion`, and the dated changelog heading, and
-exact plain `vX.Y.Z` in the image tag. Automation creates that plain tag at the
+Nothing is relaxed by that: an unchanged artifact has nothing to version,
+sign, scan, or attest, and documentation merges still run the entire PR
+gate. The orchestrator paginates the PR-gate jobs and requires `security`,
+`application`, `chart`, `container`, and main-only `coverage-badges` to
+succeed while `dependency-review` is explicitly skipped on a push. It
+separately waits for the same-SHA main CodeQL run and requires both analyze
+jobs to succeed. The merged source carries numeric `X.Y.Z` in `VERSION`,
+chart `version`, `appVersion`, and the dated changelog heading, and exact
+plain `vX.Y.Z` in the image tag. Automation creates that plain tag at the
 exact SHA and explicitly dispatches the publisher definition from protected
 `main` with both authoritative successful-run IDs. A separate read-only job
 revalidates both aggregate records and both exact job inventories before the

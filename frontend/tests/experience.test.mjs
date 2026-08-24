@@ -240,6 +240,116 @@ function declarations(body) {
     });
 }
 
+// Viewport-height units, split by the only distinction that matters on a
+// phone. `vh` and `lvh` both measure the LARGE viewport — the height the page
+// has only while iOS Safari's URL bar is hidden — so a full-height box written
+// in either is taller than the screen whenever the bar is showing. `svh` and
+// `dvh` are the two that never are. The unit must sit directly against its
+// number, which is what keeps `100svh` out of the banned match and `12vw` out
+// of both.
+const TALL_VIEWPORT_UNIT = /\b\d*\.?\d+(?:vh|lvh)\b/;
+const SHORT_VIEWPORT_UNIT = /\b\d*\.?\d+(?:svh|dvh)\b/;
+
+// The viewport-height contract as a RULE over the parsed stylesheet rather
+// than a pinned literal. The literal pin it replaces asserted that the exact
+// string `min-block-size: 100svh` appeared somewhere and that some `@supports`
+// mentioned it; both stayed green while a second rule added `block-size:
+// 100dvh` with no guard and no fallback, because neither assertion looked at
+// any declaration but the one it named. Three findings replace it:
+//
+//   1. a tall unit anywhere, which is the iOS bug itself;
+//   2. a short unit outside an `@supports` naming that same property and unit,
+//      which drops the declaration entirely on an engine that cannot resolve
+//      it — the `@supports` fallback floor, for the one non-universal feature
+//      this stylesheet actually uses;
+//   3. a guarded short unit whose selector declares no unguarded fallback for
+//      the same property, which leaves that engine with nothing at all.
+//
+// The returned `guarded` list is what expresses the POSITIVE half: the floor
+// is "use svh/dvh", not merely "never use 100vh", and a stylesheet that had
+// quietly stopped asking for a small-viewport height would satisfy every ban
+// while meeting none of the requirement.
+function viewportUnitFindings(css) {
+  const blocks = declarationBlocks(css);
+  const findings = [];
+  const guarded = [];
+  for (const block of blocks) {
+    for (const { property, value } of declarations(block.body)) {
+      if (TALL_VIEWPORT_UNIT.test(value)) {
+        findings.push(
+          `${block.selector} declares "${property}: ${value}": vh and lvh measure the large viewport, which a collapsing URL bar makes taller than the screen`,
+        );
+        continue;
+      }
+      const short = SHORT_VIEWPORT_UNIT.exec(value);
+      if (!short) continue;
+      const unit = short[0].replace(/[\d.]/g, '');
+      const guard = block.atRules.find(
+        (rule) => rule.startsWith('@supports') && rule.includes(property) && rule.includes(unit),
+      );
+      if (!guard) {
+        findings.push(
+          `${block.selector} declares "${property}: ${value}" outside an @supports guard naming ${property} and ${unit}, so an engine without the unit drops it`,
+        );
+        continue;
+      }
+      const hasFallback = blocks.some(
+        (other) =>
+          other.selector === block.selector &&
+          !other.atRules.some((rule) => rule.startsWith('@supports')) &&
+          declarations(other.body).some(
+            (entry) =>
+              entry.property === property &&
+              !SHORT_VIEWPORT_UNIT.test(entry.value) &&
+              !TALL_VIEWPORT_UNIT.test(entry.value),
+          ),
+      );
+      if (!hasFallback) {
+        findings.push(
+          `${block.selector} guards "${property}: ${value}" but declares no unguarded ${property}, so an engine without ${unit} gets no height at all`,
+        );
+        continue;
+      }
+      guarded.push(`${block.selector} { ${property}: ${value} }`);
+    }
+  }
+  return { findings, guarded };
+}
+
+// Each video floor is a NAMED SHAPE rather than a bare token, because the two
+// ways to fail it are not the same. `poster` with no value is not a poster,
+// and `muted={false}` is not muted — both satisfy a presence check and both
+// are refused by a phone. `autoplay` is deliberately not part of the trigger:
+// conditioning the floors on it would mean a video that gains autoplay later
+// silently loses its guard, and a poster on a tap-to-play video is correct
+// anyway.
+const VIDEO_FLOORS = [
+  {
+    name: 'muted',
+    present: /\bmuted\b/i,
+    disabled: /\bmuted\s*=\s*(?:"false"|'false'|\{false\})/i,
+  },
+  {
+    name: 'playsinline',
+    present: /\bplaysinline\b/i,
+    disabled: /\bplaysinline\s*=\s*(?:"false"|'false'|\{false\})/i,
+  },
+  // A value is part of the shape here, so `poster` and `poster=""` both fail.
+  { name: 'poster', present: /\bposter\s*=\s*(?:"[^"]+"|'[^']+'|\{[^}]+\})/i },
+];
+
+function videoFindings(source) {
+  const findings = [];
+  for (const [tag] of source.matchAll(/<video\b[^>]*>/gi)) {
+    const flat = tag.replace(/\s+/g, ' ');
+    for (const floor of VIDEO_FLOORS) {
+      if (!floor.present.test(flat)) findings.push(`${flat}: missing ${floor.name}`);
+      else if (floor.disabled?.test(flat)) findings.push(`${flat}: ${floor.name} is switched off`);
+    }
+  }
+  return findings;
+}
+
 // WCAG 2.2 relative luminance and contrast ratio, computed here so the
 // palette is validated rather than asserted. Six-digit hex only: the
 // palette block is pinned to that form by its own test.
@@ -431,14 +541,29 @@ test('rendering-lane floors hold in the shell source', () => {
 
   // iOS Safari's collapsing URL bar makes 100vh taller than the visible
   // viewport, so the small-viewport unit is the only correct answer and the
-  // fallback is a percentage of an already-bounded chain.
+  // fallback is a percentage of an already-bounded chain. The ban is spelled
+  // over the whole stylesheet as well as per declaration, because an at-rule
+  // prelude — `@media (min-height: 100vh)` — is not a declaration and would
+  // otherwise slip past the block walk.
   assert.doesNotMatch(
     stylesCode,
-    /\b100vh\b/,
-    '100vh is banned; use 100svh with a percentage floor',
+    TALL_VIEWPORT_UNIT,
+    'vh and lvh are banned; use svh or dvh behind an @supports guard with a percentage floor',
   );
-  assert.match(stylesCode, /min-block-size:\s*100svh/);
-  assert.match(stylesCode, /@supports\s*\(min-block-size:\s*100svh\)/);
+  for (const [name, source] of Object.entries({ fallback, component: componentCode })) {
+    assert.doesNotMatch(
+      source,
+      TALL_VIEWPORT_UNIT,
+      `${name} sizes something in vh or lvh; an inline style evades the stylesheet's rule but not a phone`,
+    );
+  }
+
+  const viewportUnits = viewportUnitFindings(styles);
+  assert.deepEqual(viewportUnits.findings, [], viewportUnits.findings.join('\n'));
+  assert.ok(
+    viewportUnits.guarded.length >= 1,
+    'the shell asks for no small- or dynamic-viewport height at all; svh/dvh is a positive floor, not only a ban on 100vh',
+  );
 
   assert.match(stylesCode, /--tap-target:\s*44px/);
   assert.match(stylesCode, /min-block-size:\s*var\(--tap-target\)/);
@@ -456,6 +581,124 @@ test('rendering-lane floors hold in the shell source', () => {
   )) {
     assert.ok(Number(pixels) <= 320, `fixed size forces horizontal scroll: ${declaration.trim()}`);
   }
+});
+
+// The viewport-height rule above passes on the current stylesheet, which is
+// the one input that proves nothing: a rule with no violation to find reads
+// exactly like a rule that cannot find one. So it is run here against a
+// compliant fixture and against one fixture per finding branch, and each
+// hostile case must name the floor it breaks. Every mutation the rule claims
+// to catch is therefore killed in the suite itself, not only in a reviewer's
+// scratch worktree.
+test('the viewport-height rule catches every shape it bans', () => {
+  const guarded = [
+    '.shell { min-block-size: 100%; }',
+    '@supports (min-block-size: 100svh) { .shell { min-block-size: 100svh; } }',
+  ].join('\n');
+  const compliant = viewportUnitFindings(guarded);
+  assert.deepEqual(compliant.findings, []);
+  assert.deepEqual(compliant.guarded.length, 1, 'the compliant fixture expresses one guarded unit');
+
+  for (const [label, css, expected] of [
+    ['a tall unit', '.hero { block-size: 100vh; }', [/vh and lvh measure the large viewport/]],
+    [
+      'the large-viewport unit',
+      '.hero { block-size: 100lvh; }',
+      [/vh and lvh measure the large viewport/],
+    ],
+    [
+      'an unguarded short unit',
+      '.hero { min-block-size: 100%; block-size: 100dvh; }',
+      [/outside an @supports guard naming block-size and dvh/],
+    ],
+    [
+      'a guard that names another property',
+      '.hero { min-block-size: 100%; }\n@supports (display: grid) { .hero { block-size: 100dvh; } }',
+      [/outside an @supports guard naming block-size and dvh/],
+    ],
+    [
+      'a guarded unit with no fallback',
+      '@supports (min-block-size: 100svh) { .hero { min-block-size: 100svh; } }',
+      [/declares no unguarded min-block-size/],
+    ],
+    // Two findings, and deliberately so: the fallback declaration is itself an
+    // unguarded viewport unit, which is both a violation on its own line AND
+    // the reason the guarded rule is left without a floor. Collapsing this to
+    // one message would hide half of what is wrong.
+    [
+      'a fallback that is itself a viewport unit',
+      '.hero { min-block-size: 100dvh; }\n@supports (min-block-size: 100svh) { .hero { min-block-size: 100svh; } }',
+      [
+        /outside an @supports guard naming min-block-size and dvh/,
+        /declares no unguarded min-block-size/,
+      ],
+    ],
+  ]) {
+    const { findings, guarded: passed } = viewportUnitFindings(css);
+    assert.deepEqual(passed, [], `${label} was accepted as a compliant guarded unit`);
+    assert.deepEqual(
+      findings.length,
+      expected.length,
+      `${label} produced ${findings.length} findings, not ${expected.length}: ${findings.join(' | ')}`,
+    );
+    for (const [index, pattern] of expected.entries()) {
+      assert.match(findings[index], pattern, `${label} finding ${index} was reported as something else`);
+    }
+  }
+});
+
+// The last stage-1 floor with no expression anywhere in this repository: a
+// phone refuses to autoplay a video that is not muted, refuses to play it in
+// place unless it is playsinline, and paints nothing at all until enough of
+// it has downloaded unless it carries a poster. No shell renders a video
+// today — heavy media is an owner decision per AGENTS.md, not incremental
+// drift — so the rule exists to make the FIRST one conscious rather than to
+// repair an existing mistake.
+test('any video a shell renders survives a phone autoplay policy', () => {
+  for (const [name, source] of Object.entries({ fallback, component })) {
+    const findings = videoFindings(source);
+    assert.deepEqual(findings, [], `${name}: ${findings.join('; ')}`);
+  }
+
+  // Both shells carry zero <video> tags, so the loop above is empty by
+  // construction and proves nothing on its own. The fixtures are what make
+  // this a guard rather than a decoration.
+  assert.deepEqual(
+    videoFindings('<video autoplay muted playsinline poster="/poster.avif" loop></video>'),
+    [],
+    'a fully compliant video was rejected',
+  );
+  for (const [fixture, expected] of [
+    ['<video src="/reel.mp4"></video>', ['missing muted', 'missing playsinline', 'missing poster']],
+    ['<video muted poster="/p.avif"></video>', ['missing playsinline']],
+    ['<video playsinline poster="/p.avif"></video>', ['missing muted']],
+    ['<video muted playsinline></video>', ['missing poster']],
+    ['<video muted playsinline poster></video>', ['missing poster']],
+    ['<video muted playsinline poster=""></video>', ['missing poster']],
+    ['<video muted={false} playsinline poster="/p.avif"></video>', ['muted is switched off']],
+    ['<video muted playsinline="false" poster="/p.avif"></video>', ['playsinline is switched off']],
+  ]) {
+    const findings = videoFindings(fixture);
+    assert.deepEqual(
+      findings.map((finding) => finding.split(': ')[1]),
+      expected,
+      `${fixture} was not reported as ${expected.join(', ')}`,
+    );
+  }
+
+  // Multi-line and multi-video sources are the realistic shapes, and the tag
+  // scanner has to survive both: a Svelte block indents its attributes across
+  // lines, and one hostile video hidden after a compliant one must still be
+  // found. Findings quote the flattened OPENING tag, which is where every
+  // attribute lives.
+  const pair = [
+    '<video\n  muted\n  playsinline\n  poster="/a.avif"\n></video>',
+    '<video muted></video>',
+  ].join('\n');
+  assert.deepEqual(videoFindings(pair), [
+    '<video muted>: missing playsinline',
+    '<video muted>: missing poster',
+  ]);
 });
 
 // The theme switcher is a real control: labelled, keyboard reachable, and

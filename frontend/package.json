@@ -11,9 +11,11 @@
     "build": "vite build && node ./scripts/ensure-dist-placeholder.mjs",
     "check": "svelte-check --tsconfig ./tsconfig.json",
     "dev": "vite --host 127.0.0.1",
+    "smoke": "playwright test",
     "test": "node --test tests/*.test.mjs"
   },
   "devDependencies": {
+    "@playwright/test": "1.62.1",
     "@sveltejs/vite-plugin-svelte": "7.3.0",
     "svelte": "5.56.9",
     "svelte-check": "4.7.6",

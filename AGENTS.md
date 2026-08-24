@@ -176,9 +176,15 @@ Numbered for citation, repo-scoped, none negotiable in code:
     and recovery validation inspect every intermediate state: retain or advance
     one patch only; skip, reversion, transient future, or multiple integration
     boundaries are denied. Successful main CI binds one exact-SHA,
-    noncancelling path: the paginated PR-gate inventory requires five success
-    conclusions plus the explicit push-only dependency-review skip, and the
-    separate same-SHA CodeQL run requires both analyze jobs to succeed. Before
+    noncancelling path: the paginated PR-gate inventory requires four success
+    conclusions plus TWO explicit push-only skips — `dependency-review` and
+    `container`, the two `pull_request`-only jobs — and the separate same-SHA
+    CodeQL run requires both analyze jobs to succeed. The inventory stays a
+    closed set of six names either way; a `success` where a skip belongs denies,
+    because it is the signature of a PR-only condition dropped from the
+    workflow. Both jobs remain REQUIRED pull-request checks in the
+    protected-main ruleset, so skipping them on the push relaxes nothing about
+    what must pass before the owner can merge. Before
     tag/registry/signing/Release effects, separate
     `platform-release` jobs use only a repository-scoped
     Administration-read-only App token for authoritative settings GETs; they
@@ -786,8 +792,9 @@ included; it is the same battery CI enforces:
   `--kube-version v1.36.0`; the numeric VERSION ↔ numeric chart `version` ↔
   numeric `appVersion` ↔ plain-v chart `image.tag` four-way lock, plus a render
   assertion that the emitted reference still carries a full digest),
-  `container` (both production
-  architectures built, never published).
+  `container` (PRs only; both production architectures built, never
+  published — a REQUIRED PR check, skipped on the main push because that
+  push's tree is the tree the check just built).
 - **coverage-badges** — `main` pushes only: recomputes the Go coverage
   and the frontend test tally with the gate's own recipes and
   force-updates the generated single-commit `badges` branch

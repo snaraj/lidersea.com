@@ -165,8 +165,7 @@ Numbered for citation, repo-scoped, none negotiable in code:
     equality instead. Both anchors run the identical cumulative
     re-classification; only the base differs. A denial happens when BOTH
     anchors are unavailable, never when one is, so a release that failed to
-    tag — this repository's ordinary condition while #81 is open — no longer
-    blocks documentation merges. Two things are deliberately NOT promised: a
+    tag no longer blocks documentation merges. Two things are deliberately NOT promised: a
     hard credential or request failure on the tag probe (401, 422) still
     denies outright rather than falling through, because that is real
     breakage rather than merge friction; and a denial on the gated-run anchor
@@ -205,9 +204,13 @@ Numbered for citation, repo-scoped, none negotiable in code:
     audit are mandatory. The automatic-release PR remains Draft until the
     external closed receipt in `docs/release-governance.md` is exact. There is
     no skip, force, credential-crossover, deployment, or promotion path.
-11. **No secrets, no personal data.** No credential, token, private host
-    fact, or personal data ever enters this repository — including in
-    tests, fixtures, and docs.
+11. **No secrets, no noncanonical personal data.** No credential, token,
+    private host fact, private contact detail, or new personal data enters
+    this repository — including tests, fixtures, and docs. The
+    already-public owner name/noreply commit identity and license/portfolio
+    authorship are the narrow canonical attribution exceptions; never expand
+    them or use a personal name as authorization. Access control is always
+    expressed by role.
 
 ### Deployment-provider contract
 
@@ -507,8 +510,12 @@ authority: the owner alone merges.
 - **Labels.** One taxonomy, identical names/colors/meanings across all
   three repositories: `production-readiness`, `conventions`, `security`,
   `tests`, `ci`, `docs`, `release`, `fix`, `provider-neutrality`,
-  `delivery-lane`, `features`, `requires-review`. New labels are added to
-  all three at once.
+  `delivery-lane`, `features`, `requires-review`,
+  `cybersecurity-review-requested` (routing label for the security-specialist
+  fleet — must not be removed until the security verdict clears),
+  `daybreak-blue`, `priority-high`, `inprogress`, `dependencies` (auto-applied
+  by Dependabot; no `labels:` key exists in `dependabot.yml`). New labels are
+  added to all three at once.
 - **`requires-review` — the review-readiness signal.** `requires-review` is
   PR-head-only. The author lane applies `requires-review` only when the exact PR
   head, body, commits, and evidence are author-complete, so review attention is
@@ -525,7 +532,8 @@ authority: the owner alone merges.
 - **Agent labels.** Every agent-created PR and issue carries TWO further
   labels: the umbrella `agent-authored` AND the acting agent's own label —
   `fable5` (Claude Fable 5), `5.6-sol` (ChatGPT 5.6 SOL ULTRA), `opus5`
-  (Claude Opus 5), `opus4.8` (Claude Opus 4.8), `sonnet5` (Claude Sonnet 5).
+  (Claude Opus 5), `opus4.8` (Claude Opus 4.8), `sonnet5` (Claude
+  Sonnet 5, color `0EA5E9`).
   The body signature must match the label (`- Fable5` ↔ `fable5`), and
   adversarial-review verdicts carry the same identity as `- <Agent>
   (adversarial reviewer)`.
@@ -620,7 +628,13 @@ lane whether or not any vendor-specific tooling is present.
 - **Shared machines contend.** Heavy suites in several worktrees compete for CPU
   and load-sensitive tests can flake under contention. Treat a contention flake
   as an environment finding — name it, rerun it, never weaken the test — and
-  stagger the heaviest batteries when many lanes run at once.
+  stagger the heaviest batteries when many lanes run at once. Browser-lane runs
+  are isolated by construction rather than by convention:
+  `frontend/playwright.config.mjs` derives its port from a stable hash of the
+  checkout's own path (distinct per worktree and per repository, so sibling
+  lanes never collide) unless `LIDERSEA_SMOKE_PORT` overrides it, and always
+  sets `reuseExistingServer: false` — a lane never silently adopts another
+  lane's already-running server.
 
 ## Working a change end to end
 
@@ -723,8 +737,10 @@ with unaddressed owner comments.
 
 ## Dependent pull requests
 
-Dependent work may be described as a merge order, but every eventual PR to
-protected main must independently carry its next patch release. Keep a
+Dependent work may be described as a merge order, but every eventual
+artifact-classified PR to protected main must independently carry its next
+patch release; a documentation-only PR carries none and is never a release
+dependency. Keep a
 dependent PR Draft until its predecessor lands. Then fetch current main, create
 a fresh branch without force/rebase, port only the residual diff, allocate the
 new exact patch, rerun every gate, open a replacement Draft PR, and obtain a

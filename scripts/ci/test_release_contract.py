@@ -3289,28 +3289,32 @@ class NoArtifactClassifyShellPathTests(unittest.TestCase):
     """Executed coverage for the release-after-main classify step's shell.
 
     ``NoArtifactWiringTests`` only pins substrings of this step's source; it
-    never runs the ~110 lines of bash that decide whether a release
-    happens. This class extracts the real step body from the real workflow
-    file and runs it under real bash, real git (against a synthetic
-    repository this class builds), real jq, real unzip, and the real
+    never runs a line of the bash that decides whether a release happens.
+    This class extracts the real step body from the real workflow file and
+    runs it under real bash, real git (against a synthetic repository this
+    class builds), real jq, real unzip, and the real
     ``release_contract.py`` copied verbatim into that repository --
     following the ``ExistingImageShellPathTests`` house style. Only ``gh``,
     ``curl``, ``python3``, and ``sleep`` are stubbed: ``gh`` and ``curl``
-    because they are the real network calls the step makes, ``sleep`` so a
-    90-attempt, 10-second-per-attempt poll does not take fifteen minutes,
-    and ``python3`` only to redirect to this interpreter (it still runs the
+    because they are the real network calls the step makes, ``sleep`` so
+    the ref probe's bounded back-off costs the suite no real time, and
+    ``python3`` only to redirect to this interpreter (it still runs the
     genuine ``release_contract.py``).
 
-    Unlike naranjo.online's sibling class, this repository's no-artifact
-    gap is re-proven against a TAG OBJECT the step polls for
-    (``GET .../git/ref/tags/{tag}`` then ``GET .../git/tags/{sha}``), never
-    against the newest earlier successful gate run pulled from the Actions
-    job history. The ``curl`` stub below therefore serves three distinct
+    This repository re-proves the no-artifact gap against ONE OF TWO
+    anchors, so both are driven from here. Anchor A is a TAG OBJECT the
+    step probes for (``GET .../git/ref/tags/{tag}`` then
+    ``GET .../git/tags/{sha}``); anchor B, reached only once that tag is
+    DEFINITIVELY absent, is the newest earlier successful protected-main
+    gate run read from the Actions record -- the anchor naranjo.online's
+    sibling class uses alone, because its publisher tags too late for that
+    job to poll. The ``curl`` stub below therefore serves three distinct
     endpoints -- the verdict-artifact zip, the tag-ref probe, and the tag
-    object resolve -- and a small on-disk script/counter file drives the
-    ref probe through a scripted sequence of HTTP statuses per call, so one
-    fixture can express "404 five times then 200" or "429, then 503, then
-    200" without bash re-entering the test process per attempt.
+    object resolve -- while the ``gh`` stub additionally serves the
+    gated-run listing. A small on-disk script/counter file drives the ref
+    probe through a scripted sequence of HTTP statuses per call, so one
+    fixture can express "403, then 503, then 200" without bash re-entering
+    the test process per attempt.
     """
 
     STEP = "Classify the completed range from its authorized gate verdict"
@@ -4113,7 +4117,81 @@ sys.stdout.write(str(entry["status"]))
     def test_unprocessable_status_denies_immediately(self):
         self._assert_hard_status_denies_immediately(422)
 
-    # --- scenario 8: the tag object resolves to a non-commit type ----------
+    # --- scenario 8: the tag-object response -- status first, then type ----
+
+    def test_tag_object_http_status_other_than_200_denies(self):
+        """Isolates ``test "${object_status}" = 200`` and nothing else.
+
+        This fixture is scenario 1's happy path with exactly one field
+        able to deny changed: the tag-object response carries HTTP 404
+        instead of 200. It differs from scenario 1 in one other place,
+        and that difference REMOVES a confound rather than adding one --
+        the anchor-B run listing scenario 1 leaves empty is populated
+        here, so a fall-through could no longer deny for want of a
+        fallback (see the inline note at the fixture).
+
+        Every other guard around the assertion is deliberately
+        SATISFIED, so nothing else in the step can account for the
+        denial --
+
+        * the ref probe answers 200 with a well-formed annotated-tag ref,
+          so ``tag-ref-object`` parses it and the branch is entered;
+        * the tag-object BODY is the same valid ``{"type": "commit",
+          "sha": <release_head>}`` scenario 1 succeeds on, so the type
+          guard, the 40-hex shape check, the cumulative re-classification
+          and the retained-tag equality would every one of them PASS were
+          they reached.
+
+        That is what separates this from a decorative test: deleting the
+        assertion under test does not relocate the denial, it removes it
+        -- the step then anchors on the body of a 404 and exits 0 with
+        ``class=no-artifact``, which is precisely the fail-open the
+        assertion exists to prevent.
+
+        Two assertions pin the isolation from the inside. ``set -x``
+        traces the command-substitution RESULT, so ``test 404 = 200`` is
+        the assertion under test observing the real runtime status rather
+        than any static program text; and the ABSENCE of
+        ``test commit = commit`` proves execution stopped there rather
+        than at the type guard one line below.
+        """
+        block = self.workflow_run_block(self.STEP)
+        with tempfile.TemporaryDirectory() as temporary:
+            root, base, release_head, docs_head = self._seed_documentation_push(temporary)
+            self._install_release_contract(root)
+            verdict = {"class": "no-artifact", "base_sha": release_head, "source_sha": docs_head}
+            ref_script = [
+                {
+                    "status": 200,
+                    "body": {
+                        "ref": "refs/tags/v0.1.10",
+                        "object": {"type": "tag", "sha": "a" * 40},
+                    },
+                }
+            ]
+            tag_script = {
+                "status": 404,
+                "body": {"object": {"type": "commit", "sha": release_head}},
+            }
+            completed, output, summary, calls = self.execute(
+                block,
+                root=root,
+                completed_sha=docs_head,
+                verdict=verdict,
+                ref_script=ref_script,
+                tag_script=tag_script,
+                # A perfectly usable anchor B is deliberately on offer: an
+                # unreadable tag OBJECT is not the definitively-absent TAG
+                # the fallback exists for, so this must deny outright and
+                # never reach the runs endpoint.
+                runs=self._gated_runs(release_head),
+            )
+            self.assertNotEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            self.assertIn("test 404 = 200", completed.stderr)
+            self.assertNotIn("test commit = commit", completed.stderr)
+            self.assertNotIn("class=", output)
+            self.assertEqual(summary, "")
+            self.assertEqual(calls, ["ref 200", "tag 404"])
 
     def test_tag_object_resolving_to_a_non_commit_type_denies(self):
         block = self.workflow_run_block(self.STEP)

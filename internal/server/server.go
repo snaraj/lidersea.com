@@ -202,15 +202,39 @@ func serveBytes(w http.ResponseWriter, r *http.Request, name string, data []byte
 }
 
 // securityHeaders enforces the browser-security baseline at the origin as
-// defense in depth if an edge rule is later changed. HSTS is deliberately
-// scoped to this hostname rather than making a promise for every subdomain:
-// the application is the sole owner of the HSTS policy, and widening it
-// (includeSubDomains, preload) is an explicit owner decision deferred until
-// a subdomain inventory and a rollback path exist. The header rides only
-// requests the edge declares as TLS — an HSTS pin teaches a browser to
-// refuse plain HTTP for a year, so it must never answer a leg that
-// demonstrated no such transport, and probe or port-forward traffic that
-// never crossed the edge declares nothing and correctly earns nothing.
+// defense in depth if an edge rule is later changed. Six of the seven headers
+// it sets were observed byte-identical on a public response; the
+// Strict-Transport-Security value was not. HSTS is therefore the one member
+// of this baseline whose visitor-facing value is demonstrably not the one
+// minted here, and what follows records the OUTCOMES that were measured
+// rather than a mechanism this origin cannot see.
+//
+// Measured 2026-08-22 (issues #95, #96): a public request over the proxied
+// path is answered with exactly one Strict-Transport-Security header, reading
+// max-age=31536000; includeSubDomains, and carrying no preload directive. The
+// edge is the visitor-facing HSTS owner — the promise browsers are actually
+// told, and the scope it covers, are settled there and not here. The value
+// minted below, max-age=31536000 without includeSubDomains, is not what that
+// public response carried. WHY it is not cannot be decided from outside, and
+// this comment deliberately picks neither answer: a promise the origin never
+// minted, because that leg was not declared TLS, and a promise that did not
+// arrive intact are indistinguishable in a public response, and both would
+// produce exactly the bytes that were measured.
+//
+// The origin mints its own regardless, on purpose: it is the promise an
+// origin-direct client would receive if the edge were ever bypassed, which is
+// the whole reason defense in depth keeps it. Both layers now state the same
+// 31536000-second lifetime, so includeSubDomains is the only difference left
+// between them. Neither layer closes the first-contact gap — HSTS binds a
+// browser only once a secure response has told it (RFC 6797 §14.6), never the
+// request that carries the telling — which is why redirectForwardedHTTP below
+// is a separate control rather than a restatement of this one.
+//
+// The header rides only requests the edge declares as TLS — an HSTS pin
+// teaches a browser to refuse plain HTTP for a year, so it must never answer
+// a leg that demonstrated no such transport, and probe or port-forward
+// traffic that never crossed the edge declares nothing and correctly earns
+// nothing.
 func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Security-Policy", "default-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; object-src 'none'")
@@ -246,9 +270,12 @@ func redirectForwardedHTTP(next http.Handler) http.Handler {
 			// estimates carve-outs accept POST — and the bounce runs ahead of
 			// routing, so a POST arriving over the plain leg is redirected here;
 			// a 301 would rewrite it to GET and silently drop the body, while
-			// 308 replays the POST to the TLS URL intact. The edge's own
-			// Always-Use-HTTPS stays the primary redirect; this is the origin
-			// backstop.
+			// 308 replays the POST to the TLS URL intact. The edge redirects
+			// plain HTTP itself and stays the primary control: a public
+			// plain-HTTP request was measured answered 301 (issue #96), which
+			// is the edge's code and not this one. This 308 answers only a
+			// request that reached the origin still declared plain, so the two
+			// codes differing is expected rather than drift.
 			http.Redirect(w, r, "https://"+r.Host+r.URL.RequestURI(), http.StatusPermanentRedirect)
 			return
 		}

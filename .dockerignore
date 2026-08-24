@@ -1,6 +1,7 @@
 .git
 .artifacts
 frontend/node_modules
+frontend/test-results
 internal/web/dist/*
 !internal/web/dist/.gitkeep
 *.log

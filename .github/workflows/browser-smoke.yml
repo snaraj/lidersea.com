@@ -1,0 +1,155 @@
+name: Browser smoke
+
+# Rendering lanes, stage 2 (issue #22): the shipped binary, driven by three real
+# CSS engines at phone viewports, asserting the floors `npm test` can only read
+# as source facts.
+#
+# WHY THIS IS ITS OWN WORKFLOW, and not four more steps inside pr-gate.yml:
+# release authorization pins the PR-gate job inventory EXACTLY — scripts/ci/
+# release_contract.py's PR_GATE_MAIN_JOBS is a closed set of six names and
+# validate_workflow_job_inventory refuses a run whose job count differs. A
+# seventh job there would make every subsequent main merge unreleasable. Adding
+# a workflow changes no release-authorization surface at all.
+#
+# Whether this lane becomes a REQUIRED check is an owner ruleset decision, not
+# this workflow's to make: the required-check set lives in the protected-main
+# ruleset and is mirrored by REQUIRED_STATUS_CHECKS in the release contract, so
+# promoting it means an owner ruleset edit plus that constant — one change, made
+# deliberately, in a pull request of its own.
+#
+# Pull requests and manual dispatch only. Main pushes are the release path, and
+# a merge commit's rendering cannot differ from the head that was just measured
+# on the pull request; running here would add minutes to the release window for
+# no signal.
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  # A superseded push for the same pull request may cancel its own older run and
+  # nothing else. Manual dispatches key on the SHA so two of them never collide.
+  group: browser-smoke-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    strategy:
+      # One engine per job, all three reported. fail-fast would hide a
+      # WebKit-only regression behind a Chromium failure, which is the exact
+      # cross-engine disagreement this lane exists to surface.
+      fail-fast: false
+      matrix:
+        include:
+          - project: chromium-phone
+            engine: chromium # Chrome and Edge
+          - project: webkit-phone
+            engine: webkit # Safari, and every iOS browser
+          - project: firefox-phone
+            engine: firefox # Gecko
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24.19.0'
+          check-latest: false
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.26.6'
+          check-latest: false
+          cache: false
+      - name: Verify application toolchain
+        run: |
+          test "$(node --version)" = "v24.19.0"
+          test "$(npm --version)" = "11.17.0"
+          test "$(go env GOVERSION)" = "go1.26.6"
+      - name: Resolve the exact pinned Playwright version
+        id: pin
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./frontend/package.json').devDependencies['@playwright/test']")"
+          # An exact version, never a range. A caret would make the browser cache
+          # key lie about what it holds, and the release contract's Trivy source
+          # gate already requires each direct devDependency to appear in the
+          # report at exactly this string.
+          if ! printf '%s' "${version}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            printf 'DENY: @playwright/test must be pinned exactly, not %s\n' "${version}" >&2
+            exit 1
+          fi
+          printf 'version=%s\n' "${version}" >> "${GITHUB_OUTPUT}"
+      - name: Restore the pinned browser build
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ms-playwright
+          # Keyed to the exact pinned version AND the one engine this job
+          # installs, so a version bump misses cleanly instead of reusing a
+          # browser build that no longer matches the driver.
+          key: ms-playwright-${{ runner.os }}-${{ matrix.engine }}-${{ steps.pin.outputs.version }}
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: |
+          test -f package-lock.json
+          npm ci --ignore-scripts --no-audit --no-fund
+      - name: Prove the browser driver is the pinned one and runs no install script
+        env:
+          PINNED: ${{ steps.pin.outputs.version }}
+        run: |
+          set -euo pipefail
+          # The lockfile and the installed tree must agree with the pin. This is
+          # the guard that would notice a lockfile carrying a different
+          # playwright-core than the driver expects, which silently downloads
+          # browser revisions the driver cannot speak to.
+          for package in @playwright/test playwright playwright-core; do
+            installed="$(node -p "require('./frontend/node_modules/${package}/package.json').version")"
+            if [ "${installed}" != "${PINNED}" ]; then
+              printf 'DENY: %s is %s, not the pinned %s\n' "${package}" "${installed}" "${PINNED}" >&2
+              exit 1
+            fi
+          done
+          # `npm ci --ignore-scripts` means no lifecycle script runs here, and
+          # these three declare none today. If any of them ever gains one, this
+          # fails rather than quietly relying on the flag to contain it — a
+          # supply-chain change is a decision, not a default.
+          node -e '
+            const lock = require("./frontend/package-lock.json");
+            const watched = ["@playwright/test", "playwright", "playwright-core"];
+            const scripted = Object.entries(lock.packages)
+              .filter(([path, entry]) =>
+                entry.hasInstallScript && watched.some((name) => path.endsWith("node_modules/" + name)))
+              .map(([path]) => path);
+            if (scripted.length > 0) {
+              console.error("DENY: browser driver packages declare install scripts: " + scripted.join(", "));
+              process.exit(1);
+            }
+          '
+      - name: Install the one browser this lane drives
+        working-directory: frontend
+        # System libraries are not part of the cached path, so this runs on a
+        # cache hit too; Playwright skips a download it already has.
+        run: npx playwright install --with-deps ${{ matrix.engine }}
+      - name: Build the artifact the lanes actually drive
+        env:
+          GOTOOLCHAIN: local
+        run: |
+          set -euo pipefail
+          # The bundle first: `npm run build` writes internal/web/dist, which the
+          # Go binary embeds. Building in the other order would smoke-test a
+          # stale frontend.
+          (cd frontend && npm run build)
+          CGO_ENABLED=0 go build -o "${RUNNER_TEMP}/lidersea-server" ./cmd/server
+      - name: Drive the shipped binary in ${{ matrix.engine }}
+        working-directory: frontend
+        env:
+          LIDERSEA_SMOKE_BINARY: ${{ runner.temp }}/lidersea-server
+        run: npx playwright test --project=${{ matrix.project }}

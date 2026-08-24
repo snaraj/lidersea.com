@@ -7,6 +7,25 @@ Git, image, and GitHub Release tags use the exact plain `vX.Y.Z` form.
 
 ## [Unreleased]
 
+## [0.1.28] - 2026-08-23
+
+### Added
+
+- Browser-emulated smoke lanes in CI (issue #22, stage 2): a separate
+  SHA-pinned workflow drives the shipped Go binary - never a dev server -
+  through Chromium, WebKit, and Gecko at phone viewports, twenty-one lanes in
+  all: the served viewport contract, touch and text floors measured after
+  layout at 320px, sideways-scroll refusal with the appearance menu closed and
+  open, reduced motion observed in both directions, zero layout shift across
+  every reading mode, and an origin lane that watches each request the page
+  makes. The structural stage-1 floors strengthen alongside: the
+  viewport-height contract becomes a rule over every declaration (vh and lvh
+  banned, a guarded svh/dvh must keep an unguarded fallback), and the
+  previously unenforced video floors (muted, playsinline, a real poster) gain
+  their structural rule and fixtures. `@playwright/test` is pinned exactly
+  (1.62.1), declares no install scripts, and the browser binaries enter
+  neither git nor the image.
+
 ## [0.1.27] - 2026-08-23
 
 ### Added

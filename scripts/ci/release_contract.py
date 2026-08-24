@@ -40,6 +40,22 @@ INTOTO_STATEMENT_TYPE = "https://in-toto.io/Statement/v0.1"
 SLSA_PREDICATE_TYPE = "https://slsa.dev/provenance/v1"
 SPDX_PREDICATE_TYPE = "https://spdx.dev/Document"
 DIGEST_RE = re.compile(r"^sha256:([0-9a-f]{64})$")
+# A GitHub Actions run ID as the API and the runner environment spell it:
+# a positive decimal with no sign, padding, separator, or whitespace.
+ACTIONS_RUN_ID_RE = re.compile(r"[1-9][0-9]*")
+# BuildKit's GitHub Actions provenance ALWAYS stamps the attempt: it builds
+# runDetails.builder.id as
+#   <server>/<owner>/<repo>/actions/runs/<GITHUB_RUN_ID>/attempts/<GITHUB_RUN_ATTEMPT>
+# Measured on this repository's own published images (v0.1.24, v0.1.27,
+# v0.1.28, v0.1.29, v0.1.30 -- both linux/amd64 and linux/arm64), every
+# builder ID carries the suffix and every run ID equals the publisher run
+# that built those bytes. The attempt is therefore REQUIRED, not optional:
+# a builder ID without it is not something BuildKit emits here and is
+# denied. The attempt NUMBER stays a pattern rather than a bound value
+# because GitHub's "re-run" recovery keeps GITHUB_RUN_ID and only
+# increments the attempt -- the run is the identity this binds, and a
+# later attempt of the same run is still that run.
+BUILDER_ATTEMPT_SUFFIX = r"/attempts/[1-9][0-9]*"
 # The COMMITTED chart keeps this all-zeros digest forever: no registry can
 # resolve it, so a chart that reached a cluster without the publisher's
 # substitution fails closed at pull time instead of running unidentified bytes.
@@ -1736,6 +1752,24 @@ def require_publication_state(actual: str, required: str) -> str:
     return actual
 
 
+def builder_identity_pattern(source: str, builder_run_id: str) -> re.Pattern[str]:
+    """Anchor one exact Actions run as the only builder identity accepted.
+
+    The whole builder ID is matched, so nothing after the run ID can be
+    smuggled in: a path traversal (``.../runs/1/../../999``), a longer run ID
+    sharing the prefix (``.../runs/1234`` against run ``123``), or trailing
+    junk after the attempt all fail the full match. Only the attempt segment
+    is a pattern, and it is mandatory.
+    """
+    if not ACTIONS_RUN_ID_RE.fullmatch(builder_run_id):
+        raise ContractError(
+            "attestation builder run ID must be a positive decimal Actions run ID"
+        )
+    return re.compile(
+        re.escape(f"{source}/actions/runs/{builder_run_id}") + BUILDER_ATTEMPT_SUFFIX
+    )
+
+
 def build_attestation_statement(
     predicate: Mapping[str, object],
     *,
@@ -1744,6 +1778,7 @@ def build_attestation_statement(
     source: str,
     revision: str,
     platform: str,
+    builder_run_id: str,
 ) -> dict[str, object]:
     """Bind one embedded BuildKit predicate to an exact signed release member."""
     match = DIGEST_RE.fullmatch(digest)
@@ -1754,6 +1789,7 @@ def build_attestation_statement(
         raise ContractError("attestation image or source identity is malformed")
     if not re.fullmatch(r"linux/[a-z0-9_-]+", platform):
         raise ContractError("attestation platform identity is malformed")
+    expected_builder = builder_identity_pattern(source, builder_run_id)
 
     normalized = copy.deepcopy(dict(predicate))
     build = _object(normalized.get("buildDefinition"), "SLSA buildDefinition")
@@ -1762,8 +1798,12 @@ def build_attestation_statement(
     metadata = _object(run.get("metadata"), "SLSA metadata")
     buildkit = _object(metadata.get("buildkit_metadata"), "BuildKit metadata")
     vcs = _object(buildkit.get("vcs"), "BuildKit vcs metadata")
-    if not isinstance(builder.get("id"), str) or not builder["id"].startswith(source + "/actions/runs/"):
-        raise ContractError("embedded predicate builder is not this repository's Actions run")
+    builder_id = builder.get("id")
+    if not isinstance(builder_id, str) or not expected_builder.fullmatch(builder_id):
+        raise ContractError(
+            "embedded predicate builder is not Actions run "
+            f"{builder_run_id} of this repository"
+        )
     if vcs.get("source") != source or vcs.get("revision") != revision:
         raise ContractError("embedded predicate source or revision is foreign")
 
@@ -1785,6 +1825,48 @@ def build_attestation_statement(
         "predicateType": SLSA_PREDICATE_TYPE,
         "predicate": normalized,
     }
+
+
+def read_attestation_builder_run(predicate: Mapping[str, object], *, source: str) -> str:
+    """Recover the single Actions run ID an ALREADY-BUILT image's predicate names.
+
+    Two callers cannot name the builder run from their own environment,
+    because the bytes they inspect were built by an EARLIER run: the
+    publisher's existing-image classifier (a re-dispatch after a partial
+    release gets a new run ID, so its own GITHUB_RUN_ID would deny a
+    legitimate reuse) and the scheduled integrity audit (the closed
+    release-manifest schema records no run ID). Neither has an independent
+    record to compare against -- their authority is the verified certificate
+    identity over the digest -- so this recovers the run ID from the FIRST
+    platform's predicate and the caller passes that same value for EVERY
+    platform.
+
+    What that buys, precisely, and no more: the builder ID must be a
+    well-formed Actions run of this exact repository WITH its attempt
+    segment, and all platforms of one image must name ONE run. Before this,
+    linux/amd64 and linux/arm64 could name different runs and both pass.
+    It is not an independent attestation that the run was authorized; the
+    fresh-build path is where GITHUB_RUN_ID makes that binding, and the
+    signed statements this reproduces were produced under it.
+    """
+    if not source.startswith("https://github.com/"):
+        raise ContractError("attestation source identity is malformed")
+    run = _object(predicate.get("runDetails"), "SLSA runDetails")
+    builder = _object(run.get("builder"), "SLSA builder")
+    builder_id = builder.get("id")
+    if not isinstance(builder_id, str):
+        raise ContractError("embedded predicate builder ID is absent or not a string")
+    match = re.fullmatch(
+        re.escape(f"{source}/actions/runs/")
+        + f"({ACTIONS_RUN_ID_RE.pattern})"
+        + BUILDER_ATTEMPT_SUFFIX,
+        builder_id,
+    )
+    if not match:
+        raise ContractError(
+            "embedded predicate builder is not an Actions run of this repository"
+        )
+    return match.group(1)
 
 
 def _verified_statements(text: str) -> list[Mapping[str, object]]:
@@ -2197,6 +2279,10 @@ def _parser() -> argparse.ArgumentParser:
     statement.add_argument("--source", required=True)
     statement.add_argument("--revision", required=True)
     statement.add_argument("--platform", required=True)
+    statement.add_argument("--builder-run-id", required=True)
+    builder_run = commands.add_parser("attestation-builder-run")
+    builder_run.add_argument("--predicate", type=Path, required=True)
+    builder_run.add_argument("--source", required=True)
     attestations = commands.add_parser("attestation-set")
     attestations.add_argument("--verified", type=Path, required=True)
     attestations.add_argument("--expected", action="append", required=True)
@@ -2482,6 +2568,7 @@ def main(argv: list[str] | None = None) -> int:
                 source=args.source,
                 revision=args.revision,
                 platform=args.platform,
+                builder_run_id=args.builder_run_id,
             )
             # The predicate-output file is the exact bytes cosign embeds when
             # signing via --predicate/--type: it is what the workflow passes
@@ -2493,6 +2580,8 @@ def main(argv: list[str] | None = None) -> int:
                 json.dumps(statement["predicate"], sort_keys=True) + "\n", encoding="utf-8"
             )
             args.output.write_text(json.dumps(statement, sort_keys=True) + "\n", encoding="utf-8")
+        elif args.command == "attestation-builder-run":
+            print(read_attestation_builder_run(_read_object(args.predicate), source=args.source))
         elif args.command == "attestation-set":
             expected: dict[str, Mapping[str, object]] = {}
             for item in args.expected:

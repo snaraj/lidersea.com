@@ -296,6 +296,15 @@ jobs:
           fi
           expected_attestations=()
           expected_sboms=()
+          # These bytes were built by an EARLIER run: a re-dispatch after a
+          # partial release gets a new GITHUB_RUN_ID, so this job's own run ID
+          # is NOT the builder and using it here would classify a legitimate
+          # reuse as `burned`. Recover the builder run from the FIRST
+          # platform's predicate and require EVERY platform to name that same
+          # run -- one image, one builder run. The authority that this image is
+          # ours stays the cosign signature over the digest below.
+          builder_run_id=''
+          builder_run_bound=false
           for platform in "${required_platforms[@]}"; do
             predicate="${RUNNER_TEMP}/existing-${platform//\//-}.json"
             statement="${RUNNER_TEMP}/existing-${platform//\//-}.statement.json"
@@ -308,11 +317,21 @@ jobs:
               source_match=false
               continue
             fi
+            if [ "${builder_run_bound}" = false ]; then
+              if builder_run_id="$(python3 -I -B scripts/ci/release_contract.py \
+                attestation-builder-run --predicate "${predicate}" --source "${source}")"; then
+                builder_run_bound=true
+              else
+                source_match=false
+                continue
+              fi
+            fi
             if ! python3 -I -B scripts/ci/release_contract.py attestation-statement \
               --predicate "${predicate}" --output "${statement}" \
               --predicate-output "${modified_predicate}" \
               --image "${IMAGE}" --digest "${digest}" --source "${source}" \
-              --revision "${SOURCE_SHA}" --platform "${platform}"; then
+              --revision "${SOURCE_SHA}" --platform "${platform}" \
+              --builder-run-id "${builder_run_id}"; then
               source_match=false
               continue
             fi
@@ -476,6 +495,14 @@ jobs:
           test "${platforms[*]}" = "${expected_platforms}"
           test "${sbom_platforms[*]}" = "${expected_platforms}"
           source="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
+          # This step runs ONLY when the image state was `absent`, so the
+          # build-push step immediately above produced these bytes in THIS
+          # run. GITHUB_RUN_ID is therefore the authoritative builder, and
+          # the predicate BuildKit embedded must name it exactly -- measured
+          # against every published release of this image. A refactor that
+          # moved the predicate's source would now be denied instead of
+          # passing a repository-prefix match every run in this repository
+          # satisfies.
           statements=()
           modified_predicates=()
           expected_attestations=()
@@ -496,7 +523,8 @@ jobs:
               --predicate "${predicate}" --output "${statement}" \
               --predicate-output "${modified_predicate}" \
               --image "${IMAGE}" --digest "${DIGEST}" --source "${source}" \
-              --revision "${SOURCE_SHA}" --platform "${platform}"
+              --revision "${SOURCE_SHA}" --platform "${platform}" \
+              --builder-run-id "${GITHUB_RUN_ID}"
             statements+=("${statement}")
             modified_predicates+=("${modified_predicate}")
             expected_attestations+=(--expected "${platform}=${statement}")

@@ -184,6 +184,16 @@ jobs:
           source="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
           expected_attestations=()
           expected_sboms=()
+          # The audit reads a PUBLISHED image built by a past publisher run.
+          # The closed release-manifest schema records no builder run ID, and
+          # this workflow's own run built nothing, so the run is recovered
+          # from the FIRST platform's predicate and every platform must then
+          # name that same run -- one image, one builder run. The audit's
+          # authority remains the verified certificate identity plus the exact
+          # expected statement set below; the exact-run binding against an
+          # independent value is made where the bytes are built, in
+          # release-publisher.yml.
+          builder_run_id=''
           for platform in "${required_platforms[@]}"; do
             predicate="${RUNNER_TEMP}/audit-${platform//\//-}.json"
             statement="${RUNNER_TEMP}/audit-${platform//\//-}.statement.json"
@@ -193,11 +203,16 @@ jobs:
             modified_sbom="${RUNNER_TEMP}/audit-${platform//\//-}.sbom.predicate.json"
             docker buildx imagetools inspect "${image}@${IMAGE_DIGEST}" \
               --format "{{ json (index .Provenance \"${platform}\").SLSA }}" > "${predicate}"
+            if [ -z "${builder_run_id}" ]; then
+              builder_run_id="$(python3 -I -B scripts/ci/release_contract.py \
+                attestation-builder-run --predicate "${predicate}" --source "${source}")"
+            fi
             python3 -I -B scripts/ci/release_contract.py attestation-statement \
               --predicate "${predicate}" --output "${statement}" \
               --predicate-output "${modified_predicate}" \
               --image "${image}" --digest "${IMAGE_DIGEST}" --source "${source}" \
-              --revision "${SOURCE_SHA}" --platform "${platform}"
+              --revision "${SOURCE_SHA}" --platform "${platform}" \
+              --builder-run-id "${builder_run_id}"
             expected_attestations+=(--expected "${platform}=${statement}")
             docker buildx imagetools inspect "${image}@${IMAGE_DIGEST}" \
               --format "{{ json (index .SBOM \"${platform}\").SPDX }}" > "${spdx}"

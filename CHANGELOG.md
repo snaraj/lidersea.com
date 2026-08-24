@@ -7,6 +7,40 @@ Git, image, and GitHub Release tags use the exact plain `vX.Y.Z` form.
 
 ## [Unreleased]
 
+## [0.1.31] - 2026-08-24
+
+### Changed
+
+- The SLSA builder identity in `build_attestation_statement` is now bound to
+  ONE exact Actions run instead of prefix-matched against the repository
+  (issue #111). The old check,
+  `builder["id"].startswith(source + "/actions/runs/")`, was satisfied by
+  every run of every workflow in this repository forever — the digits after
+  `/actions/runs/` were never examined — while every neighbouring identity in
+  the same function was already bound exactly. It is now an anchored full
+  match on `<source>/actions/runs/<run>/attempts/<n>` behind a new REQUIRED
+  `--builder-run-id`, itself validated as a positive decimal run ID. The
+  attempt segment is MANDATORY, not tolerated: measured on this repository's
+  own published provenance for v0.1.24, v0.1.27, v0.1.28, v0.1.29 and v0.1.30
+  (both `linux/amd64` and `linux/arm64`), BuildKit always emits it and always
+  names the publisher run that built those bytes. Its NUMBER stays a pattern
+  because GitHub's re-run recovery keeps `GITHUB_RUN_ID` and increments only
+  the attempt. Because the produced statement is byte-identical for a correct
+  run ID, every already-published attestation stays exactly reproducible.
+- The publisher's fresh-build path passes its own `GITHUB_RUN_ID`, which is
+  the authoritative builder there — that job runs only when the image state
+  was `absent`, so the step above it produced those bytes. The existing-image
+  classifier does NOT, and could not: a re-dispatch recovery legitimately
+  reuses bytes an earlier run built, so its own run ID would classify a valid
+  reuse as `burned` and fail the release. It and the scheduled integrity audit
+  instead recover the builder run from the first platform's predicate through
+  a new read-only `attestation-builder-run` subcommand and require every other
+  platform to name that same run — one image, one builder run, where before
+  the two architectures could name different runs and both pass.
+- `embedded_predicate` in `test_release_contract.py` now carries the
+  `/attempts/<n>` segment BuildKit really emits; the fixture previously
+  modelled a builder ID shape this repository has never published.
+
 ## [0.1.30] - 2026-08-24
 
 ### Fixed

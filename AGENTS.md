@@ -582,9 +582,17 @@ lane whether or not any vendor-specific tooling is present.
   ceremony reads. No agent builds, edits, or checks out a branch there. It may
   lag `origin/main` harmlessly: every actor works from `origin/main` after its
   own `git fetch origin`, never from a local `main`.
-- **One worktree per acting context, named for its lane.** Executors run
+- **One worktree per acting context, named for its lane.** The preferred
+  grammar for new branches is `<lane>-<effort>/<issue#>-<topic>` (e.g.
+  `sonnet5-med/155-rail-idle-ink`), carrying the dispatched reasoning effort
+  (`low | med | high | max`) and the tracking issue; `<lane>` is parsed by
+  longest match against the repository-registered label set, then the
+  `-<effort>` suffix. Executors run
+  `git worktree add .claude/worktrees/<lane>-<effort>-<issue#>-<topic> -b
+  <lane>-<effort>/<issue#>-<topic> origin/main`. The legacy
   `git worktree add .claude/worktrees/<lane>-<topic> -b <lane>/<topic>
-  origin/main`. The directory and the branch carry the SAME lane, because the
+  origin/main` form remains accepted during the transition. Either way, the
+  directory and the branch carry the SAME lane, because the
   cleanup rule below depends on ownership being legible to every other agent.
   A worktree whose name and branch disagree, or a branch with no lane prefix,
   is a contract violation.
@@ -623,8 +631,16 @@ The complete delivery loop, each step gated by the sections around it:
    owner, set a milestone. Never apply or interpret `requires-review` on the
    issue; request any issue-spec review through an explicit normal comment.
 2. **Branch from `origin/main`** after `git fetch origin`; branch names
-   are lane-prefixed (`<lane>/<topic>`, e.g. `fable5/<topic>`,
-   `sonnet5/<topic>`, `opus5/<topic>`, `5.6-sol/<topic>`). One writer per
+   are lane-prefixed. The preferred grammar for new branches is
+   `<lane>-<effort>/<issue#>-<topic>` (e.g. `sonnet5-med/155-rail-idle-ink`,
+   `fable5-high/142-usage-export`), carrying the dispatched reasoning effort
+   (`low | med | high | max`) and the tracking issue number; `<lane>` is
+   parsed by longest match against the repository-registered label set
+   (`fable5`, `5.6-sol`, `opus5`, `opus4.8`, `sonnet5`), then the
+   `-<effort>` suffix. A branch with genuinely no issue states why in its PR
+   body. The legacy form (`<lane>/<topic>`, e.g. `fable5/<topic>`,
+   `sonnet5/<topic>`, `opus5/<topic>`, `5.6-sol/<topic>`) remains accepted
+   during the transition. One writer per
    branch, always —
    a branch that is not yours is a branch you never push to. Reserve the exact
    next patch from that base when the change touches any artifact surface; a

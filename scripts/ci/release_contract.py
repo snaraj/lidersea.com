@@ -68,10 +68,18 @@ GITHUB_ACTIONS_BOT_LOGIN = "github-actions[bot]"
 GITHUB_ACTIONS_BOT_ID = 41898282
 COSIGN_ISSUER = "https://token.actions.githubusercontent.com"
 RELEASE_PLATFORMS = ("linux/amd64", "linux/arm64")
+# The exact conclusion every PR-gate job reports on a PROTECTED-MAIN push, and
+# the count is a closed six. `container` and `dependency-review` are the two
+# `pull_request`-only jobs, so on a push they report `skipped` and the inventory
+# requires precisely that: a `success` for either one means the PR-only
+# condition was dropped from the workflow and the identical merged tree was
+# rebuilt after merge authority had already been exercised. Both remain REQUIRED
+# pull-request checks in the protected-main ruleset (REQUIRED_STATUS_CHECKS
+# above) — skipping on the push does not relax what must pass before a merge.
 PR_GATE_MAIN_JOBS = {
     "application": "success",
     "chart": "success",
-    "container": "success",
+    "container": "skipped",
     "coverage-badges": "success",
     "dependency-review": "skipped",
     "security": "success",

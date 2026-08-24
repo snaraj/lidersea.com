@@ -907,6 +907,10 @@ class SuccessfulMainInventoryTests(unittest.TestCase):
             ("application", "conclusion", "failure"),
             ("chart", "run_id", 999),
             ("container", "name", "foreign"),
+            # Both PR-only jobs must be denied a `success` on a main push: that
+            # conclusion is the signature of a dropped `pull_request` condition
+            # and a duplicate post-merge build of an already-built tree.
+            ("container", "conclusion", "success"),
             ("coverage-badges", "conclusion", "skipped"),
             ("dependency-review", "conclusion", "success"),
         ):
@@ -5925,17 +5929,31 @@ class WorkflowStructureTests(unittest.TestCase):
             ("security", "dependency-review"),
             ("application", "chart"),
             ("chart", "container"),
-            ("container", "coverage-badges"),
         ):
             job = cls.job(gate, name, following)
             if re.search(r"(?m)^    if:", job):
                 raise ValueError(f"required main PR-gate job gained a skip condition: {name}")
-        dependency = cls.job(gate, "dependency-review", "application")
-        if "if: github.event_name == 'pull_request'" not in dependency:
-            raise ValueError("dependency-review event-specific skip is not exact")
-        coverage = cls.job(gate, "coverage-badges")
-        if "if: github.event_name == 'push' && github.ref == 'refs/heads/main'" not in coverage:
-            raise ValueError("coverage-badges main-only conclusion is not exact")
+        # The three conditional jobs are pinned to the EXACT job-level condition
+        # rather than to the mere presence of one, because for these the
+        # condition IS the contract that PR_GATE_MAIN_JOBS mirrors. `container`
+        # moved here from the no-skip loop above: it is `pull_request`-only, so
+        # a DROPPED condition silently restores the duplicate main-push build of
+        # a tree the PR already built, and a WIDENED one (say
+        # `!= 'workflow_dispatch'`) would restore it while still reading as a
+        # skip. Comparing findall's full list, not just its membership, also
+        # refuses a SECOND job-level `if:` smuggled in beside the real one.
+        for name, following, condition in (
+            ("dependency-review", "application", "github.event_name == 'pull_request'"),
+            ("container", "coverage-badges", "github.event_name == 'pull_request'"),
+            (
+                "coverage-badges",
+                None,
+                "github.event_name == 'push' && github.ref == 'refs/heads/main'",
+            ),
+        ):
+            job = cls.job(gate, name, following)
+            if re.findall(r"(?m)^    if: (.+)$", job) != [condition]:
+                raise ValueError(f"{name} event-specific condition is not exact")
         analyze = cls.job(codeql, "analyze")
         if re.search(r"(?m)^    if:", analyze):
             raise ValueError("CodeQL analyze job gained a skip condition")
@@ -6317,6 +6335,11 @@ class WorkflowStructureTests(unittest.TestCase):
         audit = (ROOT / ".github/workflows/release-integrity-audit.yml").read_text(encoding="utf-8")
         self.require_releasable_main_job_definitions(gate, codeql)
         self.require_badge_shell_strictness(gate)
+        # The whole container job body, so the two mutants below rewrite THAT
+        # job's condition and nothing else — `dependency-review` carries the
+        # byte-identical `if:` line, and a naive gate-wide replace would hit it
+        # first and prove the wrong thing.
+        container = self.job(gate, "container", "coverage-badges")
         for changed_gate, changed_codeql in (
             (
                 gate.replace("  security:\n    runs-on:", "  security:\n    if: false\n    runs-on:", 1),
@@ -6325,6 +6348,30 @@ class WorkflowStructureTests(unittest.TestCase):
             (
                 gate,
                 codeql.replace("  analyze:\n    runs-on:", "  analyze:\n    if: false\n    runs-on:", 1),
+            ),
+            # Container pin, both directions the workflow can regress: the
+            # condition removed outright (the pre-#109 state, which rebuilds the
+            # merged tree), and the condition widened to one that still admits
+            # the main push.
+            (
+                gate.replace(
+                    container,
+                    container.replace("    if: github.event_name == 'pull_request'\n", "", 1),
+                    1,
+                ),
+                codeql,
+            ),
+            (
+                gate.replace(
+                    container,
+                    container.replace(
+                        "if: github.event_name == 'pull_request'",
+                        "if: github.event_name != 'workflow_dispatch'",
+                        1,
+                    ),
+                    1,
+                ),
+                codeql,
             ),
         ):
             with self.assertRaises(ValueError):

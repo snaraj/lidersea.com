@@ -7,6 +7,25 @@ Git, image, and GitHub Release tags use the exact plain `vX.Y.Z` form.
 
 ## [Unreleased]
 
+## [0.1.29] - 2026-08-23
+
+### Changed
+
+- The duplicated post-merge container build is gone (issue #109). The PR
+  gate's `container` job now carries `if: github.event_name == 'pull_request'`,
+  the same condition `dependency-review` has always carried, and the same
+  reasoning `browser-smoke.yml` already states in its own header: main pushes
+  are the release path, and under squash-or-rebase merges with a strict
+  required-check ruleset the merged tree is necessarily the tree this job just
+  passed on the pull request. The Dockerfile takes no `ARG` and no git
+  metadata and digest-pins every base, so the build is a pure function of that
+  tree. `container` remains a REQUIRED pull-request check - nothing merges
+  without it - and `release-publisher.yml` still builds, scans, signs, and
+  attests the bytes that ship. `PR_GATE_MAIN_JOBS` now requires the resulting
+  `skipped` conclusion exactly and refuses a `success` there, so dropping the
+  condition denies the release instead of rebuilding an identical tree after
+  merge authority has already been exercised. The inventory stays a closed six.
+
 ## [0.1.28] - 2026-08-23
 
 ### Added

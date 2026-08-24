@@ -270,6 +270,19 @@ jobs:
             | grep -Eq '^ +image: "ghcr\.io/snaraj/[a-z-]+:v[0-9]+\.[0-9]+\.[0-9]+@sha256:[0-9a-f]{64}"$'
 
   container:
+    # Pull requests only, for the same reason browser-smoke.yml states in its
+    # own header: main pushes are the release path, `allowed_merge_methods` is
+    # squash-or-rebase under a strict required-check ruleset, so the merged tree
+    # is necessarily the tree this job just passed on the pull request. The
+    # Dockerfile takes no ARG and no git metadata and digest-pins every base, so
+    # the build is a pure function of that tree and a main-push rebuild proves
+    # nothing the PR build did not — it only adds its minutes to the front of
+    # every release. `release-publisher.yml` still builds, scans, signs, and
+    # attests the bytes that actually ship, and this stays a REQUIRED PR check:
+    # nothing may merge without it. On a push it reports `skipped`, which
+    # release_contract.py's PR_GATE_MAIN_JOBS requires EXACTLY, exactly as it
+    # already does for `dependency-review`.
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     permissions:

@@ -7,6 +7,25 @@ Git, image, and GitHub Release tags use the exact plain `vX.Y.Z` form.
 
 ## [Unreleased]
 
+## [0.1.27] - 2026-08-23
+
+### Added
+
+- A named denial test isolating the tag-object HTTP status guard in the
+  release orchestration's classify step (`test "${object_status}" = 200`):
+  scenario 1's happy path with only the tag-object status flipped to 404 and
+  a usable anchor-B run listing supplied, so the denial is provably this
+  guard's own - deleting either adjacent guard leaves the new test green.
+
+### Fixed
+
+- The `NoArtifactClassifyShellPathTests` docstring described the retired
+  anchor model; it now states both anchors in shipped order and the real
+  probe fixture shape.
+- The README release-flow paragraph is reflowed: the mid-paragraph orphan and
+  the over-long line named by the #89 delta review are gone
+  (whitespace-only, token-stream identical).
+
 ## [0.1.26] - 2026-08-22
 
 ### Added

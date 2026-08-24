@@ -7,6 +7,22 @@ Git, image, and GitHub Release tags use the exact plain `vX.Y.Z` form.
 
 ## [Unreleased]
 
+## [0.1.32] - 2026-08-24
+
+### Changed
+
+- Five dependabot dependency bumps, reproduced on an agent lane because
+  dependabot cannot pair an artifact-surface change with this
+  repository's required one-patch release advance (issue #119,
+  supersedes #114-#118): `svelte` 5.56.9 -> 5.56.10 and `vite` 8.2.1 ->
+  8.2.2 (dev dependencies, frontend); `github/codeql-action`
+  init+analyze v4.37.7 -> v4.37.8; `actions/upload-artifact` v4.6.2 ->
+  v7.0.1 (pr-gate.yml's push-only `transition-verdict` upload);
+  `docker/setup-buildx-action` v4.2.0 -> v4.3.0 across pr-gate.yml,
+  release-integrity-audit.yml, and release-publisher.yml. All three new
+  action commit SHAs were independently re-verified against their
+  upstream tags before landing.
+
 ## [0.1.31] - 2026-08-24
 
 ### Changed

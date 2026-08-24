@@ -34,12 +34,13 @@ with no runtime dependency beyond the Go standard library.
 Public traffic is HTTPS-only: TLS terminates at the Cloudflare edge, and
 the tunnel carries plain HTTP to an origin that is never itself publicly
 reachable; the edge already redirects plain `http://` to `https://`
-(`301`). This origin's own `Strict-Transport-Security: max-age=31536000`
-is overwritten by the edge's before a visitor ever sees it, and the edge
-now serves `max-age=31536000; includeSubDomains`. The two lifetimes are
-therefore identical — 365 days on each side — and the only difference a
-visitor can observe is the scope the edge adds; `preload` is absent.
-That is a deployment fact recorded here, not enforced by this repository.
+(`301`). Exactly one `Strict-Transport-Security` header reaches a
+visitor and it is the edge's `max-age=31536000; includeSubDomains`, so
+this origin's own `max-age=31536000` is never what a browser is told.
+The two lifetimes are therefore identical — 365 days on each side — and
+the only difference a visitor can observe is the scope the edge adds;
+`preload` is absent. That is a deployment fact recorded here, not
+enforced by this repository.
 
 A first-level subdomain proxied through Cloudflare already gets valid TLS
 from the apex wildcard cert, so the real trap is one level deeper: a

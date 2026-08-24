@@ -7,6 +7,25 @@ Git, image, and GitHub Release tags use the exact plain `vX.Y.Z` form.
 
 ## [Unreleased]
 
+## [0.1.30] - 2026-08-24
+
+### Fixed
+
+- The `securityHeaders` doctrine comment no longer claims this application is
+  the sole owner of the HSTS policy (issue #95) — a claim the same tree's own
+  README contradicted. The comment now records the measured two-layer reality:
+  exactly one `Strict-Transport-Security` header reaches a visitor and it is
+  the edge's (`max-age=31536000; includeSubDomains`, no `preload`), so the
+  edge is the visitor-facing HSTS owner; the origin's own header stays as the
+  defense-in-depth promise an origin-direct client would receive; and why the
+  origin's value is not the one observed publicly is recorded as undecidable
+  from outside rather than asserted either way. Neither layer closes RFC 6797
+  §14.6's first-contact gap, which is why the plain-HTTP redirect remains a
+  separate control. The `redirectForwardedHTTP` comment also drops an edge
+  product-feature name that survived inside a provider-neutral tree, and the
+  README stops asserting the suppression mechanism it cannot establish
+  (issue #98).
+
 ## [0.1.29] - 2026-08-23
 
 ### Changed

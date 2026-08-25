@@ -7,6 +7,21 @@ Git, image, and GitHub Release tags use the exact plain `vX.Y.Z` form.
 
 ## [Unreleased]
 
+## [0.1.34] - 2026-08-25
+
+### Security
+
+- The replacement Ready-flip rule is now pinned closed over the
+  governance DOCUMENTS, not a window (issue #130; found independently by
+  the Daybreak Blue round-2 review of PR #125 and the post-merge audit of
+  PR #128): every block of AGENTS.md, the PR template, and the release
+  runbook that speaks the word "ready" must hash-match an enumerated pin
+  in `require_ready_flip_rule`, and every pin must remain present, so a
+  competing Ready authority displaced outside the canonical section — a
+  new paragraph on either side of it, a second runbook paragraph, or the
+  Merge-readiness bullet rewritten — is red instead of representable.
+  All previously surviving mutants ship killed in the same test.
+
 ## [0.1.33] - 2026-08-25
 
 ### Changed

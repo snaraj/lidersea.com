@@ -406,6 +406,22 @@ step assumes a particular AI tool. (Claude sessions load this contract
 automatically through CLAUDE.md; other agents read AGENTS.md directly.
 Neither gets a different protocol.)
 
+**Review depth is risk-based.** Not every PR earns identical depth:
+
+- **Security-surface changes** — request/input handling, authn/authz, CI
+  workflows, chart/deploy, dependencies, secrets, signing/release
+  machinery, binary or vendored assets — take focused tests, one full CI
+  cycle, live validation, ONE independent adversarial review, and owner
+  merge.
+- **Normal code changes** take focused tests and one full local gate; a
+  live check only when runtime behavior changes; one review.
+- **Docs, comments, and formatting** (requirement 10's no-artifact class)
+  run the relevant checks only; adversarial review is the coordinator's
+  routing decision, not a mandate.
+
+Exact-head discipline is unchanged for whatever review DOES run: a
+verdict binds the head it names.
+
 **Reviewer independence.** The reviewer is a different agent or context
 than the author — a fresh session of the same vendor qualifies; a
 different lane is better. The reviewer works in a disposable worktree at
@@ -442,19 +458,9 @@ author replies with reproduction and repair evidence; a fresh independent
 context re-reviews the new exact head. If the owner merges first, record a
 post-merge audit and classify—not erase—the gap.
 
-**Main Worker receipt.** After author completion, exact-head CI, settings, and
-base freshness have been evaluated, the Main Worker posts one bounded normal
-comment containing exactly these five nonblank lines (with one concrete verdict
-and a distinct context signature):
-
-    HEAD: <40-lowercase-hex>
-    ROLE: MAIN-WORKER
-    VERDICT: PASS | BLOCK
-    SCOPE: architecture,merge-order,authority,settings,base-freshness,required-checks
-    - <distinct context> (Main Worker)
-
-Any head change invalidates it. `PASS` is evidence for the coordinator, never
-review, Ready, settings, merge, or release authority.
+**After review, Ready.** Once the independent adversarial review has approved
+the exact final head and all required checks are green, the coordinator flips
+Ready and the owner merges. No third distinct-context pass is required.
 
 **The review must:**
 
@@ -469,9 +475,10 @@ review, Ready, settings, merge, or release authority.
    or changed assertion, demonstrate at least one input that turns it
    red (the kill matrix usually supplies it); an assertion no input can
    fail is decorative, and decorative checks are findings.
-4. Probe for flakes: the full suite at least three times, plus the race
-   detector where the language has one. Any nondeterminism is a finding
-   naming the test.
+4. Probe for flakes: run the focused checks the findings need, plus the
+   race detector where the language has one, and re-run the full suite
+   when there is specific cause. Any nondeterminism is a finding naming
+   the test.
 5. Check hygiene: commit identity (owner noreply in BOTH author and
    committer), signature conventions and agent labels, no co-author
    trailers, secret scan clean, out-of-lane paths untouched.
@@ -528,7 +535,10 @@ authority: the owner alone merges.
   comment for issue-spec review; treat legacy issue uses as coordinator cleanup
   residue. The label is a coordination signal only: never a substitute for
   draft/ready state, for the APPROVE verdict that flips a PR ready, or for owner
-  merge authority.
+  merge authority. Ordinary labels, body text, and process comments are
+  coordination signals, never security invariants; the App-posted exact-head
+  review verdict — its posting actor and the head it binds — remains control
+  evidence, alongside the signed-commit and protected-main chain.
 - **Agent labels.** Every agent-created PR and issue carries TWO further
   labels: the umbrella `agent-authored` AND the acting agent's own label —
   `fable5` (Claude Fable 5), `5.6-sol` (ChatGPT 5.6 SOL ULTRA), `opus5`
@@ -570,8 +580,7 @@ authority: the owner alone merges.
   mutually-blocking PRs (merged precedents #53, #55).
 - **Merge readiness.** Draft remains Draft until every check is successful at
   the exact head, the base equals current protected `main`, all discussions and
-  findings are resolved, a fresh exact-head APPROVE receipt exists, a fresh
-  exact-head canonical `ROLE: MAIN-WORKER` / `VERDICT: PASS` receipt exists, the
+  findings are resolved, a fresh exact-head APPROVE receipt exists, the
   next patch still follows that base for an artifact-classified PR (a
   documentation-only PR reserves no patch at all), the automatic release consequence is
   proven, and the owner-observed release-control receipt proves immutable
@@ -676,17 +685,13 @@ The complete delivery loop, each step gated by the sections around it:
 6. **Adversarial review** per the protocol above; findings are fixed on
    the same branch by the same writer and delta re-reviewed before the
    flip to ready.
-7. **Obtain the Main Worker receipt.** After the author tree and exact-head
-   adversarial verdict are final, a distinct Main Worker runs the bounded
-   canonical check defined above and posts its exact-head PASS comment. A
-   later push invalidates both exact-head receipts.
-8. **Prove server release controls.** For an automatic-release change, the
+7. **Prove server release controls.** For an automatic-release change, the
    repository owner runs the GET-only preflight in
    `docs/release-governance.md`; immutable releases, strict current-base
    required checks, and the no-bypass ruleset must be exact before Ready.
-9. **Owner comments** are handled per the owner review protocol below.
-10. **The owner merges.** Nothing you can do — approval, green checks,
-    ready state — substitutes for that.
+8. **Owner comments** are handled per the owner review protocol below.
+9. **The owner merges.** Nothing you can do — approval, green checks,
+   ready state — substitutes for that.
 
 ## Commit identity mechanics
 
@@ -804,8 +809,9 @@ included; it is the same battery CI enforces:
   the entry is a commit-scoped fingerprint (`commit:file:rule:line`)
   with an in-file justification, and the working tree must always scan
   clean WITHOUT it. Never allowlist to make new content pass.
-- **Flake probe.** Before a PR leaves draft the full suite has run at
-  least three times (author and reviewer independently); any
+- **Flake probe.** The author runs the complete local gate ONCE on the
+  final head; the reviewer runs the focused checks its findings need and
+  MAY re-run the full suite when it has specific cause. Any
   nondeterminism is a finding naming the test.
 
 ## CI map

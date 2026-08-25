@@ -39,7 +39,6 @@ Closes #<!-- same-repository issue number -->
 
 - `requires-review` applied only after author completion: pending/yes
 - Independent normal-comment verdict bound to exact head: pending
-- Main Worker bounded receipt bound to exact head: pending
 - Base freshness and successful required checks re-verified before Ready: pending
 
 Adversarial reviewer receipt (normal comment; findings/evidence may follow):
@@ -52,21 +51,11 @@ Claim audit: <SUPPORTED / OVERSTATED results for every material claim>
 - <distinct context> (adversarial reviewer)
 ```
 
-Main Worker receipt (normal comment; exact field values and order):
-
-```text
-HEAD: <40-lowercase-hex>
-ROLE: MAIN-WORKER
-VERDICT: PASS | BLOCK
-SCOPE: architecture,merge-order,authority,settings,base-freshness,required-checks
-- <distinct context> (Main Worker)
-```
-
-Any head change invalidates both receipts. The author applies `requires-review`
+Any head change invalidates the receipt. The author applies `requires-review`
 only after the exact head, body, commits, and evidence are author-complete; the
 reviewer removes it when posting either verdict. Only the coordinator may change
-Draft/Ready state after independent approval, Main Worker PASS, exact-head CI,
-current-base verification, and the external settings boundary are all exact.
+Draft/Ready state after independent approval, exact-head CI, current-base
+verification, and the external settings boundary are all exact.
 
 ## Residual risks
 

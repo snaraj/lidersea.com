@@ -238,9 +238,10 @@ state fails closed in the CI recheck; bypass-bearing state fails closed in the
 owner preflight, per the column table above. A successful receipt is necessary
 but not
 sufficient for Ready: exact-head CI, current base, issue/PR milestone parity,
-resolved findings, the bounded Main Worker receipt, and a fresh independent
-approval are still required. The coordinator alone changes Draft/Ready state,
-and the repository owner alone merges.
+resolved findings, and a fresh independent approval are still required; no
+further distinct-context receipt is required (the Main Worker gate retired
+with issue #124). The coordinator alone changes the Draft/Ready state, and
+the repository owner alone merges.
 
 ## Immutable artifact identity and recurring audit
 

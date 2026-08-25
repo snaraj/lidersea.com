@@ -104,9 +104,6 @@ CODEQL_MAIN_JOBS = {
     "analyze (go, manual)": "success",
     "analyze (javascript-typescript, none)": "success",
 }
-MAIN_WORKER_SCOPE = (
-    "architecture,merge-order,authority,settings,base-freshness,required-checks"
-)
 
 
 class ContractError(ValueError):
@@ -581,25 +578,10 @@ def validate_review_receipt(text: str, *, expected_head: str, role: str) -> str:
         if signature is None or signature.group(1) in {"Agent", "distinct context"}:
             raise ContractError("adversarial receipt signature is not distinct or bounded")
         return lines[1][len("VERDICT: ") :]
-    if role == "main-worker":
-        if len(lines) != 5 or any(not line for line in lines):
-            raise ContractError("Main Worker receipt must contain exactly five nonblank lines")
-        if (
-            lines[0] != f"HEAD: {expected_head}"
-            or lines[1] != "ROLE: MAIN-WORKER"
-            or lines[3] != f"SCOPE: {MAIN_WORKER_SCOPE}"
-        ):
-            raise ContractError("Main Worker HEAD, ROLE, or SCOPE is not exact")
-        if lines[2] not in {"VERDICT: PASS", "VERDICT: BLOCK"}:
-            raise ContractError("Main Worker VERDICT syntax is not canonical")
-        signature = re.fullmatch(
-            r"- ([A-Za-z0-9][A-Za-z0-9 ._-]{0,63}) \(Main Worker\)",
-            lines[4],
-        )
-        if signature is None or signature.group(1) in {"Agent", "distinct context"}:
-            raise ContractError("Main Worker signature is not distinct or bounded")
-        return lines[2][len("VERDICT: ") :]
-    raise ContractError("receipt role must be adversarial or main-worker")
+    # The "main-worker" role retired with issue #124: the adversarial APPROVE
+    # at the exact final head plus green required checks is the complete
+    # review evidence before the coordinator flips Ready.
+    raise ContractError("receipt role must be adversarial")
 
 
 def _positive_actions_id(value: object, field: str) -> int:

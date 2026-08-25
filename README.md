@@ -33,7 +33,8 @@ resource), the embedded bundle with strict caching and conditional
 requests, the read-only `surface/v1` API (board, reviews, estimates,
 ratings — with the write carve-outs shipped contract-defined but
 disabled), an env-gated immutable-media path, and `/livez` + `/readyz`
-probes on port 8080, all with no runtime dependency beyond the Go
+probes on port 8080 — every response under the origin's security-header
+baseline (CSP included), all with no runtime dependency beyond the Go
 standard library.
 
 Public traffic is HTTPS-only: TLS terminates at the Cloudflare edge, and
@@ -44,17 +45,36 @@ visitor and it is the edge's `max-age=31536000; includeSubDomains`, so
 this origin's own `max-age=31536000` is never what a browser is told.
 The two lifetimes are therefore identical — 365 days on each side — and
 the only difference a visitor can observe is the scope the edge adds;
-`preload` is absent. That is a deployment fact recorded here, not
-enforced by this repository.
+`preload` is absent. The edge response already clears the preload list's
+bar on lifetime and scope (`max-age=31536000` plus `includeSubDomains`),
+so what remains is the directive itself and a deliberate submission
+decision — effectively a one-way door, untaken. That is a deployment
+fact recorded here, not enforced by this repository.
+
+One zero-spend TLS boundary is worth keeping on record: a wildcard
+certificate covers exactly one label, so a first-level subdomain gets
+valid TLS from the apex wildcard while a deeper name such as
+`api.staging.lidersea.com` has no free TLS path — only Cloudflare's paid
+Advanced Certificate Manager reaches it, which requirement 1 rules out.
+Future names stay single-label.
 
 ## Development
 
 The full local gate — frontend, backend, chart, container, and both
 secret scans — is canonical in `AGENTS.md` ("Quality gates — exact
 commands and patterns"); run it exactly as written there before every
-push, plus the browser smoke lane (`cd frontend && npm run smoke`) for
-rendering changes. Toolchain pins live in CI (`node 24.19.0`,
-`npm 11.17.0`, `go 1.26.6`); CI is authoritative.
+push. For rendering changes, add the browser smoke lane. It drives the
+shipped artifact — the Go binary with the built bundle embedded — never
+a dev server, so `LIDERSEA_SMOKE_BINARY` is required rather than
+defaulted:
+
+    (cd frontend && npm run build)
+    CGO_ENABLED=0 go build -o /tmp/lidersea-server ./cmd/server
+    cd frontend && npx playwright install chromium firefox webkit && \
+      LIDERSEA_SMOKE_BINARY=/tmp/lidersea-server npm run smoke
+
+Toolchain pins live in CI (`node 24.19.0`, `npm 11.17.0`, `go 1.26.6`);
+CI is authoritative.
 
 ## Releases
 

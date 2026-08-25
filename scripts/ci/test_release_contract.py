@@ -700,43 +700,21 @@ class GovernanceReceiptTests(unittest.TestCase):
                     receipt, expected_head=self.HEAD, role="adversarial"
                 )
 
-    def test_main_worker_receipt_is_exactly_five_bounded_lines(self):
-        exact = (
+    def test_main_worker_role_is_retired(self):
+        """Issue #124: the validator accepts no receipt role but adversarial."""
+        formerly_valid = (
             f"HEAD: {self.HEAD}\n"
             "ROLE: MAIN-WORKER\n"
             "VERDICT: PASS\n"
-            f"SCOPE: {RC.MAIN_WORKER_SCOPE}\n"
+            "SCOPE: architecture,merge-order,authority,settings,base-freshness,required-checks\n"
             "- Architecture Control (Main Worker)"
         )
-        self.assertEqual(
-            RC.validate_review_receipt(
-                exact, expected_head=self.HEAD, role="main-worker"
-            ),
-            "PASS",
-        )
-        self.assertEqual(
-            RC.validate_review_receipt(
-                exact.replace("VERDICT: PASS", "VERDICT: BLOCK"),
-                expected_head=self.HEAD,
-                role="main-worker",
-            ),
-            "BLOCK",
-        )
-        mutants = (
-            exact.replace(self.HEAD, "b" * 40, 1),
-            exact.replace("ROLE: MAIN-WORKER", "ROLE: REVIEWER"),
-            exact.replace("VERDICT: PASS", "VERDICT: APPROVE"),
-            exact.replace("architecture,merge-order", "merge-order,architecture"),
-            exact.replace("Architecture Control", "distinct context"),
-            exact + "\nextra",
-            exact.replace("ROLE: MAIN-WORKER\n", "ROLE: MAIN-WORKER\n\n"),
-            exact.replace("Architecture Control", "A" * 65),
-        )
-        for index, receipt in enumerate(mutants):
-            with self.subTest(index=index), self.assertRaises(RC.ContractError):
+        for role in ("main-worker", "coordinator", ""):
+            with self.subTest(role=role), self.assertRaises(RC.ContractError):
                 RC.validate_review_receipt(
-                    receipt, expected_head=self.HEAD, role="main-worker"
+                    formerly_valid, expected_head=self.HEAD, role=role
                 )
+        self.assertFalse(hasattr(RC, "MAIN_WORKER_SCOPE"))
 
     def test_governance_docs_pin_receipts_milestone_parity_and_generic_owner_wording(self):
         agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
@@ -747,10 +725,6 @@ class GovernanceReceiptTests(unittest.TestCase):
             for token in (
                 "HEAD: <40-lowercase-hex>",
                 "VERDICT: APPROVE | REQUEST-CHANGES",
-                "ROLE: MAIN-WORKER",
-                "VERDICT: PASS | BLOCK",
-                f"SCOPE: {RC.MAIN_WORKER_SCOPE}",
-                "(Main Worker)",
             ):
                 self.assertIn(token, text)
         self.require_template_authority(template)
@@ -792,22 +766,6 @@ class GovernanceReceiptTests(unittest.TestCase):
             "APPROVE",
         )
 
-        main_worker_match = re.search(
-            r"Main Worker receipt.*?```text\n(.*?)\n```", template, re.S
-        )
-        self.assertIsNotNone(main_worker_match)
-        main_worker = (
-            main_worker_match.group(1)
-            .replace("<40-lowercase-hex>", self.HEAD)
-            .replace("PASS | BLOCK", "PASS")
-            .replace("<distinct context>", "Architecture Control")
-        )
-        self.assertEqual(
-            RC.validate_review_receipt(
-                main_worker, expected_head=self.HEAD, role="main-worker"
-            ),
-            "PASS",
-        )
         self.assertIn("Issue milestone: `vX.Y.Z`", template)
         self.assertIn("PR milestone: `vX.Y.Z`", template)
         self.assertIn("must equal the issue milestone and next patch", template)
@@ -815,6 +773,23 @@ class GovernanceReceiptTests(unittest.TestCase):
         governance = (ROOT / "docs/release-governance.md").read_text(encoding="utf-8")
         self.assertIn("The repository owner alone chooses squash or rebase", governance)
         self.assertIn("the repository owner alone merges", governance)
+        # Issue #124: the Ready flip needs adversarial approval plus green
+        # checks, nothing else — and the retired Main Worker ceremony must
+        # not resurface in any governance document.
+        self.assertIn("After review, Ready.", agents)
+        self.assertIn("No third distinct-context pass is required", agents)
+        self.assertIn(
+            "no further distinct-context receipt is required",
+            " ".join(governance.split()),
+        )
+        for retired in ("ROLE: MAIN-WORKER", "(Main Worker)", "Main Worker receipt"):
+            for name, text in (
+                ("agents", agents),
+                ("template", template),
+                ("governance", governance),
+            ):
+                with self.subTest(retired=retired, doc=name):
+                    self.assertNotIn(retired, text)
 
         actual = {
             path: (ROOT / path).read_text(encoding="utf-8")
@@ -6808,7 +6783,6 @@ class WorkflowStructureTests(unittest.TestCase):
             "Next patch release",
             "Successful-main run binding and manual/unmerged dispatch denial",
             "requires-review",
-            "ROLE: MAIN-WORKER",
         ):
             self.assertIn(required, template)
 

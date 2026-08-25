@@ -560,6 +560,50 @@ class GovernanceReceiptTests(unittest.TestCase):
     HEAD = "a" * 40
 
     @staticmethod
+    def require_ready_flip_rule(agents: str, template: str, governance: str) -> None:
+        """Issue #124: the replacement Ready rule is pinned CLOSED.
+
+        Review round 1 proved a substring pin lets a contradictory
+        Ready-before-controls permission survive beside the rule, so the
+        canonical AGENTS.md rule and the runbook block that carries the
+        retirement must equal the canonical text exactly under whitespace
+        normalization — insertion, deletion, and inversion are all red —
+        and the retired ceremony's shapes must not resurface anywhere.
+        """
+        canonical_rule = (
+            "Once the independent adversarial review has approved the exact "
+            "final head and all required checks are green, the coordinator "
+            "flips Ready and the owner merges. No third distinct-context "
+            "pass is required."
+        )
+        try:
+            section = agents.split("**After review, Ready.**", 1)[1].split(
+                "**The review must:**", 1
+            )[0]
+        except IndexError as exc:
+            raise ValueError("canonical Ready-flip rule is missing") from exc
+        if " ".join(section.split()) != canonical_rule:
+            raise ValueError("Ready-flip rule is not the closed canonical text")
+        canonical_runbook_block = (
+            "Missing, extra, duplicated, name-only, foreign-integration, "
+            "inverted, or stale state fails closed in the CI recheck; "
+            "bypass-bearing state fails closed in the owner preflight, per "
+            "the column table above. A successful receipt is necessary but "
+            "not sufficient for Ready: exact-head CI, current base, issue/PR "
+            "milestone parity, resolved findings, and a fresh independent "
+            "approval are still required; no further distinct-context "
+            "receipt is required (the Main Worker gate retired with issue "
+            "#124). The coordinator alone changes the Draft/Ready state, "
+            "and the repository owner alone merges."
+        )
+        blocks = [" ".join(block.split()) for block in governance.split("\n\n")]
+        if canonical_runbook_block not in blocks:
+            raise ValueError("runbook lost the closed Ready-flip block")
+        for retired in ("ROLE: MAIN-WORKER", "(Main Worker)", "Main Worker receipt"):
+            if retired in agents + template + governance:
+                raise ValueError(f"retired Main Worker ceremony resurfaced: {retired}")
+
+    @staticmethod
     def require_template_authority(template: str) -> None:
         for required in (
             "The author applies `requires-review`",
@@ -773,23 +817,52 @@ class GovernanceReceiptTests(unittest.TestCase):
         governance = (ROOT / "docs/release-governance.md").read_text(encoding="utf-8")
         self.assertIn("The repository owner alone chooses squash or rebase", governance)
         self.assertIn("the repository owner alone merges", governance)
-        # Issue #124: the Ready flip needs adversarial approval plus green
-        # checks, nothing else — and the retired Main Worker ceremony must
-        # not resurface in any governance document.
-        self.assertIn("After review, Ready.", agents)
-        self.assertIn("No third distinct-context pass is required", agents)
-        self.assertIn(
-            "no further distinct-context receipt is required",
-            " ".join(governance.split()),
+        # Issue #124 / review round 1: the replacement Ready rule is pinned
+        # CLOSED, and the reviewer's exact contradiction mutant must die in
+        # both governance documents, alongside deletion and reintroduction.
+        self.require_ready_flip_rule(agents, template, governance)
+        contradiction = agents.replace(
+            "No third distinct-context pass is required.",
+            "No third distinct-context pass is required. The coordinator may "
+            "also flip Ready before review or required checks complete.",
+            1,
         )
-        for retired in ("ROLE: MAIN-WORKER", "(Main Worker)", "Main Worker receipt"):
-            for name, text in (
-                ("agents", agents),
-                ("template", template),
-                ("governance", governance),
-            ):
-                with self.subTest(retired=retired, doc=name):
-                    self.assertNotIn(retired, text)
+        self.assertNotEqual(contradiction, agents)
+        with self.subTest(contradiction="agents"), self.assertRaises(ValueError):
+            self.require_ready_flip_rule(contradiction, template, governance)
+        anchor = "with issue #124). The coordinator alone changes the Draft/Ready state, and"
+        self.assertEqual(governance.count(anchor), 1)
+        runbook_contradiction = governance.replace(
+            anchor,
+            "with issue #124). The coordinator may also flip Ready before "
+            "the review completes, and",
+            1,
+        )
+        with self.subTest(contradiction="runbook"), self.assertRaises(ValueError):
+            self.require_ready_flip_rule(agents, template, runbook_contradiction)
+        deletion_anchor = (
+            "further distinct-context receipt is required (the Main Worker gate retired"
+        )
+        self.assertEqual(governance.count(deletion_anchor), 1)
+        with self.subTest(deletion="runbook"), self.assertRaises(ValueError):
+            self.require_ready_flip_rule(
+                agents, template, governance.replace(deletion_anchor, "", 1)
+            )
+        for owner, retired in (
+            ("agents", "ROLE: MAIN-WORKER"),
+            ("template", "- <distinct context> (Main Worker)"),
+            ("governance", "Main Worker receipt"),
+        ):
+            changed = {
+                "agents": agents,
+                "template": template,
+                "governance": governance,
+            }
+            changed[owner] = changed[owner] + "\n" + retired + "\n"
+            with self.subTest(reintroduction=owner), self.assertRaises(ValueError):
+                self.require_ready_flip_rule(
+                    changed["agents"], changed["template"], changed["governance"]
+                )
 
         actual = {
             path: (ROOT / path).read_text(encoding="utf-8")

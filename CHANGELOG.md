@@ -12,25 +12,35 @@ Git, image, and GitHub Release tags use the exact plain `vX.Y.Z` form.
 ### Changed
 
 - Risk-based review ceremony (issue #124, owner directive 2026-08-22
-  re-affirmed 2026-08-25, lockstep with naranjo.online #190): the Main
-  Worker receipt is retired — after the independent adversarial review
-  approves the exact final head and all required checks are green, the
-  coordinator flips Ready and the owner merges, with no third
-  distinct-context pass. Review depth is now stated as risk-based
-  (security-surface / normal code / docs classes) instead of identical
-  for every PR; the author runs the complete local gate once on the
-  final head and the reviewer re-runs the full suite only with specific
-  cause; labels and PR metadata are named as coordination signals rather
-  than security invariants. The enforcement is repointed, not weakened:
-  `validate_review_receipt` accepts no receipt role but adversarial (the
-  retired `main-worker` branch and `MAIN_WORKER_SCOPE` are gone from the
-  production validator), a retirement test proves the formerly-valid
-  receipt now fails closed, and the governance-docs test asserts the
-  replacement rule while failing if the retired ceremony's canonical
-  shapes resurface in AGENTS.md, the PR template, or the release
-  runbook. Commit identity and SSH signing, owner-only merge, the
-  release transition gate, the four-way version lock, and the
-  independent adversarial review itself are all untouched.
+  re-affirmed 2026-08-25, lockstep with naranjo.online PR #191, its
+  issue #190): the Main Worker receipt is retired — after the
+  independent adversarial review approves the exact final head and all
+  required checks are green, the coordinator flips Ready and the owner
+  merges, with no third distinct-context pass. Review depth is now
+  stated as risk-based (security-surface / normal code / docs classes)
+  instead of identical for every PR; the author runs the complete local
+  gate once on the final head and the reviewer re-runs the full suite
+  only with specific cause; ordinary labels, body text, and process
+  comments are named coordination signals while the App-posted
+  exact-head review verdict — actor and head binding — remains control
+  evidence. The enforcement is repointed: `validate_review_receipt`
+  accepts no receipt role but adversarial (the retired `main-worker`
+  branch and `MAIN_WORKER_SCOPE` are gone from the production
+  validator), a retirement test proves the formerly-valid receipt now
+  fails closed, and the governance-docs test pins the replacement rule
+  CLOSED — the AGENTS.md rule and the runbook's retirement block must
+  equal the canonical text exactly, so a contradictory permission
+  inserted beside the rule is as red as a deletion (review round 1
+  proved the substring pin let one survive) — while failing if the
+  retired ceremony's canonical shapes resurface in AGENTS.md, the PR
+  template, or the release runbook. Removed control, stated plainly: no
+  second independent context re-checks architecture, merge order,
+  authority, settings, base freshness, or required checks before Ready —
+  base freshness and required checks stay coordinator-verified at the
+  flip, and the owner merge gate remains terminal. Commit identity and
+  SSH signing, owner-only merge, the release transition gate, the
+  four-way version lock, and the independent adversarial review itself
+  are all untouched.
 
 ## [0.1.32] - 2026-08-24
 

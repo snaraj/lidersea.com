@@ -535,9 +535,10 @@ authority: the owner alone merges.
   comment for issue-spec review; treat legacy issue uses as coordinator cleanup
   residue. The label is a coordination signal only: never a substitute for
   draft/ready state, for the APPROVE verdict that flips a PR ready, or for owner
-  merge authority. Labels, comments, and PR metadata generally are coordination
-  signals, never security invariants: the invariant is the signed-commit,
-  protected-main, review-verdict chain.
+  merge authority. Ordinary labels, body text, and process comments are
+  coordination signals, never security invariants; the App-posted exact-head
+  review verdict — its posting actor and the head it binds — remains control
+  evidence, alongside the signed-commit and protected-main chain.
 - **Agent labels.** Every agent-created PR and issue carries TWO further
   labels: the umbrella `agent-authored` AND the acting agent's own label —
   `fable5` (Claude Fable 5), `5.6-sol` (ChatGPT 5.6 SOL ULTRA), `opus5`

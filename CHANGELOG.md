@@ -154,22 +154,47 @@ Git, image, and GitHub Release tags use the exact plain `vX.Y.Z` form.
   so the suite passed on every developer machine. Only the suite was affected:
   the workflow's gate step passes the exact base and head SHAs from the event
   payload and resolves no symbolic name at all.
-- The repair is a `proposed_head()` helper that resolves STRUCTURALLY — a
-  two-parent `HEAD` is a merge and its second parent is the side being
-  proposed — so one code path serves CI and a laptop alike and no branch runs
-  only in CI. Exactly two parents, never "two or more": a three-parent HEAD is
-  not a pull-request merge ref, has no single proposed side, and resolves to
-  `HEAD` so the gate judges it on its own identity. Two alternatives were
-  rejected on the record. Teaching `violations()` to ADMIT a two-parent commit
-  carrying GitHub's committer would punch a hole in the one rule the module
-  exists to enforce, and `test_githubs_own_merge_identity_is_not_sanctioned_either`
-  asserts the opposite: that identity is out of SCOPE, never sanctioned.
-  Allowlisting the merge commit by SHA would be stale on the next push, since
-  GitHub rebuilds the ref every time. Proven in a throwaway clone against a
-  hand-built merge ref in all three directions: green on the simulated merge
-  ref, green on a plain checkout, and RED — naming the offending commit and
-  never the merge ref — when the proposed side really does carry a refused
-  commit.
+- The repair does not teach the suite to walk back from a merge ref; it stops
+  the suite asking `HEAD` at all. `proposed_range()` reads
+  `pull_request.base.sha` and `pull_request.head.sha` from the event payload —
+  the SAME two values the workflow's gate step passes to `commit_identity.py` —
+  so the suite and the gate judge one identical range and neither depends on
+  what the checkout happens to have put at `HEAD`. Nothing regresses if the
+  checkout's depth or ref changes later. It fails CLOSED: under a pull request
+  an unreadable or incomplete payload raises rather than falling back to
+  `HEAD`, because that fall-back is precisely the silent, green, wrong
+  behaviour being removed. The module's CLI already took the same position —
+  `--base` and `--head` are `required=True` with no default, so the range can
+  never be reached by omission.
+- Two alternatives were rejected on the record. Teaching `violations()` to ADMIT
+  a two-parent commit carrying GitHub's committer would punch a hole in the one
+  rule the module exists to enforce, and
+  `test_githubs_own_merge_identity_is_not_sanctioned_either` asserts the
+  opposite: that identity is out of SCOPE, never sanctioned. The bug was in
+  WHICH COMMITS GET READ, not in which identities are allowed, and treating it
+  as an identity-allowlist problem would have weakened the gate while appearing
+  to fix it. Allowlisting the merge commit by SHA would be stale on the next
+  push, since GitHub rebuilds the ref every time.
+- A SECOND defect, found while making the range explicit and worse than the
+  first: the suite's workflow step carries no `if:` guard, so it also runs on
+  pushes to `main` — where `HEAD` is the owner's squash merge under GitHub's
+  web-flow identity. The shipped suite fails 3 of 37 against a simulated main
+  push, which would have held main CI permanently red after this pull request
+  merged and blocked the release chain, over a commit no pull request can
+  repair. The gate STEP was already guarded `if: github.event_name ==
+  'pull_request'` for exactly this reason; the suite now honours the same
+  boundary, returning no range on any non-pull-request event and skipping the
+  real-range assertions with a stated reason rather than auditing a range the
+  gate itself declines to audit. A structural `HEAD^2` resolution would NOT
+  have fixed this — on a push `HEAD` has one parent, so it resolves to `HEAD`
+  and fails identically.
+- Proven in a throwaway clone against a hand-built merge ref and a
+  GitHub-shaped event payload, in five directions: green on the CI shape (merge
+  ref checked out, payload supplying the range); green on a developer checkout
+  with no event variables; green with stated skips on a simulated push to
+  `main`; RED — naming the offending commit and never the merge ref — when the
+  payload's head side really carries a refused commit; and RED on an unreadable
+  payload, which is the fail-closed direction.
 - Three surviving divergence mutants in `scripts/ci/workflow_integrity.py`.
   `audit()` and `refusable_entries()` are independent loops over
   `_workflow_paths()` that each recompute the gate-job set, and every existing

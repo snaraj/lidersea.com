@@ -45,7 +45,27 @@ tar -xzf "${download_root}/trivy.tar.gz" -C "${download_root}" trivy
 install -m 0755 "${download_root}/trivy" "${install_root}/trivy"
 
 echo "${install_root}" >> "${GITHUB_PATH}"
+
+# VERIFY WHAT WAS INSTALLED, not merely that something ran. The checksum above
+# proves the ARCHIVE is the pinned one; it says nothing about which binary the
+# extraction actually placed on PATH, so every tool is asked its own version
+# and the answer is ASSERTED against the pin before it is printed. A printed
+# version nobody compares is a log line, not a check — the failure mode is a
+# gate that scans, lints or renders with a tool the repository never pinned,
+# reports green, and leaves no signal that anything was wrong.
+#
+# Each comparison is exact, and each tool's own reporting shape decides how the
+# value is read:
+#   gitleaks  `version` prints the bare `X.Y.Z` with no `v`, so the pin is
+#             compared with its `v` stripped.
+#   helm      `version --short` appends the build's git hash (`vX.Y.Z+gHASH`),
+#             which is not the pin; `--template='{{.Version}}'` returns exactly
+#             `vX.Y.Z`, so that is what the assertion reads while `--short`
+#             stays as the human-legible log line.
+#   trivy     `--version` prints `Version: X.Y.Z` on its first line.
+test "$("${install_root}/gitleaks" version)" = "${GITLEAKS_VERSION#v}"
 "${install_root}/gitleaks" version
+test "$("${install_root}/helm" version --template='{{.Version}}')" = "${HELM_VERSION}"
 "${install_root}/helm" version --short
 test "$("${install_root}/trivy" --version | awk 'NR == 1 {print $2}')" = "${TRIVY_VERSION#v}"
 "${install_root}/trivy" --version

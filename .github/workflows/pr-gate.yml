@@ -43,6 +43,16 @@ jobs:
         # still catches a malformed dependabot.yml even if a future edit to
         # the discovery glob or test layout stops collecting the suite.
         run: python3 -I -B scripts/ci/dependabot_contract.py .github/dependabot.yml
+      - name: Test the hostile whole-render NetworkPolicy census
+        # Its own glob and its own named step, exactly like the two suites
+        # above: this job discovers each contract suite by exact name rather
+        # than one wildcard, so a suite that stops being collected shows up as
+        # a visible edit here instead of a silent gap. This half of the egress
+        # proof pins the READER — one hostile input per test, stdlib only, no
+        # helm needed — which is why it belongs in this job. The behavioural
+        # half runs in `chart`, where helm exists: the census against the real
+        # render plus its whole hostile mutation battery.
+        run: python3 -I -B -m unittest discover -s scripts/ci -p 'test_chart_render_census.py' -v
       - name: Enforce one exact patch from the protected base
         if: github.event_name != 'workflow_dispatch'
         env:
@@ -239,6 +249,19 @@ jobs:
           helm template smoke chart --kube-version v1.36.0 >/dev/null
       - name: The ingress policy must pin one peer by its full identity
         run: ./scripts/ci/chart-ingress-pin.sh
+      - name: The egress deny must be unrepresentable, not merely rendered
+        # The pin above scopes itself to `spec.ingress` BY CONSTRUCTION, so
+        # nothing it does can notice `- Egress` leaving `policyTypes` — and
+        # that entry is the whole deny, because NetworkPolicySpec.Egress is
+        # `json:"egress,omitempty"` upstream and the API server drops the empty
+        # `egress: []` from the stored spec. Delete the one line and every other
+        # check in this job still passes while outbound access silently
+        # reopens. This step is what makes that a red build: it pins the
+        # rendered policy against a literal, refuses a battery of hostile
+        # rewrites of the real render, and censuses the COMPLETE installable
+        # render so a second NetworkPolicy — additive, and invisible to any
+        # raw-line pin — cannot allow what the first one denies.
+        run: ./scripts/ci/chart-egress-pin.sh
       - name: Chart version must match VERSION
         run: |
           IFS= read -r version < VERSION

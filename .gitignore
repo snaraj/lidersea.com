@@ -4,6 +4,15 @@ frontend/node_modules/
 # videos, and screenshots are all off, so this holds only the last-run marker
 # and any failure context — run state, never source.
 frontend/test-results/
+# CPython's bytecode cache for the scripts/ci contract suites. Every documented
+# invocation passes -B and writes nothing, but -B is a flag a person can forget
+# and importlib still caches on the run that omits it — so a plain
+# `python3 -m unittest ...` leaves .pyc files behind that a later lane has to
+# clean by hand. Ignoring the directory costs nothing and removes that trap.
+# Only __pycache__/ is listed: CPython 3 writes bytecode nowhere else, and this
+# repository has no pytest (the suites are stdlib unittest), so a .pytest_cache
+# rule would be a guess at a tool that is not here.
+__pycache__/
 internal/web/dist/*
 !internal/web/dist/.gitkeep
 coverage.out

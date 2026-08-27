@@ -247,7 +247,9 @@ every one bumped in the same commit:
 2. `chart/Chart.yaml` — both `version` and `appVersion`, numeric, matching (1).
 3. `chart/values.yaml` — `image.tag`, plain `vX.Y.Z`, matching (1).
 4. `CHANGELOG.md` — a new `## [X.Y.Z] - <ISO date>` heading immediately
-   after the empty `## [Unreleased]` heading.
+   after the empty `## [Unreleased]` heading, and NOTHING at or below the
+   previously newest dated heading. Released changelog sections are
+   append-only; see "CHANGELOG discipline" for the rule and its repair path.
 
 CI proves all four mechanically: the `chart` job's numeric `VERSION` ↔
 numeric chart `version` ↔ numeric `appVersion` ↔ plain-v `image.tag`
@@ -1188,6 +1190,32 @@ or changed frontend surface, retrofitted by the rendering-lanes arc
   PR leaves `CHANGELOG.md` untouched (the file sits outside the documentation
   allowlist precisely so a no-release range can never claim one). There is no
   later release PR; dates are owner-local dates.
+- **Released changelog history is APPEND-ONLY.** `CHANGELOG.md` is the
+  human-readable half of the release ledger, and a released section is as
+  immutable as the tag it names. The only edit a release may make to it is an
+  insertion ABOVE the previously newest dated heading: everything from that
+  heading through end of file — every shipped section and the undated tail
+  block below them — must survive byte-identical. `validate_transition` in
+  `scripts/ci/release_contract.py` proves it by comparing base to head, so the
+  rule holds on every pull request and every push to `main`; `validate_snapshot`
+  separately reads ALL the headings in one file and refuses a duplicate, a
+  reordered pair, an impossible date, or a historical date that postdates a
+  newer release. Both are new because neither existed: the old check read the
+  CURRENT version's heading and nothing else, so a plausible mechanical edit —
+  an insertion that also consumed the heading below it — erased a shipped
+  release while the four-way lock, the transition contract, the full PR gate,
+  and the publisher all stayed green.
+
+  **Correct a shipped entry with an ERRATUM, never in place.** Write a new
+  entry under the version the range is releasing, naming the release it
+  corrects. That is the documented lift and it is genuinely one line in one
+  PR, so this gate ships no `ci_gate_allowlist.toml` table — deliberately. An
+  entry there would be keyed by a released version, and no suite could ever
+  prove such an entry stale, so it would sit as a permanent hole in exactly
+  the property the gate exists to hold. The gate design doctrine's rule 2
+  demands a cheap widening path, not an allowlist specifically; this gate
+  refuses nothing that legitimate evolution does, because adding a new version
+  block IS the legitimate evolution and it passes untouched.
 - **Truthful README.** Badges and claims report only what CI actually
   measured or the repository can demonstrate — the badges publish the
   gate's own numbers, and prose never advertises a capability or

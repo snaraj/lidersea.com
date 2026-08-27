@@ -5,13 +5,19 @@ document scan that a second `NetworkPolicy` could walk straight past by
 spelling its keys `kind :` and `spec :` -- valid YAML, invisible to a
 prefix match, and an additive allow-all for every Pod once Kubernetes has
 it. The behavioural half of the proof lives in `chart-egress-pin.sh`, whose
-assertions (d) and (g) rewrite the REAL Helm render into 48 hostile ones and
+assertions (d) and (g) rewrite the REAL Helm render into 53 hostile ones and
 require the census to refuse every single one. This suite is the other half:
 it pins the reader itself, one rejection per test, without needing helm --
 so it runs in the `security` job alongside the other contract suites. That
 job discovers each suite by its own exact glob rather than one wildcard, so
 this file is named in `.github/workflows/pr-gate.yml` by its own step and a
 future layout change cannot silently stop collecting it.
+
+It also pins the OTHER claim the census makes, which reading the policy alone
+can never support: that the policy SELECTS the workload it governs.
+`PolicyIsBoundToTheWorkload` below is that half -- the drift where the
+Deployment's Pod-template labels move, the policy stays byte-identical, and a
+perfect-looking deny governs zero Pods.
 
 Two rules shape every test here, both taken from AGENTS.md:
 
@@ -140,13 +146,30 @@ metadata:
   name: {chart}
 spec:
   type: ClusterIP
+  selector:
+    app.kubernetes.io/name: {chart}
+    app.kubernetes.io/instance: {release}
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: {chart}
+  namespace: {namespace}
 spec:
   replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {chart}
+      app.kubernetes.io/instance: {release}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {chart}
+        app.kubernetes.io/instance: {release}
+        app.kubernetes.io/managed-by: Helm
+    spec:
+      containers:
+        - name: {chart}
 """
 
 
@@ -1634,6 +1657,170 @@ class CensusRefusesWhatKubernetesRefuses(CensusFixture):
         # render carries `app.kubernetes.io/*` keys, a quoted version value,
         # matchLabels on both selector sides and a namespace -- and it passes.
         self.assertEqual(self.census(render())["objects"], 4)
+
+
+class PolicyIsBoundToTheWorkload(CensusFixture):
+    """A policy that selects no Pod governs nothing, however perfect its text.
+
+    Every assertion in the classes above reads the POLICY. None of them can
+    notice `spec.podSelector` drifting off the workload, because the policy's
+    own text stays untouched and correct while the Deployment's Pod-template
+    labels move out from under it -- and Kubernetes then matches the policy
+    against zero Pods, leaving those Pods with full outbound access. These
+    tests pin the assertion that closes that, in both directions and in the
+    two forms of over-selection.
+    """
+
+    POLICY_DOCUMENT_END = "---\napiVersion: v1\nkind: ServiceAccount"
+
+    def policy_document(self, text: str) -> str:
+        head, marker, _ = text.partition(self.POLICY_DOCUMENT_END)
+        self.assertEqual(marker, self.POLICY_DOCUMENT_END, "the render lost its shape")
+        return head
+
+    def bind(self, *, namespace=FIXTURE_NAMESPACE, pod_selector=None, pod_labels=None,
+             workload_selector=None, workloads=1, template=True):
+        """Call the binding assertion directly, on objects built by hand."""
+        if pod_selector is None:
+            pod_selector = {"matchLabels": {"app.kubernetes.io/name": FIXTURE_CHART_NAME,
+                                            "app.kubernetes.io/instance": FIXTURE_RELEASE}}
+        if pod_labels is None:
+            pod_labels = {"app.kubernetes.io/name": FIXTURE_CHART_NAME,
+                          "app.kubernetes.io/instance": FIXTURE_RELEASE}
+        if workload_selector is None:
+            workload_selector = {"matchLabels": dict(pod_labels)}
+        policy = {"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy",
+                  "metadata": {"name": "p", "namespace": FIXTURE_NAMESPACE},
+                  "spec": {"podSelector": pod_selector}}
+        spec = {"selector": workload_selector}
+        if template:
+            spec["template"] = {"metadata": {"labels": pod_labels}}
+        objects = [policy]
+        for index in range(workloads):
+            objects.append({"apiVersion": "apps/v1", "kind": "Deployment",
+                            "metadata": {"name": "d%d" % index, "namespace": namespace},
+                            "spec": spec})
+        return CRC.bind_policy_to_workload(objects, policy)
+
+    def refuse(self, needle: str, **kwargs):
+        with self.assertRaises(CRC.CensusError) as caught:
+            self.bind(**kwargs)
+        self.assertIn(needle, str(caught.exception))
+
+    # --- the assertion is not vacuous in the accepting direction -----------
+
+    def test_the_pinned_render_binds_its_one_workload(self):
+        bound = CRC.census(render(), self.facts)
+        self.assertEqual(bound["workload"]["kind"], "Deployment")
+        self.assertEqual(bound["workload"]["metadata"]["namespace"], FIXTURE_NAMESPACE)
+
+    def test_pod_labels_beyond_the_selector_still_bind(self):
+        # Kubernetes matchLabels is a SUBSET test, and this gate must not be
+        # stricter than Kubernetes: the real render's Pods carry
+        # `managed-by` and `version` labels the selector never mentions.
+        bound = self.bind(pod_labels={"app.kubernetes.io/name": FIXTURE_CHART_NAME,
+                                      "app.kubernetes.io/instance": FIXTURE_RELEASE,
+                                      "app.kubernetes.io/managed-by": "Helm",
+                                      "extra": "value"})
+        self.assertEqual(bound["pod_labels"]["extra"], "value")
+
+    # --- direction 1: the workload moves, the policy stays ------------------
+
+    def test_retargeting_the_pod_template_labels_is_refused(self):
+        # THE HOLE, as a whole render: the policy document comes out
+        # byte-identical, so nothing that reads the policy can see this.
+        base = render()
+        mutated = CRC.mutate(base, self.facts, "workload-pod-labels-retargeted")
+        self.assertEqual(self.policy_document(mutated), self.policy_document(base),
+                         "the mutation must leave the policy untouched to prove the point")
+        self.reject(mutated, "selects ZERO of this workload's Pods")
+
+    def test_dropping_the_instance_label_from_the_pods_is_refused(self):
+        base = render()
+        mutated = CRC.mutate(base, self.facts, "workload-pod-labels-drop-the-instance")
+        self.assertEqual(self.policy_document(mutated), self.policy_document(base))
+        self.reject(mutated, "selects ZERO of this workload's Pods")
+
+    def test_moving_the_workload_to_another_namespace_is_refused(self):
+        # A NetworkPolicy governs Pods in its OWN namespace, so the same
+        # zero-Pod outcome arrives by a road the label comparison never sees.
+        base = render()
+        mutated = CRC.mutate(base, self.facts, "workload-moved-to-another-namespace")
+        self.assertEqual(self.policy_document(mutated), self.policy_document(base))
+        self.reject(mutated, "governs Pods in its OWN namespace only")
+
+    def test_a_deployment_that_does_not_match_its_own_template_is_refused(self):
+        base = render()
+        mutated = CRC.mutate(base, self.facts,
+                             "workload-selector-detached-from-its-template")
+        self.assertEqual(self.policy_document(mutated), self.policy_document(base))
+        self.reject(mutated, "creates no Pods at all")
+
+    # --- direction 2: the policy moves, the workload stays ------------------
+
+    def test_the_binding_alone_refuses_a_selector_that_names_another_app(self):
+        # The pinned-object comparison in `census` catches this too. That is
+        # deliberate redundancy across two INDEPENDENT derivations -- one from
+        # constants, one from the rendered workload -- so this test calls the
+        # binding directly to show it does not lean on the other.
+        self.refuse("selects ZERO of this workload's Pods",
+                    pod_selector={"matchLabels": {
+                        "app.kubernetes.io/name": FIXTURE_CHART_NAME + "-elsewhere",
+                        "app.kubernetes.io/instance": FIXTURE_RELEASE}})
+
+    # --- direction 3: it matches the workload, AND something unintended -----
+
+    def test_a_selector_without_the_instance_key_is_refused_though_it_matches(self):
+        # The subtle one. `{name}` is a subset of the Pod labels, so the match
+        # test PASSES -- and the selector also governs every other release of
+        # this chart in the namespace. Refused on the identity keys instead.
+        labels = {"app.kubernetes.io/name": FIXTURE_CHART_NAME,
+                  "app.kubernetes.io/instance": FIXTURE_RELEASE}
+        selector = {"app.kubernetes.io/name": FIXTURE_CHART_NAME}
+        self.assertEqual(CRC._unsatisfied(selector, labels), [],
+                         "this selector really does match the workload")
+        self.refuse("omits", pod_selector={"matchLabels": selector})
+
+    def test_an_empty_pod_selector_is_refused_and_the_reason_is_recorded(self):
+        # The deliberate ruling, pinned so a later reader cannot mistake it
+        # for an oversight: `podSelector: {}` selects EVERY Pod in the
+        # namespace, which for the egress half denies more, not less. It is
+        # refused because it would make this assertion vacuous -- it matches
+        # this workload for the same reason it matches everything, so the
+        # drift above becomes undetectable again by emptying the selector --
+        # and because the same object's ingress allow-list would then apply
+        # to co-tenant Pods nobody reviewed.
+        self.refuse("would make this assertion vacuous", pod_selector={})
+        self.refuse("an always-true selector is not a binding",
+                    pod_selector={"matchLabels": {}})
+
+    def test_match_expressions_are_refused_rather_than_guessed_at(self):
+        self.refuse("refused rather than guessed at", pod_selector={
+            "matchExpressions": [{"key": "app.kubernetes.io/name", "operator": "Exists"}]})
+        self.refuse("refused rather than guessed at", pod_selector={
+            "matchLabels": {"app.kubernetes.io/name": FIXTURE_CHART_NAME,
+                            "app.kubernetes.io/instance": FIXTURE_RELEASE},
+            "matchExpressions": []})
+
+    # --- the workload side has to be knowable at all ------------------------
+
+    def test_the_render_must_carry_exactly_one_workload(self):
+        self.refuse("exactly one is required", workloads=0)
+        self.refuse("exactly one is required", workloads=2)
+
+    def test_a_pod_template_without_labels_cannot_be_bound(self):
+        self.refuse("declares no spec.template.metadata.labels", template=False)
+        self.refuse("no labels at all", pod_labels={},
+                    workload_selector={"matchLabels": {"a": "b"}})
+
+    def test_a_non_string_label_is_refused_rather_than_compared(self):
+        with self.assertRaises(CRC.CensusError) as caught:
+            self.bind(pod_labels={"app.kubernetes.io/name": 5})
+        self.assertIn("not a string label", str(caught.exception))
+
+    def test_the_workload_selector_must_be_a_matchLabels_selector_too(self):
+        self.refuse("exactly one key -- matchLabels -- is accepted here",
+                    workload_selector={})
 
 
 class MutationBattery(CensusFixture):

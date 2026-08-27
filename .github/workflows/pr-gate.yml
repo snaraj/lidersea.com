@@ -249,7 +249,7 @@ jobs:
           helm template smoke chart --kube-version v1.36.0 >/dev/null
       - name: The ingress policy must pin one peer by its full identity
         run: ./scripts/ci/chart-ingress-pin.sh
-      - name: The egress deny must be unrepresentable, not merely rendered
+      - name: The egress deny must be unrepresentable, and must bind the workload
         # The pin above scopes itself to `spec.ingress` BY CONSTRUCTION, so
         # nothing it does can notice `- Egress` leaving `policyTypes` — and
         # that entry is the whole deny, because NetworkPolicySpec.Egress is
@@ -261,6 +261,19 @@ jobs:
         # rewrites of the real render, and censuses the COMPLETE installable
         # render so a second NetworkPolicy — additive, and invisible to any
         # raw-line pin — cannot allow what the first one denies.
+        #
+        # It also closes the OTHER half of the same defect, which reading the
+        # policy can never close. A NetworkPolicy has a `podSelector` naming
+        # which Pods it governs and rules saying what those Pods may do, and
+        # the two are independent: retarget the Deployment's Pod-template
+        # labels, leave the policy byte-identical, and the policy matches ZERO
+        # Pods. A policy that selects no Pod governs nothing, so those Pods get
+        # full outbound access — while helm lint, the ingress pin above, and
+        # every text and census assertion in this step stay green, because the
+        # policy's text is perfect. It simply applies to nothing. The census
+        # therefore binds the policy to the rendered workload as well: same
+        # namespace, Pod-template labels the selector really matches, and a
+        # selector that names this release rather than the whole namespace.
         run: ./scripts/ci/chart-egress-pin.sh
       - name: Chart version must match VERSION
         run: |

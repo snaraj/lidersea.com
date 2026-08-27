@@ -2203,11 +2203,6 @@ def _parser() -> argparse.ArgumentParser:
     tag_state.add_argument("--tagger-name", required=True)
     tag_state.add_argument("--tagger-email", required=True)
     tag_state.add_argument("--tagger-date", required=True)
-    release_record = commands.add_parser("release-record")
-    release_record.add_argument("--release-json", type=Path, required=True)
-    release_record.add_argument("--manifest", type=Path, required=True)
-    release_record.add_argument("--asset-content", type=Path)
-    release_record.add_argument("--repository", required=True)
     release_state = commands.add_parser("release-state")
     release_state.add_argument("--http-status", type=int, required=True)
     release_state.add_argument(
@@ -2413,20 +2408,6 @@ def main(argv: list[str] | None = None) -> int:
                 tagger_date=args.tagger_date,
             )
             print(require_publication_state(state, args.require) if args.require else state)
-        elif args.command == "release-record":
-            manifest, manifest_bytes = read_release_manifest(
-                args.manifest, expected_repository=args.repository
-            )
-            print(
-                validate_release_record(
-                    _read_object(args.release_json),
-                    manifest=manifest,
-                    manifest_bytes=manifest_bytes,
-                    asset_bytes=args.asset_content.read_bytes()
-                    if args.asset_content
-                    else None,
-                )
-            )
         elif args.command == "release-state":
             manifest, manifest_bytes = read_release_manifest(
                 args.manifest, expected_repository=args.repository

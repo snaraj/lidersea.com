@@ -7,6 +7,64 @@ Git, image, and GitHub Release tags use the exact plain `vX.Y.Z` form.
 
 ## [Unreleased]
 
+## [0.1.37] - 2026-08-26
+
+### Security
+
+- The egress deny is now bound to the workload it governs, closing the half of
+  the defect 0.1.36 explicitly did not close. A NetworkPolicy has two
+  independent halves: `spec.podSelector` says WHICH Pods it governs, and
+  `policyTypes` plus the rule lists say what those Pods may do. Every
+  assertion 0.1.36 added reads the second half, so every one of them is
+  satisfied by a policy that governs NOTHING. Retarget only the Deployment's
+  Pod-template labels — leaving `chart/templates/network-policy.yaml`
+  byte-identical — and Kubernetes matches the policy against ZERO Pods. A
+  policy that selects no Pod governs nothing, so the running Pods have full
+  outbound access, while `helm lint`, `scripts/ci/chart-ingress-pin.sh`, the
+  four-way release lock, the provider-neutrality pin AND 0.1.36's own text pin
+  and whole-render census all stay green — because the policy's text is
+  untouched and perfect. It simply applies to nothing.
+- `scripts/ci/chart_render_census.py` therefore gained
+  `bind_policy_to_workload`, run as part of the same whole-render census in
+  `scripts/ci/chart-egress-pin.sh` assertion (c). It proves the render's one
+  Deployment sits in the policy's namespace; that its Pod template carries
+  labels the `podSelector` actually matches under Kubernetes' own
+  `matchLabels` subset semantics; that the Deployment's own selector matches
+  its own template, since Kubernetes refuses a Deployment where it does not
+  and a deny proven over zero Pods is not a proof; and that the selector names
+  both `app.kubernetes.io/name` and `app.kubernetes.io/instance`, because the
+  name alone still matches this workload while additionally governing every
+  other release of this chart in the namespace.
+- An all-namespace `podSelector: {}` is REFUSED, deliberately and not by
+  oversight. For the egress half it is strictly more restrictive — it denies
+  more — but it matches this workload for the same reason it matches
+  everything, so accepting it would make the binding assertion vacuous on
+  exactly the drift it exists to catch; and the same object's ingress
+  allow-list would then apply to co-tenant Pods nobody reviewed.
+  `matchExpressions` is refused on the module's standing principle: set-based
+  selection is not evaluated here, so it is refused with the reason named
+  rather than guessed at.
+- The whole-render mutation battery grew from 48 to 53, and the battery was
+  actually run rather than the floor merely raised: five new mutants rewrite
+  the REAL Helm render so the NetworkPolicy document comes out byte-identical
+  (or, for the over-selection case, still self-consistent) — Pod-template
+  labels retargeted, the instance label dropped from the Pods, the Deployment
+  detached from its own template, the workload moved to another namespace, and
+  the policy's selector stripped of its instance key. All 53 are refused;
+  `chart-egress-pin.sh` assertion (g) pins the floor and
+  `test_chart_render_census.py` pins the floor against the battery's real
+  size, so neither can drift. The unit suite grew from 145 to 159 tests.
+
+### Removed
+
+- The dead `release-record` subcommand of `scripts/ci/release_contract.py`. It
+  had no caller of any kind: of the 34 subcommands the module defines, it was
+  the only one with zero references outside the module itself — no workflow,
+  script, doc, or test named the literal string, in wrapped or unwrapped form.
+  `validate_release_record` is UNTOUCHED and stays live through
+  `classify_release_state`, which backs the `release-state` subcommand the
+  publisher and the integrity audit both invoke.
+
 ## [0.1.36] - 2026-08-26
 
 ### Security

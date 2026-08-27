@@ -834,9 +834,11 @@ included; it is the same battery CI enforces:
   coverage floor), `chart` (the ingress peer-identity pin,
   `scripts/ci/chart-ingress-pin.sh`; the egress-deny pin,
   `scripts/ci/chart-egress-pin.sh`, which pins the rendered policy against
-  literals, refuses a battery of hostile rewrites of the real render, and
+  literals, refuses a battery of hostile rewrites of the real render,
   censuses the COMPLETE installable render so a second, additive
-  NetworkPolicy cannot allow what the first denies; helm lint + render at
+  NetworkPolicy cannot allow what the first denies, and BINDS that policy to
+  the rendered workload so a perfect-looking deny cannot govern zero Pods;
+  helm lint + render at
   `--kube-version v1.36.0`; the numeric VERSION ↔ numeric chart `version` ↔
   numeric `appVersion` ↔ plain-v chart `image.tag` four-way lock, plus a render
   assertion that the emitted reference still carries a full digest),
@@ -979,7 +981,20 @@ or changed frontend surface, retrofitted by the rendering-lanes arc
   API server drops the empty `egress: []` from the stored spec — and
   `scripts/ci/chart-egress-pin.sh` fails closed on that entry's removal,
   on any rule appearing beside it, and on a second NetworkPolicy anywhere
-  in the complete installable render. Its
+  in the complete installable render. A NetworkPolicy has two independent
+  halves, and the paragraph above describes only one: `spec.podSelector`
+  says WHICH Pods a policy governs, and no assertion over the rules can
+  notice it drifting off the workload. Retarget the Deployment's Pod-template
+  labels and leave the policy byte-identical, and the policy matches ZERO
+  Pods — a policy that selects no Pod governs nothing, so those Pods run with
+  full outbound access while the manifest still reads default deny. The same
+  gate therefore also binds the policy to the render's one Deployment: same
+  namespace, Pod-template labels the selector really matches under Kubernetes'
+  `matchLabels` semantics, and a selector naming this release rather than the
+  whole namespace — an all-namespace `podSelector: {}` is REFUSED, because a
+  selector that matches everything would satisfy the binding test vacuously
+  and would additionally apply this policy's ingress allow-list to co-tenant
+  Pods nobody reviewed. Its
   safety properties are fixed in code and reachable from no configuration
   and no data file — https only, the per-platform host allowlist re-checked
   at call time, redirects REFUSED rather than followed, a hard body cap, a

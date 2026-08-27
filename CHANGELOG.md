@@ -55,6 +55,99 @@ Git, image, and GitHub Release tags use the exact plain `vX.Y.Z` form.
   `test_chart_render_census.py` pins the floor against the battery's real
   size, so neither can drift. The unit suite grew from 145 to 159 tests.
 
+### Added
+
+- A gate proving every subcommand `scripts/ci/release_contract.py` registers
+  has a caller (`scripts/ci/test_subcommand_callers.py`). The module registers
+  its subcommands with argparse while workflows invoke them by name as opaque
+  strings, and nothing connected the two sides: a subcommand could go dead
+  while still reading live, or be deleted while a LINE-WRAPPED invocation
+  still called it. The gate reads the names from the parser itself — never a
+  hand-maintained list, which would drift exactly as the workflows already do
+  — and searches the bare token across workflows, scripts, docs and tests, so
+  wrapping cannot hide a caller. It reports each caller's TIER: a doc-only
+  caller is a real caller (`settings-receipt` is an operator escape hatch
+  invoked from `docs/release-governance.md`), while test-only callers and zero
+  callers both fail. Both rules are driven by hostile fixtures as well as by
+  the live repository: at this head nothing is dead and the allowlist is
+  empty, so every live-data assertion would be satisfied just as well by a
+  classifier that refused nothing at all. Measured at this head: 33 registered
+  subcommands, none dead, none test-only.
+- A workflow-integrity gate (`scripts/ci/workflow_integrity.py` and
+  `scripts/ci/test_workflow_integrity.py`) refusing three specific constructs
+  in `.github/workflows` that every other gate here is blind to:
+  `continue-on-error: true` on a job or step of a required check, which makes
+  a failed gate report success and satisfies branch protection with a red
+  build; a step-level `env:` that captures a pin — either shadowing a
+  workflow-level or job-level binding, or rebinding a tool version or checksum
+  that `scripts/ci/install-tools.sh` pins — so the step runs a different value
+  while the pin still reads correct; and a custom `shell:` on a gate step,
+  which changes failure semantics and can drop `pipefail`. The gate-job set is
+  derived from `release_contract.py`'s own `REQUIRED_STATUS_CHECKS` and
+  `PR_GATE_MAIN_JOBS`, and the protected variables are read out of
+  `install-tools.sh`, so both track the repository instead of a copy of it.
+  It reads the block-YAML subset workflows use with a stdlib reader
+  (requirements 1 and 9 leave no PyYAML) that consumes `run:` bodies opaquely
+  — a shell script containing the text `shell:` is not workflow structure —
+  and refuses tabs, duplicate keys and ragged indentation rather than
+  guessing. Its entrypoint carries a positive control, because "the repository
+  is green" is an assertion an audit that returned nothing would satisfy for
+  free: the same entrypoint is pointed at a scratch directory holding one
+  violating workflow and must report it. It pins NO step inventory, and both
+  files argue at length why one must never be added.
+- `scripts/ci/ci_gate_allowlist.toml`, the shared lift mechanism for both
+  gates. Every refusal above is liftable with ONE line carrying a written
+  reason, and every failure message names the file and prints the exact line
+  to add. An entry with a blank reason fails closed, and a stale entry — one
+  whose case has resolved — fails until deleted, so the allowlist keeps
+  describing reality rather than accumulating exemptions. Seeded EMPTY: at
+  this head no subcommand is dead or test-only, and no workflow declares
+  `continue-on-error`, a custom `shell:`, or a pin-capturing step `env:`.
+  The allowlist is excluded from the subcommand-caller search set for the same
+  reason `release_contract.py` is: an exemption NAMES the subcommand it
+  exempts, so counting it as a caller would deadlock the lift — the added line
+  would hand its own subcommand a script-tier caller, the stale-entry rule
+  would demand the line be deleted, and deleting it would trip the zero-caller
+  rule again. The full round trip is a test, not an assumption, and so is the
+  exclusion each rule depends on.
+
+### Fixed
+
+- `AGENTS.md`'s SSH-signing instruction, which was broken for any agent with
+  more than one ed25519 key loaded. It documented
+  `key::$(ssh-add -L | grep ssh-ed25519)`; `grep` matches every loaded
+  ed25519 key, so with two keys the value expands to both concatenated and
+  Git is handed a malformed signing key. It worked only while a single key
+  happened to be loaded. This is portable doctrine, not a local quirk — a
+  stranger cloning this repository with two ed25519 keys hits it too. The
+  instruction now selects the account's registered signing key explicitly by
+  exact type-and-blob match and fails closed when no loaded key matches.
+- `AGENTS.md` now states the verification requirement that makes the above
+  checkable: the `gpg.ssh.allowedSignersFile` principal must be a SPACE-FREE
+  token — the bare email — because the file is whitespace-delimited, so a
+  `Name <email>` principal splits and ssh reports `invalid key`. It also
+  records the false-pass trap this creates: a broken principal produces
+  `No principal matched.`, which is exactly what a genuinely bad signature
+  produces, so a negative control run against a broken file passes for the
+  wrong reason. Both controls must run against the same file, and a negative
+  control is evidence only once its positive twin prints `G`.
+- `AGENTS.md` credited "Successful main CI" with creating the release tag.
+  The tag is created by `release-after-main.yml`, the success-only
+  `workflow_run` that fires when main CI completes — not by main CI, and not
+  by the publisher, which only GETs the tag object to verify identity and
+  rebinds the REST ref in its terminal step. The CI map already described
+  this correctly; the release-flow prose did not.
+
+### Changed
+
+- `AGENTS.md` gains a "Gate design doctrine" section stating the two rules
+  every gate here now follows: pin behaviour rather than inventory, and ship
+  a documented lift mechanism so widening a gate is one line in one PR. It
+  states explicitly that this does not relax requirement 4 — an allowlist
+  reaches repository mechanics, never a fail-closed security behaviour — and
+  that adding an entry with a written reason is a normal part of active
+  development, not a security event.
+
 ### Removed
 
 - The dead `release-record` subcommand of `scripts/ci/release_contract.py`. It

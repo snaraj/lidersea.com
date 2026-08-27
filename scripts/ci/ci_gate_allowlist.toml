@@ -1,0 +1,68 @@
+# Lift mechanism for the scripts/ci gates.
+#
+# WHY THIS FILE EXISTS
+#
+# This repository is under active development. A gate that pins an exhaustive
+# inventory — "exactly these steps", "exactly these callers" — breaks on every
+# legitimate addition and teaches agents to re-record the inventory instead of
+# thinking about the change. The gates that read this file therefore refuse
+# NAMED DANGEROUS CONSTRUCTS and stay silent about everything else.
+#
+# When a refusal is nevertheless wrong for a specific, reviewed case, widening
+# it must be CHEAP: one line here, in one PR, with a written reason. That is a
+# normal part of active development, not a security event. It is deliberately
+# not a release train, a code change, or a new abstraction.
+#
+# RULES FOR AN ENTRY
+#
+#   * One line, one entry, one reason. The reason is not optional — a gate
+#     that reads an entry with a blank reason fails closed, because an entry
+#     without a reason is not a decision, it is a hole.
+#   * State WHY the construct is safe here, not what it is. "needed for the
+#     build" is not a reason; "the upload is best-effort telemetry and no
+#     later step reads it" is.
+#   * An entry is scoped as tightly as the gate allows, so it lifts exactly
+#     one case and cannot silently cover the next one.
+#   * Delete an entry when the case that justified it is gone.
+#
+# Every failure message from both gates prints the exact line to add here.
+
+# ---------------------------------------------------------------------------
+# scripts/ci/test_subcommand_callers.py
+#
+# Every argparse subcommand `scripts/ci/release_contract.py` registers must
+# have at least one caller outside the module. The gate fails on a subcommand
+# with ZERO callers (dead code that still looks live) and on one whose only
+# callers are tests (a suite exercising a command nothing invokes).
+#
+# Entry format — the subcommand name, exactly as registered:
+#
+#   "some-subcommand" = "why this command has no non-test caller today"
+#
+# Seeded empty on purpose: at 0.1.37 every one of the 33 registered
+# subcommands has a workflow, script, or doc caller. `settings-receipt` is
+# doc-only and needs no entry — an operator escape hatch invoked from
+# docs/release-governance.md is a real caller, and the gate reports the tier
+# so a reviewer can see which kind it is.
+[subcommand_callers]
+
+# ---------------------------------------------------------------------------
+# scripts/ci/test_workflow_integrity.py
+#
+# Three refusals over .github/workflows: continue-on-error on a required-check
+# job or step, a step-level env: that captures a pin, and a custom shell: on a
+# gate step. There is deliberately NO step inventory — see the module docstring
+# in scripts/ci/workflow_integrity.py for why one must never be added.
+#
+# Entry formats — the gate prints the exact key when it fails:
+#
+#   "<workflow>.yml::<job>::continue-on-error"            = "reason"
+#   "<workflow>.yml::<job>::<step name>::continue-on-error" = "reason"
+#   "<workflow>.yml::<job>::<step name>::shell"           = "reason"
+#   "<workflow>.yml::<job>::<step name>::env::<VARIABLE>"  = "reason"
+#
+# Seeded empty on purpose: at 0.1.37 no workflow in this repository declares
+# continue-on-error anywhere, declares a custom shell anywhere, or binds a
+# pinned variable at step level. The seed records the measured baseline rather
+# than reserving room for violations nobody has proposed.
+[workflow_integrity]

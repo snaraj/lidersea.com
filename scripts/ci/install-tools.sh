@@ -34,6 +34,10 @@ fetch_verify \
 tar -xzf "${download_root}/helm.tar.gz" -C "${download_root}" linux-amd64/helm
 install -m 0755 "${download_root}/linux-amd64/helm" "${install_root}/helm"
 
+# Install the scanner directly from Aqua's immutable release archive. Do not
+# add trivy-action/setup-trivy: the Trivy action ecosystem suffered a 2026
+# tag/Release compromise, while this path has one reviewed archive URL and one
+# repository-owned SHA-256 lock.
 fetch_verify \
   "https://github.com/aquasecurity/trivy/releases/download/${TRIVY_VERSION}/trivy_${TRIVY_VERSION#v}_Linux-64bit.tar.gz" \
   "${TRIVY_SHA256}" "${download_root}/trivy.tar.gz"
@@ -43,4 +47,5 @@ install -m 0755 "${download_root}/trivy" "${install_root}/trivy"
 echo "${install_root}" >> "${GITHUB_PATH}"
 "${install_root}/gitleaks" version
 "${install_root}/helm" version --short
+test "$("${install_root}/trivy" --version | awk 'NR == 1 {print $2}')" = "${TRIVY_VERSION#v}"
 "${install_root}/trivy" --version

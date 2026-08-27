@@ -10,6 +10,5 @@ coverage.out
 *.cover.out
 .DS_Store
 
-# Agent worktrees (see AGENTS.md, "Parallel agents in one checkout"). The
-# tracked .claude/settings.json is deliberately not covered by this rule.
+# Agent worktrees (see AGENTS.md, "Parallel agents in one checkout").
 .claude/worktrees/

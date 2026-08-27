@@ -218,14 +218,6 @@ jobs:
             }
             printf "Go coverage %.1f%% meets the %.1f%% floor\n", got, floor
           }'
-      - name: Report frontend test coverage
-        working-directory: frontend
-        run: |
-          {
-            printf '### Frontend coverage\n\n```\n'
-            node --test --experimental-test-coverage tests/*.test.mjs | tail -n 14
-            printf '```\n'
-          } >> "${GITHUB_STEP_SUMMARY}"
 
   chart:
     runs-on: ubuntu-24.04

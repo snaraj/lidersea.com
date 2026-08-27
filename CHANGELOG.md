@@ -7,6 +7,53 @@ Git, image, and GitHub Release tags use the exact plain `vX.Y.Z` form.
 
 ## [Unreleased]
 
+## [0.1.35] - 2026-08-26
+
+### Security
+
+- `scripts/ci/install-tools.sh` now VERIFIES the Trivy it installed, instead
+  of only pinning the one it meant to install: the post-install assertion
+  `test "$(trivy --version | awk 'NR == 1 {print $2}')" = "${TRIVY_VERSION#v}"`
+  makes the binary state its own version and fails the step when that
+  disagrees with the pin. The checksum lock already bound the BYTES; this
+  binds the resulting binary's identity to the version the file names, so a
+  version/hash pair updated out of step, or a `trivy` resolved from somewhere
+  other than the verified install root, is a red step rather than a silently
+  different scanner. The download also gains the supply-chain rationale it
+  lacked: the archive URL plus repository-owned SHA-256 is deliberate, and
+  `trivy-action`/`setup-trivy` are deliberately not used because the Trivy
+  action ecosystem suffered a 2026 tag/Release compromise. The v0.73.0 pin is
+  unchanged. `gitleaks` and `helm` still print their versions without
+  asserting them — the same gap, reported rather than silently widened here.
+- `chart/templates/network-policy.yaml`'s egress comment stops pointing a
+  future maintainer at the wrong line. It read as though `egress: []` were
+  what denies outbound traffic. It is not: `NetworkPolicySpec.Egress` is
+  `json:"egress,omitempty"` upstream, so the API server drops the empty list
+  from the stored spec and the admitted object carries the deny through the
+  `- Egress` entry in `policyTypes` ALONE. The comment now names that entry
+  as the load-bearing line and states the failure mode — dropping it while
+  leaving the empty list in place silently restores full outbound access.
+  Comment only: the rendered manifest parses to a byte-identical object.
+
+### Removed
+
+- The `application` job's "Report frontend test coverage" step. It published
+  a coverage percentage that measured nothing: `frontend/tests/` reads
+  `../src` through `readFile`, never `import` and never `await import(`, so
+  no application file executes under `--experimental-test-coverage` and the
+  table it printed had zero file rows. The sibling `coverage-badges` job
+  already documents this and publishes a TAP pass-count instead — that job
+  and its badge are untouched. The step also ran the whole frontend suite a
+  second time on every pull request (after `npm test` in the same job) purely
+  to print that vacuous table, so removing it returns CI minutes and removes
+  no signal. `PR_GATE_MAIN_JOBS` pins job NAMES and conclusions, never step
+  names, so no release-authorization surface is touched.
+- A stale `.gitignore` sentence defending an exception for a tracked
+  `.claude/settings.json`. No `.claude/` path is tracked in this repository,
+  and the rule beside it ignores only `.claude/worktrees/`, so the sentence
+  described an exception to a rule that never covered that file. The
+  worktree-ignore rule and its first sentence are unchanged.
+
 ## [0.1.34] - 2026-08-25
 
 ### Security

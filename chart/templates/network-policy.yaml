@@ -33,5 +33,15 @@ spec:
       ports:
         - port: {{ .Values.service.port }}
           protocol: TCP
-  # The site has no runtime dependency, so any outbound connection is denied.
+  # The site serves an embedded bundle and has no runtime dependency, so any
+  # outbound connection is denied. The ratings collector is the origin's only
+  # outbound capability and ships disabled, so egress is impossible rather than
+  # merely unattempted; enabling it is a separate reviewed decision that adds an
+  # exact allow-list, never a widening of this one.
+  # The empty list below is NOT what denies. NetworkPolicySpec.Egress is
+  # `json:"egress,omitempty"` upstream, so the API server drops this empty list
+  # from the stored spec and the admitted object carries the deny through the
+  # `- Egress` entry in policyTypes ALONE. That entry is the load-bearing line --
+  # dropping it while leaving this empty list here silently restores full
+  # outbound access.
   egress: []

@@ -53,6 +53,28 @@ jobs:
         # half runs in `chart`, where helm exists: the census against the real
         # render plus its whole hostile mutation battery.
         run: python3 -I -B -m unittest discover -s scripts/ci -p 'test_chart_render_census.py' -v
+      - name: Test every release-contract subcommand has a caller
+        # Its own glob and its own named step, like the three suites above.
+        # `release_contract.py` registers its subcommands with argparse and
+        # workflows invoke them BY NAME as opaque strings; nothing connected
+        # the two sides, so a subcommand could go dead while still reading
+        # live — or be deleted while a LINE-WRAPPED invocation still called
+        # it, which a naive grep misses. This suite reads the names from the
+        # parser and searches the bare token across workflows, scripts, docs
+        # and tests, reporting each caller's tier. Lift with one line in
+        # scripts/ci/ci_gate_allowlist.toml; the failure prints that line.
+        run: python3 -I -B -m unittest discover -s scripts/ci -p 'test_subcommand_callers.py' -v
+      - name: Test the narrow workflow-integrity rules
+        # Three named dangerous constructs in .github/workflows that every
+        # other gate here is blind to: continue-on-error on a required-check
+        # job or step (a red gate reporting success), a step-level env: that
+        # captures a pin (an unpinned tool while the pin still reads right),
+        # and a custom shell: on a gate step (changed failure semantics —
+        # most importantly a lost pipefail). There is deliberately NO step
+        # inventory: that pin breaks on every legitimate step addition and
+        # teaches agents to re-record it instead of thinking. The reasoning
+        # is written out in both files. Same one-line lift mechanism.
+        run: python3 -I -B -m unittest discover -s scripts/ci -p 'test_workflow_integrity.py' -v
       - name: Enforce one exact patch from the protected base
         if: github.event_name != 'workflow_dispatch'
         env:

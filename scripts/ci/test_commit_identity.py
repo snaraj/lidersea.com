@@ -298,6 +298,46 @@ class TheReaderRefusesWhatItCannotRead(unittest.TestCase):
     def test_reading_no_commits_returns_nothing_rather_than_failing(self) -> None:
         self.assertEqual(CI.read_commits([]), ())
 
+    def test_a_record_with_a_stray_separator_is_refused_not_truncated(self) -> None:
+        r"""A message holding a literal `\x1f` must not silently lose its tail.
+
+        `read_commits` asks git for FIVE `\x1f`-separated fields. A commit
+        message that itself contains that byte produces SIX, and the field
+        guard is what stops the reader building a `Commit` from the first five:
+        the message would stop at the stray byte, and a `Co-authored-by:`
+        trailer written AFTER it would be dropped entirely — a fail-open on the
+        one rule this module exists to enforce, reachable by a hostile or
+        merely unlucky commit message. The two assertions before the guard is
+        exercised are what make this a real vector rather than an arbitrary
+        input: the truncated message the unguarded reader would have built
+        breaks no rule, while the full message carries a trailer.
+
+        `_git` is replaced with a plain function rather than a mock framework
+        (testing doctrine: stdlib-only, hand-written fakes).
+        """
+        subject = "feat: something"
+        message = f"{subject}\n\nbody text{CI._FIELD}\n{TRAILER_LINE}\n"
+        truncated = message.split(CI._FIELD)[0]
+        self.assertEqual(
+            CI.violations(CI.Commit("a" * 40, OWNER, OWNER, subject, truncated)),
+            [],
+            "the truncated message must look clean, or the guard proves nothing",
+        )
+        self.assertTrue(
+            CI.violations(CI.Commit("a" * 40, OWNER, OWNER, subject, message)),
+            "the full message must really carry the trailer the guard preserves",
+        )
+
+        record = CI._FIELD.join(("a" * 40, OWNER, OWNER, subject, message)) + CI._RECORD
+        original = CI._git
+        try:
+            CI._git = lambda *args: record
+            with self.assertRaises(CI.CommitIdentityError) as caught:
+                CI.read_commits(["a" * 40])
+        finally:
+            CI._git = original
+        self.assertIn("6 fields", str(caught.exception))
+
     def test_a_short_record_set_is_refused_rather_than_silently_truncated(self) -> None:
         """Ask for two commits and get one back, and the reader must object.
 

@@ -160,6 +160,36 @@ Git, image, and GitHub Release tags use the exact plain `vX.Y.Z` form.
   produces, so a negative control run against a broken file passes for the
   wrong reason. Both controls must run against the same file, and a negative
   control is evidence only once its positive twin prints `G`.
+- The workflow-integrity gate's own one-line lift, which did not work. Its
+  suite asserted that the `[workflow_integrity]` table of
+  `scripts/ci/ci_gate_allowlist.toml` equalled `{}`, so applying verbatim the
+  line a refusal prints silenced the refusal and immediately failed that
+  assertion — a lift instruction that lands in a public CI log and turns the
+  build red when an agent follows it. This is the same defect this release
+  found and fixed for `[subcommand_callers]`, one table over. The empty-table
+  pin is replaced by the stale-entry rule the sibling gate already used
+  (`stale_allowlist_failures`): every entry must still name a construct some
+  workflow really declares, so the table cannot accumulate exemptions and
+  cannot reserve room for violations nobody has proposed, while the documented
+  lift stays open. `refusals()` is now allowlist-blind and both
+  `check_workflow` and `refusable_entries` read it, so the set a lift can
+  silence and the set a lift may name cannot drift apart. The round trip is a
+  test rather than a promise, in both directions.
+- A surviving mutant in `scripts/ci/commit_identity.py`: the reader's
+  five-field record guard had no test. A commit message containing a literal
+  `0x1f` byte produces six fields, and without the guard the message field is
+  truncated at the stray byte — dropping a `Co-authored-by:` trailer written
+  after it, a fail-open on the exact rule the gate enforces. The guard was
+  already correct and is unchanged; only the test was missing.
+- The stated rationale for a mutation-audit survivor in
+  `scripts/ci/workflow_integrity.py`. The `\s*` before the colon in `_KEY` and
+  the `.strip()` on the captured key were reported as two defences of one
+  property, both redundant. Only `.strip()` is: on a QUOTED key with a space
+  before the colon the fixed `"[^"]*"` alternative cannot absorb the space and
+  the bare alternative excludes a leading quote, so without `\s*` the reader
+  refuses the line instead of reading it. Fail-closed either way, but a real
+  behaviour change in an input class the suite did not cover between its
+  quoted-no-space and bare-with-space cases. The intersection is now asserted.
 - `AGENTS.md` credited "Successful main CI" with creating the release tag.
   The tag is created by `release-after-main.yml`, the success-only
   `workflow_run` that fires when main CI completes — not by main CI, and not

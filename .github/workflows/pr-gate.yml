@@ -53,6 +53,53 @@ jobs:
         # half runs in `chart`, where helm exists: the census against the real
         # render plus its whole hostile mutation battery.
         run: python3 -I -B -m unittest discover -s scripts/ci -p 'test_chart_render_census.py' -v
+      - name: Test every release-contract subcommand has a caller
+        # Its own glob and its own named step, like the three suites above.
+        # `release_contract.py` registers its subcommands with argparse and
+        # workflows invoke them BY NAME as opaque strings; nothing connected
+        # the two sides, so a subcommand could go dead while still reading
+        # live — or be deleted while a LINE-WRAPPED invocation still called
+        # it, which a naive grep misses. This suite reads the names from the
+        # parser and searches the bare token across workflows, scripts, docs
+        # and tests, reporting each caller's tier. Lift with one line in
+        # scripts/ci/ci_gate_allowlist.toml; the failure prints that line.
+        run: python3 -I -B -m unittest discover -s scripts/ci -p 'test_subcommand_callers.py' -v
+      - name: Test the narrow workflow-integrity rules
+        # Three named dangerous constructs in .github/workflows that every
+        # other gate here is blind to: continue-on-error on a required-check
+        # job or step (a red gate reporting success), a step-level env: that
+        # captures a pin (an unpinned tool while the pin still reads right),
+        # and a custom shell: on a gate step (changed failure semantics —
+        # most importantly a lost pipefail). There is deliberately NO step
+        # inventory: that pin breaks on every legitimate step addition and
+        # teaches agents to re-record it instead of thinking. The reasoning
+        # is written out in both files. Same one-line lift mechanism.
+        run: python3 -I -B -m unittest discover -s scripts/ci -p 'test_workflow_integrity.py' -v
+      - name: Test the commit identity and co-author trailer rules
+        # `gitleaks git` and `gitleaks dir` both scan BLOB CONTENT. Commit
+        # author/committer identities and commit message bodies are neither,
+        # so the enforced secret scan has always had zero coverage over the
+        # surface requirement 3 governs. This suite pins the two refusals with
+        # synthetic commits, and checks the seeded historical exceptions
+        # against the real objects so they cannot become decoration.
+        run: python3 -I -B -m unittest discover -s scripts/ci -p 'test_commit_identity.py' -v
+      - name: Refuse a foreign identity or co-author trailer in this pull request
+        # Scoped to the range this pull request PROPOSES, deliberately. History
+        # is append-only (requirement 2), so re-auditing every commit could
+        # only refuse a past no PR can fix. It is skipped on main pushes for a
+        # stated reason rather than by omission: the owner's merge is stamped
+        # with GitHub's own web-flow committer, every commit in the range was
+        # already checked here where an agent could still fix it, and refusing
+        # GitHub's merge identity would hold main CI red forever. Lift with one
+        # line in scripts/ci/ci_gate_allowlist.toml; the failure prints it.
+        if: github.event_name == 'pull_request'
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          python3 -I -B scripts/ci/commit_identity.py \
+            --base "${PR_BASE_SHA}" --head "${PR_HEAD_SHA}"
       - name: Enforce one exact patch from the protected base
         if: github.event_name != 'workflow_dispatch'
         env:
@@ -249,7 +296,7 @@ jobs:
           helm template smoke chart --kube-version v1.36.0 >/dev/null
       - name: The ingress policy must pin one peer by its full identity
         run: ./scripts/ci/chart-ingress-pin.sh
-      - name: The egress deny must be unrepresentable, not merely rendered
+      - name: The egress deny must be unrepresentable, and must bind the workload
         # The pin above scopes itself to `spec.ingress` BY CONSTRUCTION, so
         # nothing it does can notice `- Egress` leaving `policyTypes` — and
         # that entry is the whole deny, because NetworkPolicySpec.Egress is
@@ -261,6 +308,19 @@ jobs:
         # rewrites of the real render, and censuses the COMPLETE installable
         # render so a second NetworkPolicy — additive, and invisible to any
         # raw-line pin — cannot allow what the first one denies.
+        #
+        # It also closes the OTHER half of the same defect, which reading the
+        # policy can never close. A NetworkPolicy has a `podSelector` naming
+        # which Pods it governs and rules saying what those Pods may do, and
+        # the two are independent: retarget the Deployment's Pod-template
+        # labels, leave the policy byte-identical, and the policy matches ZERO
+        # Pods. A policy that selects no Pod governs nothing, so those Pods get
+        # full outbound access — while helm lint, the ingress pin above, and
+        # every text and census assertion in this step stay green, because the
+        # policy's text is perfect. It simply applies to nothing. The census
+        # therefore binds the policy to the rendered workload as well: same
+        # namespace, Pod-template labels the selector really matches, and a
+        # selector that names this release rather than the whole namespace.
         run: ./scripts/ci/chart-egress-pin.sh
       - name: Chart version must match VERSION
         run: |

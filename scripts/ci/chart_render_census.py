@@ -28,6 +28,22 @@ object equals an expectation this gate states itself. Nothing about the
 expectation is read back out of the template under test: an expectation
 derived from the thing it checks passes for anything that thing renders.
 
+AND THEN IT BINDS THAT POLICY TO THE WORKLOAD. Everything above proves what
+the policy SAYS. `bind_policy_to_workload` proves what it POINTS AT, and the
+two are independent claims: a NetworkPolicy has a `podSelector` naming which
+Pods it governs and rules saying what those Pods may do, and NOTHING in the
+rules half can notice the selector drifting off the workload. Retarget only
+the Deployment's Pod-template labels -- leaving the policy byte-identical --
+and the policy matches ZERO Pods. A NetworkPolicy that selects no Pod governs
+nothing, so those Pods run with FULL outbound access, while `helm lint`, the
+ingress pin, the text pin in `chart-egress-pin.sh` and every assertion above
+this paragraph stay green, because the policy's own text is untouched and
+perfect. It simply applies to nothing. The binding assertion is the answer:
+the render's ONE Deployment must sit in the policy's namespace, its Pod
+template must carry labels the policy's selector actually matches under
+Kubernetes' own `matchLabels` semantics, and the selector must name this
+release rather than merely something.
+
 WHERE THE EXPECTED FACTS COME FROM.
 
 - The deny itself (`policyTypes` including `Egress`, `egress: []`) and the
@@ -164,7 +180,7 @@ holds is narrower and is stated exactly:
   the `security` job, on every pull request, and it pins the reader's
   refusals and its exact readings one input at a time against hand-written
   expectations -- never against PyYAML, which CI does not install;
-- the 48-mutation census battery in `chart-egress-pin.sh` assertion (d) runs
+- the 53-mutation census battery in `chart-egress-pin.sh` assertion (d) runs
   here, in the `chart` job, against THIS repository's own real Helm render,
   and every mutant must be refused;
 - assertion (g) pins that battery at its floor, so it cannot be quietly
@@ -220,6 +236,23 @@ POLICY_NAME_PREFIX = "ingress-to-"
 POLICY_TYPES = ["Ingress", "Egress"]
 POLICY_SPEC_KEYS = ("podSelector", "policyTypes", "ingress", "egress")
 POLICY_METADATA_KEYS = ("name", "namespace", "labels")
+
+# The one Pod-producing object in this render, and therefore the one workload
+# the policy has to govern. `EXPECTED_INVENTORY` below already pins the render
+# to exactly one of these, so a SECOND Deployment carrying the same labels --
+# recorded as a P1 against an earlier attempt at this gate -- is refused by the
+# inventory before the binding assertion is ever reached; the binding assertion
+# re-states the count anyway so it is correct when called on its own.
+WORKLOAD_KIND = "Deployment"
+
+# The two labels that together name exactly ONE release of exactly ONE chart,
+# and the reason both are required rather than either. `app.kubernetes.io/name`
+# alone is carried by every release of this chart in the namespace, so a
+# selector holding only it still MATCHES this workload -- a subset test passes
+# -- while also governing Pods nobody reviewed. That is the over-selection half
+# of the same defect as a selector that matches nothing, and a binding proof
+# that only checked "does it match?" would wave it through.
+WORKLOAD_IDENTITY_KEYS = ("app.kubernetes.io/instance", "app.kubernetes.io/name")
 
 # The complete installable render, as (apiVersion, kind) pairs. A census that
 # only counted NetworkPolicies would still miss a second policy written under
@@ -1669,6 +1702,195 @@ def _flatten_one(doc: object, out: list[dict], depth: int, where: str) -> None:
     out.append(doc)
 
 
+# --- Binding the policy to the workload it governs ---------------------------
+#
+# THE TWO HALVES OF A NETWORKPOLICY ARE INDEPENDENT, AND ONLY ONE OF THEM IS
+# PINNED ABOVE. `spec.podSelector` says WHICH Pods the policy governs;
+# `policyTypes` plus the rule lists say WHAT those Pods may do. Every
+# assertion in `census` reads the policy alone, so every one of them is
+# satisfied by a policy that governs NOTHING: retarget the Deployment's
+# Pod-template labels, leave the policy byte-identical, and Kubernetes matches
+# it against zero Pods. Those Pods then run with full outbound access. `helm
+# lint` sees valid YAML, `chart-ingress-pin.sh` inspects `spec.ingress` by
+# construction, and the text pin in `chart-egress-pin.sh` reads a policy whose
+# text is exactly right. The manifest still says "default deny". It denies
+# nothing.
+#
+# THE FOUR DIRECTIONS THIS HAS TO COVER, because a check written for only the
+# one named above would be half a check:
+#
+#   1. the workload moves and the policy stays -- the Pod-template labels are
+#      retargeted, or the whole Deployment moves to another namespace (a
+#      NetworkPolicy governs Pods in its OWN namespace only, so a namespace
+#      move is the same zero-Pod outcome by a different road);
+#   2. the policy moves and the workload stays -- the selector is rewritten to
+#      name something else. The pinned-object comparison in `census` also
+#      catches this today, and deliberately so: two independent derivations of
+#      the same fact is the point, not duplication. The binding assertion is
+#      derived from the RENDERED WORKLOAD; the pinned object is derived from
+#      CONSTANTS. Either one alone would be a single point of failure;
+#   3. the selector matches the workload PLUS something unintended -- dropping
+#      `app.kubernetes.io/instance` still matches these Pods and additionally
+#      governs every other release of this chart in the namespace. Handled by
+#      requiring both `WORKLOAD_IDENTITY_KEYS`, not by the match test, which
+#      passes;
+#   4. the Deployment stops matching its OWN template -- `spec.selector` and
+#      `spec.template.metadata.labels` disagree. Kubernetes refuses such a
+#      Deployment outright, so the render installs no Pods at all, and a
+#      policy proven to bind zero Pods has proven nothing.
+#
+# THE EMPTY SELECTOR IS REFUSED, DELIBERATELY, and it is worth stating exactly
+# why because the naive reading points the other way. In Kubernetes,
+# `podSelector: {}` selects ALL Pods in the namespace, so for the EGRESS half
+# it is strictly more restrictive than the pinned selector -- it denies more.
+# It is refused anyway, for three reasons, in order of weight:
+#
+#   a. IT WOULD MAKE THIS ASSERTION VACUOUS. An empty selector matches this
+#      workload for exactly the same reason it matches everything, so it
+#      satisfies a binding test no matter WHAT the Deployment's labels say.
+#      Accept it and the drift in direction (1) -- the whole reason this code
+#      exists -- becomes undetectable again by simply emptying the selector.
+#      A guard that an input can switch off is not a guard;
+#   b. THE OTHER HALF OF THIS POLICY IS AN ALLOW-LIST. The same object carries
+#      `policyTypes: [Ingress, Egress]` and one ingress rule admitting exactly
+#      one peer. Widening the selector to the namespace applies THAT rule to
+#      every co-tenant Pod as well -- a real change to workloads nobody
+#      reviewed, in a namespace this chart does not own;
+#   c. FAIL-CLOSED DOCTRINE (AGENTS.md requirement 4). The narrow selector is
+#      the reviewed state. A widening that happens to be safe today for one of
+#      the two policy types is still a change nobody reviewed, and this gate's
+#      job is to make a human read it.
+#
+# `matchExpressions` is refused on the same principle rather than the same
+# reasoning: this module does not implement set-based selector semantics, so a
+# render using them is REFUSED with the reason named, never evaluated by
+# guesswork. That is the rule every other refusal in this file follows.
+#
+# DELIBERATELY OUT OF SCOPE, so a later reader does not mistake silence for
+# coverage: the Service's `spec.selector` is not checked against the workload
+# here. A Service pointing at the wrong Pods is an availability defect, not an
+# egress one, and this gate is the egress deny's. Adding it would be a
+# separate, deliberate widening of this file's remit.
+
+
+def _label_map(value: object, where: str) -> dict:
+    """A mapping of string labels to string values, or a refusal."""
+    if not isinstance(value, dict):
+        raise CensusError("%s is %s, not a mapping of labels" % (where, _describe(value)))
+    for key, entry in value.items():
+        if not isinstance(key, str) or not isinstance(entry, str):
+            raise CensusError("%s carries the entry %s: %s, which is not a string label; a "
+                              "label this gate cannot compare is a label it refuses"
+                              % (where, _describe(key), _describe(entry)))
+    return value
+
+
+def _mapping_at(obj: object, path: tuple[str, ...], where: str) -> dict:
+    node = obj
+    for key in path:
+        if not isinstance(node, dict) or key not in node:
+            raise CensusError("%s declares no %s" % (where, ".".join(path)))
+        node = node[key]
+    if not isinstance(node, dict):
+        raise CensusError("%s.%s is %s, not a mapping"
+                          % (where, ".".join(path), _describe(node)))
+    return node
+
+
+def _match_labels_of(selector: dict, where: str) -> dict:
+    """The ONE selector shape this gate evaluates; everything else is refused."""
+    if sorted(selector) != ["matchLabels"]:
+        raise CensusError(
+            "%s is %s; exactly one key -- matchLabels -- is accepted here. An EMPTY selector "
+            "selects every Pod in the namespace rather than this workload: it would satisfy a "
+            "binding test for the same reason it satisfies everything, which would make this "
+            "assertion vacuous on exactly the drift it exists to catch, and it applies this "
+            "policy's ingress allow-list to co-tenant Pods nobody reviewed. matchExpressions "
+            "is set-based selection this module does not evaluate, so it is refused rather "
+            "than guessed at." % (where, _describe(selector)))
+    labels = _label_map(selector["matchLabels"], "%s.matchLabels" % where)
+    if not labels:
+        raise CensusError(
+            "%s.matchLabels is empty, which selects every Pod in the namespace exactly as an "
+            "empty selector does; an always-true selector is not a binding." % where)
+    return labels
+
+
+def _unsatisfied(selector: dict, labels: dict) -> list:
+    """Kubernetes matchLabels semantics: every pair must be present and equal."""
+    return sorted("%s=%s" % (key, value) for key, value in selector.items()
+                  if labels.get(key) != value)
+
+
+def bind_policy_to_workload(objects: list[dict], policy: dict) -> dict:
+    """Prove the policy SELECTS the workload it is written to govern.
+
+    Read the block comment above for why each refusal is where it is. Both
+    inputs come from the render; nothing here is read out of the chart's own
+    templates, so this assertion cannot be satisfied by a template that simply
+    renders whatever it likes.
+    """
+    workloads = [o for o in objects if o.get("kind") == WORKLOAD_KIND]
+    if len(workloads) != 1:
+        raise CensusError(
+            "the complete render carries %d %s objects; exactly one is required. A policy "
+            "binds to A workload, and this gate has to know which one -- two workloads "
+            "sharing the canonical labels is how a selector proves nothing while looking "
+            "exact." % (len(workloads), WORKLOAD_KIND))
+    workload = workloads[0]
+
+    policy_namespace = _mapping_at(policy, ("metadata",), "the policy").get("namespace")
+    workload_namespace = _mapping_at(workload, ("metadata",), "the workload").get("namespace")
+    if workload_namespace != policy_namespace:
+        raise CensusError(
+            "the workload renders into namespace %s while the policy renders into %s. A "
+            "NetworkPolicy governs Pods in its OWN namespace only, so a workload that moves "
+            "away from its policy keeps every other gate green and loses its deny entirely."
+            % (_describe(workload_namespace), _describe(policy_namespace)))
+
+    pod_labels = _label_map(
+        _mapping_at(workload, ("spec", "template", "metadata", "labels"), "the workload"),
+        "the workload's Pod template labels")
+    if not pod_labels:
+        raise CensusError(
+            "the workload's Pod template carries no labels at all, so no selector can bind "
+            "its Pods and the deny has nothing to attach to.")
+
+    workload_selector = _match_labels_of(
+        _mapping_at(workload, ("spec", "selector"), "the workload"),
+        "the workload's own selector")
+    detached = _unsatisfied(workload_selector, pod_labels)
+    if detached:
+        raise CensusError(
+            "the workload's own selector requires %s, which its Pod template does not carry. "
+            "Kubernetes REFUSES a Deployment whose selector does not match its template, so "
+            "this render creates no Pods at all -- and a deny proven over zero Pods is not a "
+            "proof." % _describe(detached))
+
+    pod_selector = _match_labels_of(
+        _mapping_at(policy, ("spec", "podSelector"), "the policy"),
+        "the policy's podSelector")
+    unnamed = [key for key in WORKLOAD_IDENTITY_KEYS if key not in pod_selector]
+    if unnamed:
+        raise CensusError(
+            "the policy's podSelector omits %s. Both identity labels are required: the name "
+            "alone is carried by every release of this chart in the namespace, so a selector "
+            "without the instance still matches THIS workload while also governing Pods "
+            "nobody reviewed." % _describe(unnamed))
+
+    unsatisfied = _unsatisfied(pod_selector, pod_labels)
+    if unsatisfied:
+        raise CensusError(
+            "the policy's podSelector requires %s, which this render's Pod template labels "
+            "%s do not satisfy, so the policy selects ZERO of this workload's Pods. A "
+            "NetworkPolicy that selects no Pod governs nothing: those Pods run with FULL "
+            "outbound access while the manifest still reads default deny, and every pin over "
+            "the policy's own text stays green because that text is untouched."
+            % (_describe(unsatisfied), _describe(dict(sorted(pod_labels.items())))))
+
+    return {"workload": workload, "pod_labels": pod_labels, "selector": pod_selector}
+
+
 def census(text: str, facts: ChartFacts, origin: str = "<render>") -> dict:
     """Assert the whole render carries exactly one, exactly pinned, policy."""
     objects = flatten(parse_documents(text, origin))
@@ -1765,7 +1987,12 @@ def census(text: str, facts: ChartFacts, origin: str = "<render>") -> dict:
         raise CensusError("the policy object does not equal the pinned expectation.\n"
                           "expected:\n%s\n\nrendered:\n%s" % (_describe(expected), _describe(actual)))
 
-    return {"objects": len(objects), "policy": policy}
+    # Everything above proves what the policy SAYS, and every one of those
+    # assertions is satisfied by a policy that governs nothing. This last one
+    # proves what it POINTS AT.
+    binding = bind_policy_to_workload(objects, policy)
+
+    return {"objects": len(objects), "policy": policy, "workload": binding["workload"]}
 
 
 # --- Hostile mutations ------------------------------------------------------
@@ -2312,6 +2539,71 @@ def mutations(facts: ChartFacts) -> list[tuple[str, object]]:
     # pin, so a mutation of its metadata reaches the installability check
     # rather than tripping the pinned-policy assertions first.
     account_anchor = ["kind: ServiceAccount", "metadata:", "  name: " + name]
+    # The workload's three binding surfaces. Each anchor is unique in the
+    # render by INDENTATION as much as by text: the Deployment's own selector
+    # sits under `  selector:` at two spaces (the Service's selector carries no
+    # matchLabels at all), and the Pod template's labels are the render's only
+    # `labels:` key at six.
+    workload_head_anchor = [
+        "kind: " + WORKLOAD_KIND,
+        "metadata:",
+        "  name: " + name,
+        "  namespace: " + facts.namespace,
+    ]
+    workload_selector_anchor = [
+        "  selector:",
+        "    matchLabels:",
+        "      app.kubernetes.io/name: " + name,
+        "      app.kubernetes.io/instance: " + facts.release,
+    ]
+    pod_template_labels_anchor = [
+        "      labels:",
+        "        app.kubernetes.io/name: " + name,
+        "        app.kubernetes.io/instance: " + facts.release,
+    ]
+
+    def retarget_the_workload(text: str) -> str:
+        """Move the Pod-template labels AND the Deployment's own selector.
+
+        THE HOLE THIS GATE EXISTS FOR, as a render. The policy is untouched
+        and still perfect; the Deployment stays valid, because its selector
+        moves with its template; and the policy now matches zero Pods.
+        """
+        moved = _replace_block(
+            text, pod_template_labels_anchor,
+            [pod_template_labels_anchor[0],
+             "        app.kubernetes.io/name: " + name + "-web",
+             pod_template_labels_anchor[2]])
+        return _replace_block(
+            moved, workload_selector_anchor,
+            workload_selector_anchor[:2]
+            + ["      app.kubernetes.io/name: " + name + "-web",
+               workload_selector_anchor[3]])
+
+    def drop_the_workload_instance_label(text: str) -> str:
+        """The same hole through the OTHER key, and the subtler one.
+
+        The Pods keep the app name, so a selector checked only against the app
+        name would still look bound. The policy names the instance too, which
+        this render's Pods no longer carry, so the match is empty.
+        """
+        dropped = _replace_block(text, pod_template_labels_anchor,
+                                 pod_template_labels_anchor[:2])
+        return _replace_block(dropped, workload_selector_anchor,
+                              workload_selector_anchor[:3])
+
+    def detach_the_workload_selector(text: str) -> str:
+        """Move only `spec.selector`, leaving the Pod template alone.
+
+        Kubernetes refuses a Deployment whose selector does not match its own
+        template, so this render creates no Pods -- and a deny proven over
+        zero Pods is not a proof.
+        """
+        return _replace_block(
+            text, workload_selector_anchor,
+            workload_selector_anchor[:2]
+            + ["      app.kubernetes.io/name: " + name + "-web",
+               workload_selector_anchor[3]])
     shadow_source = "%s/templates/shadow-policy.yaml" % name
 
     def same_file(document: str):
@@ -2405,6 +2697,23 @@ def mutations(facts: ChartFacts) -> list[tuple[str, object]]:
         ("policy-duplicate-kind-key",
          lambda text: _replace_block(text, ["kind: NetworkPolicy"],
                                      ["kind: NetworkPolicy", "kind: ConfigMap"])),
+        # --- the policy left perfect, pointing at nothing -------------------
+        # Every one of these five leaves the NetworkPolicy document either
+        # byte-identical or still self-consistent, which is precisely why they
+        # belong here: they are the renders on which `helm lint`,
+        # `chart-ingress-pin.sh` and the text battery in `chart-egress-pin.sh`
+        # are all green, and only the binding assertion is red.
+        ("workload-pod-labels-retargeted", retarget_the_workload),
+        ("workload-pod-labels-drop-the-instance", drop_the_workload_instance_label),
+        ("workload-selector-detached-from-its-template", detach_the_workload_selector),
+        ("workload-moved-to-another-namespace",
+         lambda text: _replace_block(
+             text, workload_head_anchor,
+             workload_head_anchor[:3] + ["  namespace: " + facts.namespace + "-elsewhere"])),
+        # The over-selection direction: still a match for this workload, and
+        # additionally a match for every other release of this chart.
+        ("policy-selector-drops-the-instance-key",
+         lambda text: _replace_block(text, selector_anchor, selector_anchor[:3])),
     ]
 
 
@@ -2459,8 +2768,9 @@ def main(argv: list[str]) -> int:
         if args.mode == "census":
             result = census(_read_stdin_utf8(), facts)
             sys.stdout.write("chart-render-census: %d installable objects, exactly one "
-                             "NetworkPolicy, equal to the pinned expectation\n"
-                             % result["objects"])
+                             "NetworkPolicy, equal to the pinned expectation and selecting "
+                             "the one %s it governs\n"
+                             % (result["objects"], WORKLOAD_KIND))
             return 0
         sys.stdout.write(mutate(_read_stdin_utf8(), facts, args.name))
         return 0

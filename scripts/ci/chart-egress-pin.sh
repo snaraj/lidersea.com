@@ -57,9 +57,9 @@
 #      exit non-zero. A gate that cannot fail is not a gate, and a mutation
 #      that survives is a hole this file would otherwise hide;
 #   c. the COMPLETE installable render — every template, CRDs included —
-#      parses, carries the pinned document inventory, and holds exactly one
-#      NetworkPolicy equal to the pinned object, semantics compared, not
-#      lines;
+#      parses, carries the pinned document inventory, holds exactly one
+#      NetworkPolicy equal to the pinned object (semantics compared, not
+#      lines), AND that policy actually SELECTS the workload it governs;
 #   d. every hostile whole-render mutation is REFUSED by (c) — including the
 #      shadow policies that defeated the text pin;
 #   e. no values override re-opens egress — the deny is unconditional, not a
@@ -73,6 +73,24 @@
 # the peer identity from chart/values.yaml, the binding point, so this file
 # still names no provider. chart-ingress-pin.sh keeps sole ownership of the
 # ingress sub-tree's byte-for-byte canonical TEXT.
+#
+# AND ONE MORE CLAIM NONE OF THE ABOVE CAN MAKE. Assertions (a) through (d)
+# read the POLICY. A NetworkPolicy has two independent halves — a podSelector
+# saying which Pods it governs, and rules saying what those Pods may do — and
+# nothing that reads the rules can notice the selector drifting off the
+# workload. Retarget the Deployment's Pod-template labels and leave the policy
+# byte-identical: the policy matches ZERO Pods, a policy that selects no Pod
+# governs nothing, and those Pods run with full outbound access while helm
+# lint, chart-ingress-pin.sh, and every text and census assertion above stay
+# green — because the policy's text is untouched and perfect. It simply
+# applies to nothing. Assertion (c) therefore also binds the policy to the
+# rendered workload: same namespace, a Pod template whose labels the selector
+# really matches under Kubernetes' own matchLabels semantics, and a selector
+# that names this release rather than merely something. The rules, the four
+# drift directions they cover, and the deliberate refusal of an
+# all-namespace `podSelector: {}` are argued in
+# scripts/ci/chart_render_census.py under "Binding the policy to the workload
+# it governs".
 set -euo pipefail
 
 chart_dir="${CHART_DIR:-chart}"
@@ -86,7 +104,7 @@ census_module="${script_dir}/chart_render_census.py"
 # Bumped only when a mutation is ADDED. They exist so deleting one is a red
 # build rather than a silently smaller battery.
 minimum_mutations=19
-minimum_census_mutations=48
+minimum_census_mutations=53
 
 fail() {
   printf 'chart-egress-pin: %s\n' "$1" >&2
@@ -417,9 +435,15 @@ echo "chart-egress-pin: (b) ${mutation_count} hostile mutations of the real rend
 # recognised by their parsed, canonically spelled keys, so `kind :`, a quoted
 # `"kind"`, an escaped `"\x6bind"`, a flow-style document, and a policy tucked
 # inside a List wrapper are all just NetworkPolicies to this census.
+#
+# It also binds that policy to the workload: the render's one Deployment sits
+# in the policy's namespace, its Pod template carries labels the podSelector
+# really matches, and the selector names this release rather than the whole
+# namespace. Without this half, retargeting the Deployment's labels leaves a
+# perfect policy governing zero Pods, and every other check here stays green.
 render_all >"${work}/whole-render.yaml"
 census <"${work}/whole-render.yaml"
-echo "chart-egress-pin: (c) the complete render holds exactly one NetworkPolicy, equal to the pinned object"
+echo "chart-egress-pin: (c) the complete render holds exactly one NetworkPolicy, equal to the pinned object and selecting the workload it governs"
 
 # (d) Every hostile whole-render mutation is refused. Same discipline as (b):
 # the list comes from the census itself, each mutant is built from the REAL
@@ -488,4 +512,4 @@ echo "chart-egress-pin: (f) mutation battery is at or above its pinned floor of 
   fail "only ${census_mutation_count} census mutations ran; at least ${minimum_census_mutations} are required. Mutations are added, never removed."
 echo "chart-egress-pin: (g) census battery is at or above its pinned floor of ${minimum_census_mutations}"
 
-echo "chart-egress-pin: the rendered policy makes every outbound connection unrepresentable, and it is the only policy the chart installs"
+echo "chart-egress-pin: the rendered policy makes every outbound connection unrepresentable, it is the only policy the chart installs, and it selects the workload it governs"

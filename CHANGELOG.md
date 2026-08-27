@@ -7,6 +7,363 @@ Git, image, and GitHub Release tags use the exact plain `vX.Y.Z` form.
 
 ## [Unreleased]
 
+## [0.1.37] - 2026-08-26
+
+### Security
+
+- The egress deny is now bound to the workload it governs, closing the half of
+  the defect 0.1.36 explicitly did not close. A NetworkPolicy has two
+  independent halves: `spec.podSelector` says WHICH Pods it governs, and
+  `policyTypes` plus the rule lists say what those Pods may do. Every
+  assertion 0.1.36 added reads the second half, so every one of them is
+  satisfied by a policy that governs NOTHING. Retarget only the Deployment's
+  Pod-template labels — leaving `chart/templates/network-policy.yaml`
+  byte-identical — and Kubernetes matches the policy against ZERO Pods. A
+  policy that selects no Pod governs nothing, so the running Pods have full
+  outbound access, while `helm lint`, `scripts/ci/chart-ingress-pin.sh`, the
+  four-way release lock, the provider-neutrality pin AND 0.1.36's own text pin
+  and whole-render census all stay green — because the policy's text is
+  untouched and perfect. It simply applies to nothing.
+- `scripts/ci/chart_render_census.py` therefore gained
+  `bind_policy_to_workload`, run as part of the same whole-render census in
+  `scripts/ci/chart-egress-pin.sh` assertion (c). It proves the render's one
+  Deployment sits in the policy's namespace; that its Pod template carries
+  labels the `podSelector` actually matches under Kubernetes' own
+  `matchLabels` subset semantics; that the Deployment's own selector matches
+  its own template, since Kubernetes refuses a Deployment where it does not
+  and a deny proven over zero Pods is not a proof; and that the selector names
+  both `app.kubernetes.io/name` and `app.kubernetes.io/instance`, because the
+  name alone still matches this workload while additionally governing every
+  other release of this chart in the namespace.
+- An all-namespace `podSelector: {}` is REFUSED, deliberately and not by
+  oversight. For the egress half it is strictly more restrictive — it denies
+  more — but it matches this workload for the same reason it matches
+  everything, so accepting it would make the binding assertion vacuous on
+  exactly the drift it exists to catch; and the same object's ingress
+  allow-list would then apply to co-tenant Pods nobody reviewed.
+  `matchExpressions` is refused on the module's standing principle: set-based
+  selection is not evaluated here, so it is refused with the reason named
+  rather than guessed at.
+- The whole-render mutation battery grew from 48 to 53, and the battery was
+  actually run rather than the floor merely raised: five new mutants rewrite
+  the REAL Helm render so the NetworkPolicy document comes out byte-identical
+  (or, for the over-selection case, still self-consistent) — Pod-template
+  labels retargeted, the instance label dropped from the Pods, the Deployment
+  detached from its own template, the workload moved to another namespace, and
+  the policy's selector stripped of its instance key. All 53 are refused;
+  `chart-egress-pin.sh` assertion (g) pins the floor and
+  `test_chart_render_census.py` pins the floor against the battery's real
+  size, so neither can drift. The unit suite grew from 145 to 159 tests.
+
+### Added
+
+- A gate proving every subcommand `scripts/ci/release_contract.py` registers
+  has a caller (`scripts/ci/test_subcommand_callers.py`). The module registers
+  its subcommands with argparse while workflows invoke them by name as opaque
+  strings, and nothing connected the two sides: a subcommand could go dead
+  while still reading live, or be deleted while a LINE-WRAPPED invocation
+  still called it. The gate reads the names from the parser itself — never a
+  hand-maintained list, which would drift exactly as the workflows already do
+  — and searches the bare token across workflows, scripts, docs and tests, so
+  wrapping cannot hide a caller. It reports each caller's TIER: a doc-only
+  caller is a real caller (`settings-receipt` is an operator escape hatch
+  invoked from `docs/release-governance.md`), while test-only callers and zero
+  callers both fail. Both rules are driven by hostile fixtures as well as by
+  the live repository: at this head nothing is dead and the allowlist is
+  empty, so every live-data assertion would be satisfied just as well by a
+  classifier that refused nothing at all. Measured at this head: 33 registered
+  subcommands, none dead, none test-only.
+- A workflow-integrity gate (`scripts/ci/workflow_integrity.py` and
+  `scripts/ci/test_workflow_integrity.py`) refusing three specific constructs
+  in `.github/workflows` that every other gate here is blind to:
+  `continue-on-error: true` on a job or step of a required check, which makes
+  a failed gate report success and satisfies branch protection with a red
+  build; a step-level `env:` that captures a pin — either shadowing a
+  workflow-level or job-level binding, or rebinding a tool version or checksum
+  that `scripts/ci/install-tools.sh` pins — so the step runs a different value
+  while the pin still reads correct; and a custom `shell:` on a gate step,
+  which changes failure semantics and can drop `pipefail`. The gate-job set is
+  derived from `release_contract.py`'s own `REQUIRED_STATUS_CHECKS` and
+  `PR_GATE_MAIN_JOBS`, and the protected variables are read out of
+  `install-tools.sh`, so both track the repository instead of a copy of it.
+  It reads the block-YAML subset workflows use with a stdlib reader
+  (requirements 1 and 9 leave no PyYAML) that consumes `run:` bodies opaquely
+  — a shell script containing the text `shell:` is not workflow structure —
+  and refuses tabs, duplicate keys and ragged indentation rather than
+  guessing. Its entrypoint carries a positive control, because "the repository
+  is green" is an assertion an audit that returned nothing would satisfy for
+  free: the same entrypoint is pointed at a scratch directory holding one
+  violating workflow and must report it. It pins NO step inventory, and both
+  files argue at length why one must never be added.
+- A commit-identity gate (`scripts/ci/commit_identity.py` and
+  `scripts/ci/test_commit_identity.py`) closing a surface the enforced secret
+  scan structurally could not reach. `gitleaks git` and `gitleaks dir` both
+  read BLOB CONTENT; commit author/committer identities and commit message
+  bodies are neither, so the two rules requirement 3 states — the owner
+  noreply identity in BOTH fields, and no co-author trailer ever — were prose
+  with zero mechanical coverage. An agent that forgot to pin
+  `GIT_AUTHOR_EMAIL` would have pushed a foreign address past every green
+  check, and it would have become permanently public on merge. The gate walks
+  the range a pull request PROPOSES and refuses both, with two stated
+  non-goals: it is not a history audit, because history is append-only and a
+  gate that could only refuse an unfixable past would need a permanently
+  growing exemption list; and it does not run on `main` pushes, because the
+  owner's merge is stamped with GitHub's own web-flow committer — 59 of
+  `main`'s 86 commits would be refused by a history-wide run — and refusing
+  that would hold main CI red forever while proving nothing an agent could act
+  on. No failure message
+  echoes the address it refused, because those messages land in public CI
+  logs.
+- Five historical exceptions recorded in the allowlist rather than erased: the
+  root commit, whose author and committer predate the noreply rule, and four
+  onboarding-era squashes carrying five co-author trailers between them. All
+  are ancestors of `main`, permanently public, and unrepairable without
+  rewriting history from the root, which requirement 2 forbids. They are
+  keyed by SHA and never by address — an allowlist keyed by address would copy
+  a third party's contact detail into a tracked file, which is exactly what
+  requirement 11 exists to prevent — and the suite proves each names a real
+  commit that really does break a rule, so an exemption that stopped exempting
+  anything would be reported instead of kept.
+- A behavioural pin on the gate step's own `if:` guard
+  (`TheGateStepRunsOnPullRequestEventsOnly` in
+  `scripts/ci/test_commit_identity.py`). The SUITE half of the main-push
+  boundary is held by `test_a_push_to_main_proposes_no_range`; the WORKFLOW
+  half was held by nothing, so a future edit could delete
+  `if: github.event_name == 'pull_request'` from the step and discover the
+  consequence only when the owner's next merge turned main red. Both directions
+  were measured: with the guard gone, a main push supplies no pull-request
+  payload, so the step's range variables expand empty and the module exits 1 on
+  a range it cannot read; hand it a real push range instead and it still exits
+  1, on GitHub's web-flow committer. The pin selects the step BY THE MODULE IT
+  INVOKES and matches the condition by pattern, so steps may be added, renamed,
+  reordered or removed and both the bare and `${{ … }}` spellings pass — it is
+  behaviour, not a step inventory, and `pull_request_target` does not satisfy
+  it. Its failure message states why the guard exists rather than inviting an
+  agent to re-record a pin, and it carries no allowlist line on purpose: the
+  lift mechanism exists so a gate can stop refusing a construct that turned out
+  to be safe, and an entry that switches this guard off is not that. Killed by
+  four mutants — guard deleted, guard swapped for a different event test, the
+  step reader collapsed to one blob, and the condition pattern widened.
+- `scripts/ci/ci_gate_allowlist.toml`, the shared lift mechanism for all three
+  gates. Every refusal above is liftable with ONE line carrying a written
+  reason, and every failure message names the file and prints the exact line
+  to add. An entry with a blank reason fails closed, and a stale entry — one
+  whose case has resolved — fails until deleted, so every entry still describes
+  a live case. It deliberately does not bound how MANY entries the table holds;
+  the Fixed entry below states that trade in full. Seeded EMPTY: at
+  this head no subcommand is dead or test-only, and no workflow declares
+  `continue-on-error`, a custom `shell:`, or a pin-capturing step `env:`.
+  The allowlist is excluded from the subcommand-caller search set for the same
+  reason `release_contract.py` is: an exemption NAMES the subcommand it
+  exempts, so counting it as a caller would deadlock the lift — the added line
+  would hand its own subcommand a script-tier caller, the stale-entry rule
+  would demand the line be deleted, and deleting it would trip the zero-caller
+  rule again. The full round trip is a test, not an assumption, and so is the
+  exclusion each rule depends on.
+
+### Fixed
+
+- The `security` job, which this pull request had held RED at two consecutive
+  heads while every local run reported green — a gap that is the point of the
+  entry, not a footnote to it. `scripts/ci/test_commit_identity.py` resolved
+  `HEAD`, and under a `pull_request` event `actions/checkout` checks out
+  `refs/pull/N/merge`: GitHub's synthetic merge of the branch into its base,
+  whose committer is GitHub's own web-flow identity. Three assertions therefore
+  read that merge commit instead of the branch tip, and this pull request's own
+  new commit-identity gate refused it — correctly. Locally `HEAD` *is* the tip,
+  so the suite passed on every developer machine. Only the suite was affected:
+  the workflow's gate step passes the exact base and head SHAs from the event
+  payload and resolves no symbolic name at all.
+- The repair does not teach the suite to walk back from a merge ref; it stops
+  the suite asking `HEAD` at all. `proposed_range()` reads
+  `pull_request.base.sha` and `pull_request.head.sha` from the event payload —
+  the SAME two values the workflow's gate step passes to `commit_identity.py` —
+  so the suite and the gate judge one identical range and neither depends on
+  what the checkout happens to have put at `HEAD`. Nothing regresses if the
+  checkout's depth or ref changes later. It fails CLOSED: under a pull request
+  an unreadable or incomplete payload raises rather than falling back to
+  `HEAD`, because that fall-back is precisely the silent, green, wrong
+  behaviour being removed. The module's CLI already took the same position —
+  `--base` and `--head` are `required=True` with no default, so the range can
+  never be reached by omission.
+- Two alternatives were rejected on the record. Teaching `violations()` to ADMIT
+  a two-parent commit carrying GitHub's committer would punch a hole in the one
+  rule the module exists to enforce, and
+  `test_githubs_own_merge_identity_is_not_sanctioned_either` asserts the
+  opposite: that identity is out of SCOPE, never sanctioned. The bug was in
+  WHICH COMMITS GET READ, not in which identities are allowed, and treating it
+  as an identity-allowlist problem would have weakened the gate while appearing
+  to fix it. Allowlisting the merge commit by SHA would be stale on the next
+  push, since GitHub rebuilds the ref every time.
+- A SECOND defect, found while making the range explicit and worse than the
+  first: the suite's workflow step carries no `if:` guard, so it also runs on
+  pushes to `main` — where `HEAD` is the owner's squash merge under GitHub's
+  web-flow identity. A failure count is meaningless without the CHECKOUT SHAPE
+  it was measured under, so both shapes are stated rather than one bare figure.
+  Under the shape `actions/checkout` with `fetch-depth: 0` actually produces on
+  a push to `main` — the branch fetched to `refs/remotes/origin/main` at the
+  pushed SHA, so `origin/main` equals `HEAD` and the merge-base range collapses
+  to empty — the pre-repair suite fails **2 of 37**, and two further assertions
+  pass VACUOUSLY over that empty range. Under a checkout whose `origin/main`
+  LAGS `HEAD` the range is non-empty, those two are genuinely reached, and it
+  fails **3 of 37** — a different failing SET, not merely one more. An earlier
+  draft of this entry gave the bare figure 3 of 37, which is the second shape
+  only. The same counts hold on `workflow_dispatch`, a THIRD unguarded event
+  this entry did not previously name: `pr-gate.yml` declares that trigger too,
+  and the pre-repair suite is red under it in both shapes. Every combination is
+  red, so the defect is confirmed either way and only the figure moves — any of
+  them would have held main CI permanently red after this pull request
+  merged and blocked the release chain, over a commit no pull request can
+  repair. The repair keys on "not `pull_request`" rather than on "push", which
+  is why it closes the `workflow_dispatch` path in the same stroke. The gate
+  STEP was already guarded `if: github.event_name ==
+  'pull_request'` for exactly this reason; the suite now honours the same
+  boundary, returning no range on any non-pull-request event and skipping the
+  real-range assertions with a stated reason rather than auditing a range the
+  gate itself declines to audit. A structural `HEAD^2` resolution would NOT
+  have fixed this — on a push `HEAD` has one parent, so it resolves to `HEAD`
+  and fails identically.
+- Proven in a throwaway clone against a hand-built merge ref and a
+  GitHub-shaped event payload, in five directions: green on the CI shape (merge
+  ref checked out, payload supplying the range); green on a developer checkout
+  with no event variables; green with stated skips on a simulated push to
+  `main`; RED — naming the offending commit and never the merge ref — when the
+  payload's head side really carries a refused commit; and RED on an unreadable
+  payload, which is the fail-closed direction.
+- Three surviving divergence mutants in `scripts/ci/workflow_integrity.py`.
+  `audit()` and `refusable_entries()` are independent loops over
+  `_workflow_paths()` that each recompute the gate-job set, and every existing
+  fixture pointed the reader at a directory holding ONE file, so reading only
+  the first path survived in either half, as did a WIDER gate-job set in one
+  half than the other. That last one is a fail-open on gate SCOPE. A
+  three-file fixture — one file per rule, plus a non-gate job declaring the
+  same construct a gate job is refused for — kills all three: the two halves
+  must name exactly the same entries, and neither may name the non-gate job.
+  The non-gate job is what makes it a scope pin rather than a consistency pin,
+  since equality alone survives a widening applied to both halves.
+- The untested empty-directory guard in `_workflow_paths()`. `if False`
+  survived the whole suite, and both entrypoints are fail-open without it: an
+  `audit()` over no files reports no finding, and a `refusable_entries()` over
+  no files makes every shipped allowlist entry read as stale. Pinned now in
+  both directions, including the positive twin that stops a mutant raising
+  unconditionally.
+- A vacuous test, replaced rather than kept. The old
+  `test_the_shipped_allowlist_file_is_restored_afterwards` claimed to prove
+  that the fixture restores the tracked allowlist, and did not: deleting the
+  restore left the suite fully green while stripping the entire
+  `[commit_identity]` table and all five recorded historical exceptions out of
+  the working tree. Two causes compounded — its "before" snapshot was read
+  after an earlier test in the class had already done the damage, and
+  rewriting an already-damaged file reproduces it byte for byte. A baseline
+  captured at import, asserted in `tearDown`, replaces it in both suites; that
+  is strictly stronger, covering every test in each class against pristine
+  bytes rather than one test against possibly-damaged ones. The shipped
+  `finally` was correct throughout — the test was what could not fail.
+- A pin for the fixture that inserts a blank-reason allowlist entry under its
+  OWN table header rather than appending it. Appending would put the key in
+  whichever table is LAST, which is `[commit_identity]`, so the two spellings
+  are indistinguishable from inside either suite while the target table is
+  empty. The helper is now driven against a document whose target table is not
+  last, which is the only arrangement that tells them apart.
+- `AGENTS.md`'s SSH-signing instruction, which was broken for any agent with
+  more than one ed25519 key loaded. It documented
+  `key::$(ssh-add -L | grep ssh-ed25519)`; `grep` matches every loaded
+  ed25519 key, so with two keys the value expands to both concatenated and
+  Git is handed a malformed signing key. It worked only while a single key
+  happened to be loaded. This is portable doctrine, not a local quirk — a
+  stranger cloning this repository with two ed25519 keys hits it too. The
+  instruction now selects the account's registered signing key explicitly by
+  exact type-and-blob match and fails closed when no loaded key matches.
+- `AGENTS.md` now states the verification requirement that makes the above
+  checkable: the `gpg.ssh.allowedSignersFile` principal must be a SPACE-FREE
+  token — the bare email — because the file is whitespace-delimited, so a
+  `Name <email>` principal splits and ssh reports `invalid key`. It also
+  records the false-pass trap this creates: a broken principal produces
+  `No principal matched.`, which is exactly what a genuinely bad signature
+  produces, so a negative control run against a broken file passes for the
+  wrong reason. Both controls must run against the same file, and a negative
+  control is evidence only once its positive twin prints `G`.
+- The workflow-integrity gate's own one-line lift, which did not work. Its
+  suite asserted that the `[workflow_integrity]` table of
+  `scripts/ci/ci_gate_allowlist.toml` equalled `{}`, so applying verbatim the
+  line a refusal prints silenced the refusal and immediately failed that
+  assertion — a lift instruction that lands in a public CI log and turns the
+  build red when an agent follows it. This is the same defect this release
+  found and fixed for `[subcommand_callers]`, one table over. The empty-table
+  pin is replaced by the stale-entry rule the sibling gate already used
+  (`stale_allowlist_failures`): every entry must still name a construct some
+  workflow really declares, so an exemption cannot outlive its case and cannot
+  reserve room for a violation nobody has proposed, while the documented lift
+  stays open. This is a TRADE, and an earlier draft of this entry claimed it as
+  a free win — it said the table "cannot accumulate exemptions", which is not
+  true. As a predicate over the table's contents the new rule is strictly
+  WEAKER than the one it replaces: an empty table satisfies "no stale entry"
+  vacuously, while the converse fails — a table carrying one live, correct
+  exemption is green under the new rule and was red under the old. What goes
+  with it is a tripwire. Under the empty-table pin the FIRST legitimate
+  exemption forced a reviewed edit to the suite in the same pull request;
+  under the stale-entry rule it lands as one silent line in a data file. The
+  gate design doctrine asks for exactly that — a strict check is worth keeping
+  only if widening it is cheap — so the trade is deliberate and, on balance,
+  right. It is recorded here rather than glossed, because the reviewer is owed
+  the honest version: the table CAN accumulate exemptions; what it cannot do is
+  keep one whose case has resolved. A FIFTH copy of the same retracted claim
+  shipped in `AGENTS.md`'s gate design doctrine — added by this pull request
+  itself and missed by the four-place sweep — where "the allowlist keeps
+  describing reality instead of accumulating exemptions" made the identical
+  move. It is corrected there too, and at more length than the others on
+  purpose: `AGENTS.md` is the canonical contract a cold agent operates from, so
+  a false capability claim in it outlives the pull request that introduced it.
+  A repository-wide re-sweep for a sixth copy — the wording rather than the
+  phrase, across every tracked file — found none. The one further occurrence
+  anywhere is inside `e97d7df`'s commit message, which append-only history
+  (requirement 2) makes unfixable and which `a1b1c86`'s message already
+  retracts on the record. `refusals()` is now allowlist-blind and both
+  `check_workflow` and `refusable_entries` read it, so the set a lift can
+  silence and the set a lift may name cannot drift apart. The round trip is a
+  test rather than a promise, in both directions.
+- A surviving mutant in `scripts/ci/commit_identity.py`: the reader's
+  five-field record guard had no test. A commit message containing a literal
+  `0x1f` byte produces six fields, and without the guard the message field is
+  truncated at the stray byte — dropping a `Co-authored-by:` trailer written
+  after it, a fail-open on the exact rule the gate enforces. The guard was
+  already correct and is unchanged; only the test was missing.
+- The stated rationale for a mutation-audit survivor in
+  `scripts/ci/workflow_integrity.py`. The `\s*` before the colon in `_KEY` and
+  the `.strip()` on the captured key were reported as two defences of one
+  property, both redundant. Only `.strip()` is: on a QUOTED key with a space
+  before the colon the fixed `"[^"]*"` alternative cannot absorb the space and
+  the bare alternative excludes a leading quote, so without `\s*` the reader
+  refuses the line instead of reading it. Fail-closed either way, but a real
+  behaviour change in an input class the suite did not cover between its
+  quoted-no-space and bare-with-space cases. The intersection is now asserted.
+- `AGENTS.md` credited "Successful main CI" with creating the release tag.
+  The tag is created by `release-after-main.yml`, the success-only
+  `workflow_run` that fires when main CI completes — not by main CI, and not
+  by the publisher, which only GETs the tag object to verify identity and
+  rebinds the REST ref in its terminal step. The CI map already described
+  this correctly; the release-flow prose did not.
+
+### Changed
+
+- `AGENTS.md` gains a "Gate design doctrine" section stating the two rules
+  every gate here now follows: pin behaviour rather than inventory, and ship
+  a documented lift mechanism so widening a gate is one line in one PR. It
+  states explicitly that this does not relax requirement 4 — an allowlist
+  reaches repository mechanics, never a fail-closed security behaviour — and
+  that adding an entry with a written reason is a normal part of active
+  development, not a security event.
+
+### Removed
+
+- The dead `release-record` subcommand of `scripts/ci/release_contract.py`. It
+  had no caller of any kind: of the 34 subcommands the module defines, it was
+  the only one with zero references outside the module itself — no workflow,
+  script, doc, or test named the literal string, in wrapped or unwrapped form.
+  `validate_release_record` is UNTOUCHED and stays live through
+  `classify_release_state`, which backs the `release-state` subcommand the
+  publisher and the integrity audit both invoke.
+
 ## [0.1.36] - 2026-08-26
 
 ### Security

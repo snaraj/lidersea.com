@@ -330,9 +330,14 @@ Releases: every artifact-classified PR advances numeric `VERSION`, chart
 `image.tag`, by exactly one patch from its current protected base; a
 documentation-only range (requirement 10's closed allowlist) advances nothing
 and skips release orchestration entirely. Every intermediate commit retains
-the current version or advances one patch. Successful main CI creates the annotated Git tag
-at the exact merged SHA and explicitly dispatches the protected-main publisher
-with that successful run's ID. The read-only authorization job verifies the
+the current version or advances one patch. `release-after-main.yml` — the
+success-only `workflow_run` that fires when main CI completes, NOT main CI
+itself — creates the ANNOTATED Git tag at the exact merged SHA and explicitly
+dispatches the protected-main publisher with that successful run's ID. Naming
+the right actor matters: the publisher never creates a tag. It GETs the tag
+object to verify identity and, in its terminal step, rebinds the REST ref, so
+an account of the release that has the publisher creating the tag describes a
+workflow this repository does not have. The read-only authorization job verifies the
 exact run/repository/workflow/event/conclusion/branch/SHA. Separate
 environment-gated settings jobs use the pinned App action and step-local
 Administration-read token before any side effect; no token crosses into the
@@ -721,12 +726,72 @@ committer, on every outgoing commit — is exactly:
   bodies, and issue bodies end with the acting agent's own signature —
   never a fixed lane — matching its agent label per the roster mapping in
   requirement 3.
-- Agent commits are SSH-signed per command with the owner-registered Mac
-  key, never via `git config`:
+- Agent commits are SSH-signed per command with the owner-registered
+  signing key, never via `git config`. **Select that key explicitly — never
+  by `grep ssh-ed25519`.** An agent commonly has more than one ed25519 key
+  loaded (a signing key and, say, a deploy or push key). `grep` matches
+  every one of them, so `key::$(ssh-add -L | grep ssh-ed25519)` expands to
+  several keys concatenated and Git is handed a malformed value. The
+  earlier form of this bullet used exactly that pipeline; it worked only
+  while a single key happened to be loaded, and it is not a local quirk —
+  a stranger cloning this repository with two ed25519 keys in their agent
+  hits the same failure.
 
-      git -c gpg.format=ssh \
-          -c user.signingkey="key::$(ssh-add -L | grep ssh-ed25519)" \
-          commit -S ...
+  Ask the forge which key is registered for signing, then take the ONE
+  loaded key whose type-and-blob matches it exactly:
+
+      # the account's registered signing key (title is the owner's label for it)
+      REGISTERED="$(gh api /users/<owner>/ssh_signing_keys \
+        --jq '.[] | select(.title=="<the signing key title>") | .key')"
+      # the single loaded key that equals it — exact match on "<type> <blob>",
+      # never a substring or a grep
+      SIGNING_KEY="$(ssh-add -L | awk -v want="${REGISTERED}" \
+        '{ if ($1" "$2 == want) { print $1" "$2; exit } }')"
+      test -n "${SIGNING_KEY}"   # fail closed rather than sign with the wrong key
+
+      git -c gpg.format=ssh -c user.signingkey="key::${SIGNING_KEY}" commit -S ...
+
+  Comparing `$1" "$2` drops the trailing comment field, which is free text
+  and matches nothing reliably. The `test -n` is the fail-closed step: with
+  no match, an unquoted empty expansion would otherwise sign with whatever
+  Git falls back to.
+
+- **Verifying a signature: the principal must be a SPACE-FREE token.**
+  `gpg.ssh.allowedSignersFile` is read as whitespace-delimited fields —
+  principal, key type, key blob — so a principal written as
+  `Samuel Naranjo <39077795+snaraj@users.noreply.github.com>` splits at the
+  first space: `Samuel` becomes the principal and `Naranjo` becomes the key
+  type. Use the BARE EMAIL as the principal:
+
+      printf '%s %s\n' '39077795+snaraj@users.noreply.github.com' "${SIGNING_KEY}" \
+        > "${TMP}/allowed_signers"
+      git -c gpg.ssh.allowedSignersFile="${TMP}/allowed_signers" \
+          log --format='%G?' -1 <sha>     # G = good
+
+  **The false-pass trap, which is why both controls are mandatory.** A
+  malformed principal makes ssh report `invalid key` and then
+  `No principal matched.` — and `No principal matched.` is ALSO what a
+  genuinely bad signature produces. So a negative control run against a
+  broken allowed-signers file passes for entirely the wrong reason, and
+  reports that verification works when nothing was verified at all. Always
+  run BOTH controls against the SAME file:
+
+  - **positive control** — a commit known to be signed by the registered
+    key must print `G`. If it does not, the file is broken, not the commit.
+  - **negative control** — a commit signed by any OTHER key must not print
+    `G`.
+
+  A negative control is only evidence once its positive twin is green.
+
+- **Both identity rules are now mechanical, on the range a PR proposes.**
+  `scripts/ci/commit_identity.py` runs in the `security` job and refuses any
+  commit in `base..head` whose author OR committer is not the identity above,
+  and any commit message carrying a co-author trailer. It exists because the
+  secret scan reads blobs and can see neither. Fix an offending commit rather
+  than lifting the rule whenever it has not been pushed yet — an address that
+  reaches published history cannot be withdrawn — and see "What the secret
+  scan cannot see" under Quality gates for the two things it deliberately does
+  not cover.
 
   The key was registered 2026-08-18; agent commits show `Verified` on
   GitHub. Main-only merge enforcement (requirement 2) is what keeps the
@@ -756,6 +821,68 @@ new exact patch, rerun every gate, open a replacement Draft PR, and obtain a
 fresh exact-head review. Never retarget or merge a dependency stack in a way
 that duplicates predecessor content.
 
+## Gate design doctrine — pin behaviour, not inventory
+
+This repository is under ACTIVE DEVELOPMENT. Two rules govern every gate,
+validator, gate test, and pin added here. They are acceptance criteria, not
+preferences.
+
+1. **Pin behaviour, not inventory.** A gate refuses a specific dangerous
+   CONSTRUCT. It never asserts that the complete set of something is exactly
+   X when normal evolution extends that set. "No required-check job may
+   swallow its own failure" is a behaviour and stays true forever; "job
+   `security` contains exactly these thirteen steps" is an inventory and is
+   false the next time somebody adds a scanner.
+
+   An inventory pin fails in a specific, expensive way: it breaks on
+   legitimate additions the author never anticipated, one per cycle, and each
+   individual refusal looks correct while the sequence is pure waste. It also
+   teaches the wrong reflex, because the cheapest way past it is to re-record
+   the inventory — so agents learn to update the pin instead of asking whether
+   the change was safe, and a pin that is reflexively rubber-stamped has
+   negative value.
+
+2. **Every gate ships with a documented lift mechanism.** If a strict check is
+   worth keeping, widening it must be CHEAP: one line in one PR, never a
+   release train, a refactor, or a new abstraction. The mechanism in this
+   repository is an allowlist file with a reason column —
+   `scripts/ci/ci_gate_allowlist.toml`. Every failure message names that file
+   and prints the exact line to add, so an agent that trips a gate is told
+   what to do rather than left to reverse-engineer it.
+
+   Adding an allowlist entry with a written reason is a NORMAL part of active
+   development, not a security event. An entry without a reason is not a
+   decision, it is a hole, and the gates fail closed on one. Entries are
+   scoped as tightly as the gate allows and deleted when the case that
+   justified them is gone — the suites refuse a stale entry, so no exemption
+   outlives the case that justified it.
+
+   That stale-entry rule is a TRADE, and this contract states it rather than
+   claiming a free win. It does NOT bound how many entries a table holds: as a
+   predicate over the table's contents it is strictly WEAKER than pinning the
+   table empty — an empty table satisfies "no stale entry" vacuously, while a
+   table carrying one live, correct exemption passes the stale rule and failed
+   the empty-table pin. What goes with it is a tripwire: under an empty-table
+   pin the FIRST legitimate exemption forced a reviewed edit to the gate's own
+   suite, and under the stale-entry rule it lands as one silent line in a data
+   file. The trade is made deliberately, because an empty-table pin is itself
+   an inventory pin on the very table this lift mechanism writes to — applying
+   verbatim the line a refusal prints silences the refusal and immediately
+   fails the assertion, so the instruction reaching a public CI log is one an
+   agent cannot follow. Rule 1 governs rule 2's own machinery.
+
+**This does not relax requirement 4.** Lifting an over-broad refusal about
+repository mechanics is not weakening a security behaviour. Nothing here
+permits making signing, verification, probes, TLS, header policy, the coverage
+floor, or a fail-closed sentinel toggleable; those stay non-negotiable, and no
+allowlist reaches them. The distinction is that requirement 4 protects what
+the SITE guarantees, while this section governs how precisely a CI check is
+allowed to describe the repository around it.
+
+Gates optimise for two readers: CI — fast, deterministic, no cluster contact —
+and other agents, for whom a failure message must state exactly what happened
+and exactly how to proceed.
+
 ## Quality gates — exact commands and patterns
 
 The full local gate, in order, before every push — docs-only diffs
@@ -771,6 +898,14 @@ included; it is the same battery CI enforces:
       --kube-version v1.36.0                    # chart changes
     ./scripts/ci/chart-ingress-pin.sh           # chart changes
     ./scripts/ci/chart-egress-pin.sh            # chart changes
+    # every scripts/ci contract suite CI discovers, each by its own exact glob.
+    # The status accumulator is deliberate: a loop ending in `|| break` exits 0
+    # because `break` succeeded, so it swallows the failure it just stopped on.
+    rc=0; for s in test_release_contract test_dependabot_contract \
+                   test_chart_render_census test_subcommand_callers \
+                   test_workflow_integrity test_commit_identity; do \
+      python3 -I -B -m unittest discover -s scripts/ci -p "$s.py" || rc=1; \
+    done; test "${rc}" -eq 0
     docker build .                              # Dockerfile/build-input changes
     gitleaks git --no-banner --redact --max-target-megabytes=2 .
     gitleaks dir --no-banner --redact .
@@ -807,6 +942,22 @@ included; it is the same battery CI enforces:
   (`tests/security/test_containerd_cri_health_contract_matrix.py`); Go
   suites here express the same pair as a behavior pin plus a named
   pending-contract test documented in its comment.
+- **What the secret scan cannot see.** `gitleaks git` and `gitleaks dir` both
+  read BLOB CONTENT. Commit author/committer identities and commit MESSAGE
+  bodies are neither, so neither scan has ever covered the surface requirement
+  3 governs — an unpinned `GIT_AUTHOR_EMAIL` or a co-author trailer passed
+  every gate in this repository and became permanently public on merge. That
+  surface is now held by `scripts/ci/commit_identity.py`, which walks the
+  range a pull request PROPOSES and refuses both. Its two stated non-goals are
+  deliberate: it is not a history audit, because history is append-only
+  (requirement 2) and a gate that could only refuse an unfixable past would
+  need a permanently growing exemption list; and it does not run on `main`
+  pushes, because the owner's merge is stamped with GitHub's own web-flow
+  committer and every commit in the range was already checked at the pull
+  request head where an agent could still fix it. Known historical exceptions
+  are recorded by SHA in `scripts/ci/ci_gate_allowlist.toml` — never by
+  address, which would copy personal data into the tree that requirement 11
+  keeps it out of.
 - **Secret scan, both modes.** `gitleaks git` (full history) AND
   `gitleaks dir` (working tree) run before every push — the same scans
   CI runs. This repository keeps no `.gitleaksignore` today; if a
@@ -827,16 +978,33 @@ included; it is the same battery CI enforces:
   dependency and repository-configuration gates; the filesystem scan pins
   `--include-dev-deps` and proves every direct frontend build dependency is in
   its report; the hostile whole-render NetworkPolicy census suite, discovered
-  under its own exact glob like every other contract suite in this job),
+  under its own exact glob like every other contract suite in this job; the
+  subcommand-caller gate, which reads every subcommand name from
+  `release_contract.py`'s own parser and proves each has a caller outside the
+  module, reporting whether that caller is a workflow, script, doc or test —
+  a doc-only caller is a real caller, a test-only caller is a smell, and zero
+  callers is dead code presenting a live interface; and the
+  workflow-integrity gate, which refuses three named constructs in
+  `.github/workflows` — `continue-on-error` on a required-check job or step,
+  a step-level `env:` that captures a pin, and a custom `shell:` on a gate
+  step — and deliberately pins NO step inventory, per the gate design
+  doctrine above; and the commit-identity gate
+  (`scripts/ci/commit_identity.py` plus its suite), which walks the range this
+  pull request proposes and refuses any commit whose author OR committer is
+  not the sanctioned noreply identity and any commit message carrying a
+  co-author trailer. All three lift through
+  `scripts/ci/ci_gate_allowlist.toml`),
   `dependency-review` (PRs only; fails on high severity), `application`
   (toolchain pinned AND verified — Node 24.19.0, npm 11.17.0,
   Go 1.26.6; frontend check/test/build; gofmt/vet/tests/race; the
   coverage floor), `chart` (the ingress peer-identity pin,
   `scripts/ci/chart-ingress-pin.sh`; the egress-deny pin,
   `scripts/ci/chart-egress-pin.sh`, which pins the rendered policy against
-  literals, refuses a battery of hostile rewrites of the real render, and
+  literals, refuses a battery of hostile rewrites of the real render,
   censuses the COMPLETE installable render so a second, additive
-  NetworkPolicy cannot allow what the first denies; helm lint + render at
+  NetworkPolicy cannot allow what the first denies, and BINDS that policy to
+  the rendered workload so a perfect-looking deny cannot govern zero Pods;
+  helm lint + render at
   `--kube-version v1.36.0`; the numeric VERSION ↔ numeric chart `version` ↔
   numeric `appVersion` ↔ plain-v chart `image.tag` four-way lock, plus a render
   assertion that the emitted reference still carries a full digest),
@@ -979,7 +1147,20 @@ or changed frontend surface, retrofitted by the rendering-lanes arc
   API server drops the empty `egress: []` from the stored spec — and
   `scripts/ci/chart-egress-pin.sh` fails closed on that entry's removal,
   on any rule appearing beside it, and on a second NetworkPolicy anywhere
-  in the complete installable render. Its
+  in the complete installable render. A NetworkPolicy has two independent
+  halves, and the paragraph above describes only one: `spec.podSelector`
+  says WHICH Pods a policy governs, and no assertion over the rules can
+  notice it drifting off the workload. Retarget the Deployment's Pod-template
+  labels and leave the policy byte-identical, and the policy matches ZERO
+  Pods — a policy that selects no Pod governs nothing, so those Pods run with
+  full outbound access while the manifest still reads default deny. The same
+  gate therefore also binds the policy to the render's one Deployment: same
+  namespace, Pod-template labels the selector really matches under Kubernetes'
+  `matchLabels` semantics, and a selector naming this release rather than the
+  whole namespace — an all-namespace `podSelector: {}` is REFUSED, because a
+  selector that matches everything would satisfy the binding test vacuously
+  and would additionally apply this policy's ingress allow-list to co-tenant
+  Pods nobody reviewed. Its
   safety properties are fixed in code and reachable from no configuration
   and no data file — https only, the per-platform host allowlist re-checked
   at call time, redirects REFUSED rather than followed, a hard body cap, a

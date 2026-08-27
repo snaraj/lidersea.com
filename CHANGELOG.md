@@ -128,8 +128,9 @@ Git, image, and GitHub Release tags use the exact plain `vX.Y.Z` form.
   gates. Every refusal above is liftable with ONE line carrying a written
   reason, and every failure message names the file and prints the exact line
   to add. An entry with a blank reason fails closed, and a stale entry — one
-  whose case has resolved — fails until deleted, so the allowlist keeps
-  describing reality rather than accumulating exemptions. Seeded EMPTY: at
+  whose case has resolved — fails until deleted, so every entry still describes
+  a live case. It deliberately does not bound how MANY entries the table holds;
+  the Fixed entry below states that trade in full. Seeded EMPTY: at
   this head no subcommand is dead or test-only, and no workflow declares
   `continue-on-error`, a custom `shell:`, or a pin-capturing step `env:`.
   The allowlist is excluded from the subcommand-caller search set for the same
@@ -142,6 +143,68 @@ Git, image, and GitHub Release tags use the exact plain `vX.Y.Z` form.
 
 ### Fixed
 
+- The `security` job, which this pull request had held RED at two consecutive
+  heads while every local run reported green — a gap that is the point of the
+  entry, not a footnote to it. `scripts/ci/test_commit_identity.py` resolved
+  `HEAD`, and under a `pull_request` event `actions/checkout` checks out
+  `refs/pull/N/merge`: GitHub's synthetic merge of the branch into its base,
+  whose committer is GitHub's own web-flow identity. Three assertions therefore
+  read that merge commit instead of the branch tip, and this pull request's own
+  new commit-identity gate refused it — correctly. Locally `HEAD` *is* the tip,
+  so the suite passed on every developer machine. Only the suite was affected:
+  the workflow's gate step passes the exact base and head SHAs from the event
+  payload and resolves no symbolic name at all.
+- The repair is a `proposed_head()` helper that resolves STRUCTURALLY — a
+  two-parent `HEAD` is a merge and its second parent is the side being
+  proposed — so one code path serves CI and a laptop alike and no branch runs
+  only in CI. Exactly two parents, never "two or more": a three-parent HEAD is
+  not a pull-request merge ref, has no single proposed side, and resolves to
+  `HEAD` so the gate judges it on its own identity. Two alternatives were
+  rejected on the record. Teaching `violations()` to ADMIT a two-parent commit
+  carrying GitHub's committer would punch a hole in the one rule the module
+  exists to enforce, and `test_githubs_own_merge_identity_is_not_sanctioned_either`
+  asserts the opposite: that identity is out of SCOPE, never sanctioned.
+  Allowlisting the merge commit by SHA would be stale on the next push, since
+  GitHub rebuilds the ref every time. Proven in a throwaway clone against a
+  hand-built merge ref in all three directions: green on the simulated merge
+  ref, green on a plain checkout, and RED — naming the offending commit and
+  never the merge ref — when the proposed side really does carry a refused
+  commit.
+- Three surviving divergence mutants in `scripts/ci/workflow_integrity.py`.
+  `audit()` and `refusable_entries()` are independent loops over
+  `_workflow_paths()` that each recompute the gate-job set, and every existing
+  fixture pointed the reader at a directory holding ONE file, so reading only
+  the first path survived in either half, as did a WIDER gate-job set in one
+  half than the other. That last one is a fail-open on gate SCOPE. A
+  three-file fixture — one file per rule, plus a non-gate job declaring the
+  same construct a gate job is refused for — kills all three: the two halves
+  must name exactly the same entries, and neither may name the non-gate job.
+  The non-gate job is what makes it a scope pin rather than a consistency pin,
+  since equality alone survives a widening applied to both halves.
+- The untested empty-directory guard in `_workflow_paths()`. `if False`
+  survived the whole suite, and both entrypoints are fail-open without it: an
+  `audit()` over no files reports no finding, and a `refusable_entries()` over
+  no files makes every shipped allowlist entry read as stale. Pinned now in
+  both directions, including the positive twin that stops a mutant raising
+  unconditionally.
+- A vacuous test, replaced rather than kept. The old
+  `test_the_shipped_allowlist_file_is_restored_afterwards` claimed to prove
+  that the fixture restores the tracked allowlist, and did not: deleting the
+  restore left the suite fully green while stripping the entire
+  `[commit_identity]` table and all five recorded historical exceptions out of
+  the working tree. Two causes compounded — its "before" snapshot was read
+  after an earlier test in the class had already done the damage, and
+  rewriting an already-damaged file reproduces it byte for byte. A baseline
+  captured at import, asserted in `tearDown`, replaces it in both suites; that
+  is strictly stronger, covering every test in each class against pristine
+  bytes rather than one test against possibly-damaged ones. The shipped
+  `finally` was correct throughout — the test was what could not fail.
+- A pin for the fixture that inserts a blank-reason allowlist entry under its
+  OWN table header rather than appending it. Appending would put the key in
+  whichever table is LAST, which is `[commit_identity]`, so the two spellings
+  are indistinguishable from inside either suite while the target table is
+  empty. The helper is now driven against a document whose target table is not
+  last, which is the only arrangement that tells them apart.
 - `AGENTS.md`'s SSH-signing instruction, which was broken for any agent with
   more than one ed25519 key loaded. It documented
   `key::$(ssh-add -L | grep ssh-ed25519)`; `grep` matches every loaded
@@ -169,9 +232,22 @@ Git, image, and GitHub Release tags use the exact plain `vX.Y.Z` form.
   found and fixed for `[subcommand_callers]`, one table over. The empty-table
   pin is replaced by the stale-entry rule the sibling gate already used
   (`stale_allowlist_failures`): every entry must still name a construct some
-  workflow really declares, so the table cannot accumulate exemptions and
-  cannot reserve room for violations nobody has proposed, while the documented
-  lift stays open. `refusals()` is now allowlist-blind and both
+  workflow really declares, so an exemption cannot outlive its case and cannot
+  reserve room for a violation nobody has proposed, while the documented lift
+  stays open. This is a TRADE, and an earlier draft of this entry claimed it as
+  a free win — it said the table "cannot accumulate exemptions", which is not
+  true. As a predicate over the table's contents the new rule is strictly
+  WEAKER than the one it replaces: an empty table satisfies "no stale entry"
+  vacuously, while the converse fails — a table carrying one live, correct
+  exemption is green under the new rule and was red under the old. What goes
+  with it is a tripwire. Under the empty-table pin the FIRST legitimate
+  exemption forced a reviewed edit to the suite in the same pull request;
+  under the stale-entry rule it lands as one silent line in a data file. The
+  gate design doctrine asks for exactly that — a strict check is worth keeping
+  only if widening it is cheap — so the trade is deliberate and, on balance,
+  right. It is recorded here rather than glossed, because the reviewer is owed
+  the honest version: the table CAN accumulate exemptions; what it cannot do is
+  keep one whose case has resolved. `refusals()` is now allowlist-blind and both
   `check_workflow` and `refusable_entries` read it, so the set a lift can
   silence and the set a lift may name cannot drift apart. The round trip is a
   test rather than a promise, in both directions.

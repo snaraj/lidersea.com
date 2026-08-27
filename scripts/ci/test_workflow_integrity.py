@@ -37,8 +37,10 @@ lived here until 0.1.37. Do not put it back.
 
 from __future__ import annotations
 
+import re
 import sys
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 
@@ -48,6 +50,44 @@ import workflow_integrity as WI  # noqa: E402
 
 GATE_JOBS = frozenset({"security", "application", "chart", "analyze"})
 PINNED = frozenset({"TRIVY_VERSION", "TRIVY_SHA256", "HELM_VERSION"})
+
+#: The tracked allowlist exactly as it sits on disk at import time, captured
+#: before any test can run. Two classes below rewrite that REAL file and put it
+#: back in `finally`. A per-test "before" snapshot cannot police that restore:
+#: it is read AFTER any earlier damage has already landed, and rewriting an
+#: already-damaged file reproduces it byte for byte, so the comparison holds on
+#: a corrupted tree. Deleting the restore in `audit_with` left this suite fully
+#: green while stripping the whole `[commit_identity]` table — five recorded
+#: historical exceptions — out of the working tree. `tearDown` compares against
+#: these bytes instead, on every test in both classes.
+ALLOWLIST_BASELINE = WI.ALLOWLIST_PATH.read_bytes()
+
+
+def entry_under_own_header(document: str, table: str, line: str) -> str:
+    """Insert `line` directly beneath `table`'s OWN header.
+
+    Never appended to the end of the document. This allowlist holds several
+    tables, and a key appended to the end joins whichever one happens to be
+    LAST — which is `[commit_identity]`, not this gate's table. The pin for
+    this helper drives it against a document whose target table is not last,
+    because that is the only arrangement in which the two spellings differ.
+    """
+    header = f"[{table}]\n"
+    if header not in document:
+        raise AssertionError(f"the table {table!r} is missing from the document")
+    return document.replace(header, header + line, 1)
+
+
+def entries_named(findings: list[str]) -> frozenset[str]:
+    """The allowlist key each finding tells an agent to add.
+
+    Read back out of the rendered LIFT block rather than recomputed, so this
+    compares what an agent would actually paste with what the stale-entry rule
+    would accept.
+    """
+    return frozenset(
+        re.findall(r'^\s*"([^"]+)" = ', "\n".join(findings), re.MULTILINE)
+    )
 
 
 def run(text: str, allowlist: dict[str, str] | None = None) -> list[str]:
@@ -349,38 +389,76 @@ class TheAllowlistIsTrustworthy(unittest.TestCase):
         """Every entry must still name a construct a workflow really declares.
 
         This REPLACED an `assertEqual(WI.load_allowlist(), {})` pin on the same
-        table, which was the defect it looks like a weakening of. That pin was
-        an inventory pin on the lift mechanism: applying verbatim the line a
-        refusal prints silenced the refusal and immediately failed the
-        assertion, so the gate's own advertised one-line lift — text that lands
-        in a public CI log — turned the build red when an agent followed it.
+        table. That pin was an inventory pin on the lift mechanism: applying
+        verbatim the line a refusal prints silenced the refusal and immediately
+        failed the assertion, so the gate's own advertised one-line lift — text
+        that lands in a public CI log — turned the build red when an agent
+        followed it.
 
         The rule here is the one the sibling gate in `test_subcommand_callers.py`
-        already used, and it is what keeps the table from accumulating
-        exemptions: an entry that names no live construct is refused, whether
+        already used: an entry that names no live construct is refused, whether
         that is because the construct was removed, because the key was
         mistyped, or because somebody reserved room for a violation nobody has
         proposed. `load_allowlist` holds the other half — an entry with no
         written reason fails closed.
+
+        Say what this is, exactly, because an earlier version of this docstring
+        overstated it. As a predicate over the table's CONTENTS the new rule is
+        strictly WEAKER than the empty-table pin: an empty table satisfies "no
+        stale entry" vacuously, and the converse fails, since a table holding
+        one live correct exemption passes here and failed there. The rule does
+        not bound how many entries the table holds, and the tripwire that made
+        the FIRST exemption require a reviewed edit to this suite is gone — it
+        is now one silent line in a data file. That is the trade the gate design
+        doctrine asks for, since a strict check earns its keep only when
+        widening it is cheap, and it is made on purpose. It is still a trade.
         """
         failures = WI.stale_allowlist_failures(
             WI.load_allowlist(), WI.refusable_entries()
         )
         self.assertEqual(failures, [], "\n\n".join(failures))
 
+    def tearDown(self) -> None:
+        """The blank-reason test rewrites a TRACKED file; prove it puts it back.
+
+        Against `ALLOWLIST_BASELINE` rather than a per-test snapshot, for the
+        reason written out at that constant: a snapshot read inside the test
+        cannot tell a working restore from a broken one.
+        """
+        self.assertEqual(
+            WI.ALLOWLIST_PATH.read_bytes(),
+            ALLOWLIST_BASELINE,
+            "a test in this class left the tracked allowlist modified on disk",
+        )
+
+    def test_the_blank_reason_fixture_lands_under_its_own_header(self) -> None:
+        """`entry_under_own_header` must not degrade into an append.
+
+        The fixture below inserts a blank-reason key to prove `load_allowlist`
+        fails closed. Appending it to the end of the file instead would put it
+        in whichever table is LAST, which is `[commit_identity]` — so an
+        append makes THIS gate's table gain nothing, and the two spellings are
+        told apart only by a document whose target table is not last. Driving
+        the helper against exactly that arrangement is what keeps the repair
+        from silently reverting.
+        """
+        document = '[first]\n"aaa" = "x"\n\n[second]\n"bbb" = "y"\n'
+        parsed = tomllib.loads(entry_under_own_header(document, "first", '"ccc" = ""\n'))
+        self.assertIn("ccc", parsed["first"], "the entry missed its own table")
+        self.assertNotIn("ccc", parsed["second"], "an appended entry joins the LAST table")
+
     def test_an_entry_without_a_reason_fails_closed(self) -> None:
         original = WI.ALLOWLIST_PATH.read_text(encoding="utf-8")
-        header = f"[{WI.ALLOWLIST_TABLE}]\n"
-        self.assertIn(header, original, "the table this rule reads is missing")
         try:
             # Inserted directly under its OWN header, never appended to the end
             # of the file: the allowlist holds several tables, and an appended
-            # key belongs to whichever table happens to be last.
+            # key belongs to whichever table happens to be last. The helper is
+            # pinned by the placement test above; the restore by `tearDown`.
             WI.ALLOWLIST_PATH.write_text(
-                original.replace(
-                    header,
-                    header + '"synthetic.yml::security::Scan::shell" = ""\n',
-                    1,
+                entry_under_own_header(
+                    original,
+                    WI.ALLOWLIST_TABLE,
+                    '"synthetic.yml::security::Scan::shell" = ""\n',
                 ),
                 encoding="utf-8",
             )
@@ -526,11 +604,198 @@ class TheOneLineLiftWorksEndToEnd(unittest.TestCase):
         )
         self.assertEqual(len(findings), 1, findings)
 
-    def test_the_shipped_allowlist_file_is_restored_afterwards(self) -> None:
-        """The helper above rewrites a TRACKED file; prove it puts it back."""
-        before = WI.ALLOWLIST_PATH.read_bytes()
-        self.audit_with(self.VIOLATION, f'"{self.ENTRY}" = "{self.REASON}"\n')
-        self.assertEqual(WI.ALLOWLIST_PATH.read_bytes(), before)
+    def tearDown(self) -> None:
+        """The helper above rewrites a TRACKED file; prove it puts it back.
+
+        This replaces a single test that read its own "before" immediately
+        before calling `audit_with`. That test was vacuous, and provably so:
+        delete the restore from `audit_with`'s `finally` and the whole suite
+        stayed green while `scripts/ci/ci_gate_allowlist.toml` lost its entire
+        `[commit_identity]` table and all five recorded historical exceptions.
+        Two reasons compounded — the per-test snapshot was taken after an
+        earlier test in the class had already done the damage, and rewriting an
+        already-damaged file is a fixed point, so the comparison held.
+
+        Comparing every test in this class against `ALLOWLIST_BASELINE`, read
+        once at import before any test could run, removes both. It is strictly
+        stronger than the test it replaces: four tests are covered instead of
+        one, and the reference bytes are pristine rather than possibly damaged.
+        """
+        self.assertEqual(
+            WI.ALLOWLIST_PATH.read_bytes(),
+            ALLOWLIST_BASELINE,
+            "a test in this class left the tracked allowlist modified on disk",
+        )
+
+
+ALPHA = """\
+name: Alpha
+on:
+  pull_request:
+permissions: {}
+jobs:
+  security:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Scan
+        shell: sh
+        run: ./scripts/ci/scan.sh
+"""
+
+BETA = """\
+name: Beta
+on:
+  pull_request:
+permissions: {}
+jobs:
+  chart:
+    continue-on-error: true
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Render
+        run: ./scripts/ci/render.sh
+"""
+
+GAMMA = """\
+name: Gamma
+on:
+  pull_request:
+permissions: {}
+jobs:
+  application:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Build
+        env:
+          TRIVY_VERSION: v0.0.1
+        run: ./scripts/ci/build.sh
+  scratch:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Unwatched
+        shell: sh
+        run: ./scripts/ci/unwatched.sh
+"""
+
+
+class BothHalvesReadEveryFileAndTheSameGateScope(unittest.TestCase):
+    """`audit()` and `refusable_entries()` must agree, across EVERY workflow.
+
+    The two are independent loops over `_workflow_paths()`, each recomputing
+    the gate-job set, and three mutants survived the rest of this suite because
+    every other fixture here points the reader at a directory holding exactly
+    ONE file, in a repository that declares no violation at all:
+
+      * `refusable_entries()` reading only the FIRST path — every entry from
+        every other workflow then reads as stale, so a valid exemption is
+        refused and the documented one-line lift fails on file number two.
+      * `audit()` reading only the FIRST path — every refusal in every other
+        workflow silently disappears. That is the gate going quiet.
+      * A WIDER gate-job set in ONE half than the other. This is the
+        fail-open on gate SCOPE: widen it inside `refusable_entries()` and an
+        exemption can be written for a construct `audit()` never refuses;
+        widen it inside `audit()` and a refusal fires that no lift can name,
+        because the line it prints reads stale the moment it is added.
+
+    THREE files are the minimum that distinguishes "every path" from "the
+    first path", and each contributes a DIFFERENT one of the three rules so a
+    rule-specific regression cannot hide behind the other two. The non-gate
+    `scratch` job is what pins the scope itself: an equality assertion alone
+    would survive a mutant that widened BOTH halves identically.
+
+    Nothing here touches the tracked allowlist. The shipped
+    `[workflow_integrity]` table is empty, so `audit()` refuses all three
+    fixtures with the real file in place.
+    """
+
+    FILES = {"alpha.yml": ALPHA, "beta.yml": BETA, "gamma.yml": GAMMA}
+    EXPECTED = frozenset(
+        {
+            "alpha.yml::security::Scan::shell",
+            "beta.yml::chart::continue-on-error",
+            "gamma.yml::application::Build::env::TRIVY_VERSION",
+        }
+    )
+    #: Same construct as alpha's, in a job no branch-protection rule reads.
+    NON_GATE = "gamma.yml::scratch::Unwatched::shell"
+
+    def setUp(self) -> None:
+        scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        for name, text in self.FILES.items():
+            (Path(scratch.name) / name).write_text(text, encoding="utf-8")
+        original = WI.WORKFLOW_DIR
+        self.addCleanup(setattr, WI, "WORKFLOW_DIR", original)
+        WI.WORKFLOW_DIR = Path(scratch.name)
+
+    def test_the_refusable_set_covers_every_file_not_just_the_first(self) -> None:
+        self.assertEqual(WI.refusable_entries(), self.EXPECTED)
+
+    def test_the_audit_covers_every_file_not_just_the_first(self) -> None:
+        findings = WI.audit()
+        self.assertEqual(len(findings), 3, "\n\n".join(findings))
+        self.assertEqual(entries_named(findings), self.EXPECTED)
+
+    def test_both_halves_name_exactly_the_same_entries(self) -> None:
+        """The seam itself: what a lift can silence and what it may name."""
+        self.assertEqual(entries_named(WI.audit()), WI.refusable_entries())
+
+    def test_a_construct_in_a_non_gate_job_is_refusable_by_neither(self) -> None:
+        """Scope, pinned in both halves at once.
+
+        `scratch` declares the identical custom shell alpha's gate job is
+        refused for. Widening the gate-job set in either half admits it, and
+        the equality assertion above would not notice a widening applied to
+        both.
+        """
+        self.assertNotIn(self.NON_GATE, WI.refusable_entries())
+        self.assertNotIn(self.NON_GATE, entries_named(WI.audit()))
+
+
+class AnEmptyWorkflowDirectoryIsARedGate(unittest.TestCase):
+    """`_workflow_paths()`'s guard, which live data can never reach.
+
+    The repository always has workflows, so no assertion exercised the branch
+    and `if False` survived it. Both entrypoints read the directory through
+    that guard, and both are fail-open without it: an `audit()` over no files
+    reports no finding, and a `refusable_entries()` over no files makes every
+    shipped allowlist entry read as stale.
+    """
+
+    def redirect(self, directory: Path, call):
+        original = WI.WORKFLOW_DIR
+        try:
+            WI.WORKFLOW_DIR = directory
+            return call()
+        finally:
+            WI.WORKFLOW_DIR = original
+
+    def test_the_path_reader_refuses_a_directory_with_no_workflows(self) -> None:
+        with tempfile.TemporaryDirectory() as scratch:
+            with self.assertRaises(WI.WorkflowIntegrityError) as caught:
+                self.redirect(Path(scratch), WI._workflow_paths)
+        self.assertIn("no workflows found", str(caught.exception))
+
+    def test_the_audit_refuses_rather_than_reporting_a_clean_tree(self) -> None:
+        with tempfile.TemporaryDirectory() as scratch:
+            with self.assertRaises(WI.WorkflowIntegrityError):
+                self.redirect(Path(scratch), WI.audit)
+
+    def test_the_refusable_set_refuses_rather_than_reporting_nothing(self) -> None:
+        with tempfile.TemporaryDirectory() as scratch:
+            with self.assertRaises(WI.WorkflowIntegrityError):
+                self.redirect(Path(scratch), WI.refusable_entries)
+
+    def test_a_directory_holding_a_workflow_is_accepted(self) -> None:
+        """The positive twin: the guard refuses EMPTY, not everything.
+
+        Without this, a mutant that raised unconditionally would satisfy all
+        three assertions above and take the whole gate down with it.
+        """
+        with tempfile.TemporaryDirectory() as scratch:
+            (Path(scratch) / "synthetic.yml").write_text(BASE, encoding="utf-8")
+            paths = self.redirect(Path(scratch), WI._workflow_paths)
+        self.assertEqual([path.name for path in paths], ["synthetic.yml"])
 
 
 class TheFailureMessageTellsAnAgentWhatToDo(unittest.TestCase):

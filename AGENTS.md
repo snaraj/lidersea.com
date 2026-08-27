@@ -316,9 +316,13 @@ Build and test, in this order (the same gate CI enforces):
    enforces the coverage floor (requirement 7) on the
    scaffolding-filtered profile.
 3. `helm lint chart && helm template smoke chart --kube-version v1.36.0`,
-   then `./scripts/ci/chart-ingress-pin.sh`, for chart changes (the chart
+   then `./scripts/ci/chart-ingress-pin.sh` AND
+   `./scripts/ci/chart-egress-pin.sh`, for chart changes (the chart
    requires the platform's Kubernetes target; plain `helm template`
-   defaults to older capabilities).
+   defaults to older capabilities). The two pins are not
+   interchangeable: the ingress pin scopes itself to `spec.ingress` by
+   construction and cannot see `policyTypes`, which is where the egress
+   deny actually lives.
 4. `docker build .` when the Dockerfile or build inputs change.
 
 Releases: every artifact-classified PR advances numeric `VERSION`, chart
@@ -766,6 +770,7 @@ included; it is the same battery CI enforces:
     helm lint chart && helm template smoke chart \
       --kube-version v1.36.0                    # chart changes
     ./scripts/ci/chart-ingress-pin.sh           # chart changes
+    ./scripts/ci/chart-egress-pin.sh            # chart changes
     docker build .                              # Dockerfile/build-input changes
     gitleaks git --no-banner --redact --max-target-megabytes=2 .
     gitleaks dir --no-banner --redact .
@@ -821,12 +826,17 @@ included; it is the same battery CI enforces:
   `gitleaks git` over full history, `gitleaks dir`, HIGH/CRITICAL source
   dependency and repository-configuration gates; the filesystem scan pins
   `--include-dev-deps` and proves every direct frontend build dependency is in
-  its report),
+  its report; the hostile whole-render NetworkPolicy census suite, discovered
+  under its own exact glob like every other contract suite in this job),
   `dependency-review` (PRs only; fails on high severity), `application`
   (toolchain pinned AND verified — Node 24.19.0, npm 11.17.0,
   Go 1.26.6; frontend check/test/build; gofmt/vet/tests/race; the
   coverage floor), `chart` (the ingress peer-identity pin,
-  `scripts/ci/chart-ingress-pin.sh`; helm lint + render at
+  `scripts/ci/chart-ingress-pin.sh`; the egress-deny pin,
+  `scripts/ci/chart-egress-pin.sh`, which pins the rendered policy against
+  literals, refuses a battery of hostile rewrites of the real render, and
+  censuses the COMPLETE installable render so a second, additive
+  NetworkPolicy cannot allow what the first denies; helm lint + render at
   `--kube-version v1.36.0`; the numeric VERSION ↔ numeric chart `version` ↔
   numeric `appVersion` ↔ plain-v chart `image.tag` four-way lock, plus a render
   assertion that the emitted reference still carries a full digest),
@@ -962,7 +972,14 @@ or changed frontend surface, retrofitted by the rendering-lanes arc
   (`internal/ratings/collect`) is the origin's only outbound capability and
   ships OFF: the zero-value configuration collects nothing, the shipped
   snapshot declares no feed URLs, and the cluster denies egress by default,
-  so enabling it is an explicit decision on three independent axes. Its
+  so enabling it is an explicit decision on three independent axes. That
+  third axis is now GATED rather than merely rendered: the deny is carried
+  by the `- Egress` entry in the chart policy's `policyTypes` alone —
+  `NetworkPolicySpec.Egress` is `json:"egress,omitempty"` upstream, so the
+  API server drops the empty `egress: []` from the stored spec — and
+  `scripts/ci/chart-egress-pin.sh` fails closed on that entry's removal,
+  on any rule appearing beside it, and on a second NetworkPolicy anywhere
+  in the complete installable render. Its
   safety properties are fixed in code and reachable from no configuration
   and no data file — https only, the per-platform host allowlist re-checked
   at call time, redirects REFUSED rather than followed, a hard body cap, a

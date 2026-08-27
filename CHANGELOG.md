@@ -7,6 +7,72 @@ Git, image, and GitHub Release tags use the exact plain `vX.Y.Z` form.
 
 ## [Unreleased]
 
+## [0.1.36] - 2026-08-26
+
+### Security
+
+- The chart's egress deny is now GATED, where before it was only rendered.
+  `chart/templates/network-policy.yaml` denies every outbound connection, and
+  0.1.35 named the line that carries that deny — but nothing failed if the
+  line went away. `scripts/ci/chart-ingress-pin.sh` scopes itself to
+  `spec.ingress` by construction, so it cannot see `policyTypes`, and neither
+  can `helm lint`, the render smoke, the four-way release lock, or the
+  provider-neutrality pin. Deleting `- Egress` from `policyTypes` while
+  leaving `egress: []` in place therefore passed every check in the
+  repository while restoring unrestricted outbound access, because
+  `NetworkPolicySpec.Egress` is `json:"egress,omitempty"` upstream and the API
+  server drops the empty list from the stored spec — leaving that one
+  `policyTypes` entry as the entire deny. New `scripts/ci/chart-egress-pin.sh`
+  closes that: it renders the chart and compares `podSelector`, `policyTypes`
+  and `egress` against pinned literals in full, refuses 19 hostile rewrites of
+  the real render (the inert-policy trap, allow-all v4 and v6, a DNS
+  exception, a ports-only rule, `- {}`, namespace and pod peers, a duplicate
+  key, a widened or emptied selector), and proves no shipped values override
+  can move the answer. Wired into the `chart` job of
+  `.github/workflows/pr-gate.yml`, so it runs on every pull request.
+- That text pin never ships alone, because on its own it would be a claim this
+  repository could not support. A raw-line pin recognises a document by a line
+  whose prefix is exactly `kind`; YAML permits `kind :`, a quoted key, and
+  escapes inside a double-quoted key, so a SECOND NetworkPolicy in the same
+  rendered file can be invisible to it while parsing, under a real YAML
+  reader, as an empty-selector `policyTypes: [Egress]` policy with one empty
+  egress rule. NetworkPolicy allowances are ADDITIVE, so that document hands
+  every Pod unrestricted egress while the first still reads "default deny".
+  New `scripts/ci/chart_render_census.py` answers it: a stdlib-only YAML
+  reader that resolves keys to their canonical spelling BEFORE matching,
+  flattens list wrappers, refuses every construct it does not fully understand
+  rather than guessing, checks that everything it counts is installable, and
+  requires the COMPLETE installable render — every template, CRDs included, no
+  `--show-only` blindfold — to hold exactly one NetworkPolicy equal to an
+  expectation the gate states itself. The egress pin drives 48 hostile
+  whole-render mutations through it and requires every one to be refused.
+- New `scripts/ci/test_chart_render_census.py` pins the reader itself, 145
+  tests, one hostile input per test, and pins the two mutation floors against
+  the batteries' real sizes so neither can be quietly shrunk. It runs in the
+  `security` job under its own exact glob, matching how that job already
+  discovers the release-contract and Dependabot suites — a suite that stops
+  being collected is then a visible edit rather than a silent gap.
+
+### Changed
+
+- `scripts/ci/install-tools.sh` now verifies `gitleaks` and `helm` the way
+  0.1.35 taught it to verify Trivy, closing the gap that release reported
+  rather than fixed. Both printed their versions without asserting them, which
+  is a log line and not a check: a checksum binds the ARCHIVE, never which
+  binary the extraction placed on PATH. `gitleaks version` prints a bare
+  `X.Y.Z`, so the pin is compared with its `v` stripped;
+  `helm version --short` appends the build's git hash, so the assertion reads
+  `helm version --template='{{.Version}}'`, which returns exactly `vX.Y.Z`,
+  while `--short` stays as the human-legible log line. No version or checksum
+  pin changed. All three tools now assert before they print.
+- `.gitignore` ignores `__pycache__/`. Every documented invocation of the
+  Python contract suites passes `-B` and writes nothing, but `-B` is a flag a
+  person can forget, and the run that omits it leaves `.pyc` files a later
+  lane has to clean by hand. Only `__pycache__/` is listed: CPython 3 writes
+  bytecode nowhere else, and this repository has no pytest — the suites are
+  stdlib `unittest` — so a `.pytest_cache` rule would be a guess at a tool
+  that is not here.
+
 ## [0.1.35] - 2026-08-26
 
 ### Security

@@ -27,7 +27,12 @@ refusal was individually correct and collectively a waste. Do not rebuild that
 here.
 
 If a rule below is wrong for a specific reviewed case, lift it with one line
-in `scripts/ci/ci_gate_allowlist.toml`. That is the intended path.
+in `scripts/ci/ci_gate_allowlist.toml`. That is the intended path, and
+`TheOneLineLiftWorksEndToEnd` at the bottom of this file proves the path is
+open rather than assuming it. An assertion that the shipped table is EMPTY
+belongs to the same family as a step inventory — it is an inventory pin on the
+lift mechanism itself, true only until the first legitimate entry — and one
+lived here until 0.1.37. Do not put it back.
 """
 
 from __future__ import annotations
@@ -183,6 +188,31 @@ class ContinueOnErrorIsRefused(unittest.TestCase):
         )
         self.assertEqual(len(run(text)), 1)
 
+    def test_a_quoted_key_with_a_space_before_the_colon_is_still_read(self) -> None:
+        r"""The INTERSECTION of the two cases above, which neither one covers.
+
+        `_KEY` defends the space-before-a-colon shape twice — the `\s*` before
+        the colon, and the `.strip()` on the captured key — and exactly one of
+        those defences is redundant. On a BARE key the greedy `\s*` sits
+        immediately before the colon while the bare alternative is non-greedy,
+        so the capture can never carry trailing whitespace and the `.strip()`
+        is dead code either way.
+
+        On a QUOTED key they diverge. The quoted alternative `"[^"]*"` is fixed
+        and cannot absorb the space, and the bare alternative excludes a
+        leading quote, so `.strip()` never gets the chance: without `\s*` the
+        reader RAISES on this line instead of reading it. That direction is
+        fail-closed — a red gate, never a construct waved through — but it is a
+        real behaviour change in an input class the two tests above miss
+        between them, and it is what turns removing `\s*` from a surviving
+        mutant into a killed one.
+        """
+        text = BASE.replace(
+            "  security:\n    runs-on:",
+            '  security:\n    "continue-on-error" : true\n    runs-on:',
+        )
+        self.assertEqual(len(run(text)), 1)
+
     def test_the_allowlist_lifts_exactly_the_named_case(self) -> None:
         text = BASE.replace(
             "  security:\n    runs-on:", "  security:\n    continue-on-error: true\n    runs-on:"
@@ -315,15 +345,28 @@ class TheAllowlistIsTrustworthy(unittest.TestCase):
     def test_the_shipped_allowlist_loads(self) -> None:
         self.assertIsInstance(WI.load_allowlist(), dict)
 
-    def test_the_shipped_allowlist_is_empty_at_this_head(self) -> None:
-        """The seed records the measured baseline, not reserved room.
+    def test_the_shipped_allowlist_carries_no_stale_entry(self) -> None:
+        """Every entry must still name a construct a workflow really declares.
 
-        This is not an inventory pin: it asserts that nothing is currently
-        exempted, so an exemption can never arrive unnoticed. Adding the first
-        real entry means changing this one assertion in the same PR that
-        explains it — which is the point.
+        This REPLACED an `assertEqual(WI.load_allowlist(), {})` pin on the same
+        table, which was the defect it looks like a weakening of. That pin was
+        an inventory pin on the lift mechanism: applying verbatim the line a
+        refusal prints silenced the refusal and immediately failed the
+        assertion, so the gate's own advertised one-line lift — text that lands
+        in a public CI log — turned the build red when an agent followed it.
+
+        The rule here is the one the sibling gate in `test_subcommand_callers.py`
+        already used, and it is what keeps the table from accumulating
+        exemptions: an entry that names no live construct is refused, whether
+        that is because the construct was removed, because the key was
+        mistyped, or because somebody reserved room for a violation nobody has
+        proposed. `load_allowlist` holds the other half — an entry with no
+        written reason fails closed.
         """
-        self.assertEqual(WI.load_allowlist(), {})
+        failures = WI.stale_allowlist_failures(
+            WI.load_allowlist(), WI.refusable_entries()
+        )
+        self.assertEqual(failures, [], "\n\n".join(failures))
 
     def test_an_entry_without_a_reason_fails_closed(self) -> None:
         original = WI.ALLOWLIST_PATH.read_text(encoding="utf-8")
@@ -346,6 +389,148 @@ class TheAllowlistIsTrustworthy(unittest.TestCase):
             self.assertIn("no written reason", str(caught.exception))
         finally:
             WI.ALLOWLIST_PATH.write_text(original, encoding="utf-8")
+
+
+class TheStaleEntryRuleRefusesWhatItClaimsTo(unittest.TestCase):
+    """Hostile fixtures for the stale-entry rule, which live data cannot reach.
+
+    The shipped table is empty and this repository declares none of the three
+    constructs, so `refusable_entries()` is empty too and every branch of the
+    rule is unreachable from the repository alone — a rule that refused nothing
+    would satisfy `test_the_shipped_allowlist_carries_no_stale_entry` exactly as
+    well as one that works. These drive it with inputs the repository
+    deliberately does not contain.
+    """
+
+    LIVE = "pr-gate.yml::chart::Render the chart::shell"
+    REFUSABLE = frozenset({LIVE})
+
+    def test_an_entry_naming_no_live_construct_is_refused(self) -> None:
+        messages = WI.stale_allowlist_failures(
+            {"pr-gate.yml::security::A step that is gone::shell": "reviewed"},
+            self.REFUSABLE,
+        )
+        self.assertEqual(len(messages), 1, messages)
+        self.assertIn("is stale", messages[0])
+        self.assertIn("Delete the line", messages[0])
+        self.assertIn(f"[{WI.ALLOWLIST_TABLE}]", messages[0])
+
+    def test_a_mistyped_key_fails_through_the_same_door(self) -> None:
+        """A key naming nothing is stale whether the cause is drift or a typo."""
+        messages = WI.stale_allowlist_failures({self.LIVE[:-1]: "typo"}, self.REFUSABLE)
+        self.assertEqual(len(messages), 1, messages)
+
+    def test_an_entry_still_doing_work_is_kept(self) -> None:
+        self.assertEqual(
+            WI.stale_allowlist_failures({self.LIVE: "reviewed"}, self.REFUSABLE), []
+        )
+
+    def test_an_empty_table_is_clean(self) -> None:
+        self.assertEqual(WI.stale_allowlist_failures({}, frozenset()), [])
+
+    def test_every_entry_is_reported_rather_than_only_the_first(self) -> None:
+        messages = WI.stale_allowlist_failures(
+            {"a::b::c::shell": "one", "d::e::f::shell": "two"}, self.REFUSABLE
+        )
+        self.assertEqual(len(messages), 2, messages)
+
+
+class TheOneLineLiftWorksEndToEnd(unittest.TestCase):
+    """The round trip the gate design doctrine requires, both directions.
+
+    A refusal prints an exact line. Adding that line must silence the refusal
+    AND must not then be reported stale; removing the construct must report the
+    line stale so the exemption cannot outlive its case. Until 0.1.37 the first
+    half failed here: the printed line silenced the refusal and tripped an
+    empty-table assertion one file over. A one-line lift that fails when you
+    apply it is not a lift mechanism, and the failure text saying "liftable in
+    one line" reaches a public CI log where it misinstructs the next agent.
+
+    Driven through `audit()` and `load_allowlist()` — the entrypoints CI runs —
+    rather than through the pure functions, because the defect lived in the
+    seam between them. The workflow directory is redirected into the system
+    temp area so no in-tree debris can survive an interrupted run; the
+    allowlist is the real tracked file, rewritten and restored in `finally` as
+    the blank-reason test above already does, because `_lift` renders that path
+    RELATIVE TO the repository root and a scratch path outside the tree could
+    not be rendered at all.
+    """
+
+    VIOLATION = BASE.replace(
+        "        run: ./scripts/ci/scan.sh\n",
+        "        shell: sh\n        run: ./scripts/ci/scan.sh\n",
+    )
+    ENTRY = "synthetic.yml::security::Scan::shell"
+    REASON = "reviewed: this fixture step runs no pipeline"
+
+    def audit_with(self, workflow: str, table: str) -> tuple[list[str], list[str]]:
+        """Return `(audit findings, stale-entry failures)` for one scratch state.
+
+        `table` REPLACES this gate's table rather than being appended to it.
+        Appending would make these assertions depend on the shipped table being
+        empty — which is the very coupling that produced the defect this class
+        exists to prevent, one level down: the fixture points the reader at a
+        scratch workflow directory, so a shipped entry for a REAL workflow
+        would correctly read as stale here and fail a test that is about
+        something else entirely.
+        """
+        original_dir = WI.WORKFLOW_DIR
+        original_text = WI.ALLOWLIST_PATH.read_text(encoding="utf-8")
+        header = f"[{WI.ALLOWLIST_TABLE}]\n"
+        self.assertIn(header, original_text, "the table this rule reads is missing")
+        before, _, rest = original_text.partition(header)
+        # Everything from the NEXT top-level table header on is carried through
+        # untouched; only this gate's own entries are replaced.
+        cut = rest.find("\n[")
+        tail = rest[cut + 1 :] if cut != -1 else ""
+        try:
+            WI.ALLOWLIST_PATH.write_text(
+                before + header + table + tail, encoding="utf-8"
+            )
+            with tempfile.TemporaryDirectory() as scratch:
+                (Path(scratch) / "synthetic.yml").write_text(workflow, encoding="utf-8")
+                WI.WORKFLOW_DIR = Path(scratch)
+                findings = WI.audit()
+                stale = WI.stale_allowlist_failures(
+                    WI.load_allowlist(), WI.refusable_entries()
+                )
+        finally:
+            WI.WORKFLOW_DIR = original_dir
+            WI.ALLOWLIST_PATH.write_text(original_text, encoding="utf-8")
+        return findings, stale
+
+    def test_the_refusal_prints_a_line_that_actually_lifts_it(self) -> None:
+        findings, stale = self.audit_with(self.VIOLATION, "")
+        self.assertEqual(len(findings), 1, findings)
+        self.assertIn(f'"{self.ENTRY}" = ', findings[0], "the exact line to add")
+        self.assertEqual(stale, [], "nothing is exempted yet")
+
+        lifted, stale = self.audit_with(
+            self.VIOLATION, f'"{self.ENTRY}" = "{self.REASON}"\n'
+        )
+        self.assertEqual(lifted, [], "the printed line did not silence the refusal")
+        self.assertEqual(stale, [], "the printed line was reported stale on arrival")
+
+    def test_the_entry_is_reported_stale_once_the_construct_is_gone(self) -> None:
+        """The other direction: an exemption may not outlive its case."""
+        findings, stale = self.audit_with(BASE, f'"{self.ENTRY}" = "{self.REASON}"\n')
+        self.assertEqual(findings, [], findings)
+        self.assertEqual(len(stale), 1, stale)
+        self.assertIn(self.ENTRY, stale[0])
+        self.assertIn("is stale", stale[0])
+
+    def test_an_entry_for_another_construct_lifts_nothing(self) -> None:
+        findings, _ = self.audit_with(
+            self.VIOLATION,
+            '"synthetic.yml::application::Scan::shell" = "another job entirely"\n',
+        )
+        self.assertEqual(len(findings), 1, findings)
+
+    def test_the_shipped_allowlist_file_is_restored_afterwards(self) -> None:
+        """The helper above rewrites a TRACKED file; prove it puts it back."""
+        before = WI.ALLOWLIST_PATH.read_bytes()
+        self.audit_with(self.VIOLATION, f'"{self.ENTRY}" = "{self.REASON}"\n')
+        self.assertEqual(WI.ALLOWLIST_PATH.read_bytes(), before)
 
 
 class TheFailureMessageTellsAnAgentWhatToDo(unittest.TestCase):

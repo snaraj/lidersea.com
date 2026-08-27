@@ -65,6 +65,14 @@
 # continue-on-error anywhere, declares a custom shell anywhere, or binds a
 # pinned variable at step level. The seed records the measured baseline rather
 # than reserving room for violations nobody has proposed.
+#
+# The suite refuses a STALE entry — one naming a construct no workflow declares
+# today, whether the cause is a removed construct or a mistyped key — so this
+# table cannot quietly accumulate exemptions. It does NOT assert the table is
+# empty. That assertion lived in the suite until 0.1.37 and broke the one-line
+# lift described above: applying the exact line a refusal printed silenced the
+# refusal and immediately failed the empty-table pin, so the instruction in the
+# public CI log was one an agent could not follow.
 [workflow_integrity]
 
 # ---------------------------------------------------------------------------

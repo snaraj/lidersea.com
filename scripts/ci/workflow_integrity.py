@@ -57,6 +57,23 @@ part of active development.  Every failure message below prints the exact
 line to add, so an agent that trips a rule is told precisely how to proceed
 rather than left to reverse-engineer the gate.
 
+**The line has to actually work, and that is a test rather than a promise.**
+The suite's ``test_the_one_line_lift_actually_lifts`` drives the whole round
+trip — refuse, paste the printed line, green — because a lift instruction that
+turns the build red when you follow it is worse than no lift at all: it lands
+in a public CI log and misinstructs the next agent.
+
+An earlier version of that suite asserted the shipped table equalled ``{}``.
+That is an INVENTORY PIN on the very table the lift mechanism writes to, and
+it broke the round trip exactly as described above: applying the printed line
+silenced the refusal and immediately failed the empty-table assertion.  What
+keeps the table honest instead is ``stale_allowlist_failures`` below, which is
+the rule the sibling gate in ``test_subcommand_callers.py`` already used: an
+entry must name a construct some workflow REALLY declares today, so an
+exemption cannot outlive the case that justified it and cannot be added for a
+violation nobody has proposed.  ``load_allowlist`` holds the other half — an
+entry with no written reason is a hole, and fails closed.
+
 READER SCOPE
 ============
 
@@ -319,15 +336,20 @@ def _lift(entry: str, reason: str = "why this construct is safe here") -> str:
     )
 
 
-def check_workflow(
+def refusals(
     path: Path,
     document: dict[str, Node],
     gate_jobs: frozenset[str],
     pinned: frozenset[str],
-    allowlist: dict[str, str],
-) -> list[str]:
-    """Return one finding per violated rule. Empty list means green."""
-    findings: list[str] = []
+) -> list[tuple[str, str]]:
+    """Every construct this module refuses, as ``(allowlist entry, message)``.
+
+    Deliberately ALLOWLIST-BLIND. `check_workflow` filters this list and
+    `refusable_entries` counts it, so the set a lift can silence and the set a
+    lift is allowed to name are the same set by construction and cannot drift
+    apart into a gate whose exemptions describe constructs it never refuses.
+    """
+    findings: list[tuple[str, str]] = []
     name = path.name
     workflow_env = set(document["env"].children) if "env" in document else set()
     jobs_node = document.get("jobs")
@@ -343,14 +365,15 @@ def check_workflow(
             node = job.children["continue-on-error"]
             if scalar(node.value).lower() == "true":
                 entry = f"{name}::{job_name}::continue-on-error"
-                if entry not in allowlist:
-                    findings.append(
+                findings.append(
+                    (
+                        entry,
                         f"{name}:{node.line}: job '{job_name}' is in the "
                         f"required-checks set and sets continue-on-error: true.\n"
                         "  A failing required check would report success and "
-                        "branch protection would be satisfied by a red gate."
-                        + _lift(entry)
+                        "branch protection would be satisfied by a red gate.",
                     )
+                )
 
         steps = job.children.get("steps")
         if steps is None:
@@ -365,30 +388,32 @@ def check_workflow(
                 node = step["continue-on-error"]
                 if scalar(node.value).lower() == "true":
                     entry = f"{name}::{job_name}::{label}::continue-on-error"
-                    if entry not in allowlist:
-                        findings.append(
+                    findings.append(
+                        (
+                            entry,
                             f"{name}:{node.line}: step '{label}' of "
                             f"required-checks job '{job_name}' sets "
                             "continue-on-error: true.\n"
                             "  The step can fail while the job — and the "
-                            "required check — still reports success."
-                            + _lift(entry)
+                            "required check — still reports success.",
                         )
+                    )
 
             # R3 — a custom shell on a gate step.
             if is_gate and "shell" in step:
                 node = step["shell"]
                 entry = f"{name}::{job_name}::{label}::shell"
-                if entry not in allowlist:
-                    findings.append(
+                findings.append(
+                    (
+                        entry,
                         f"{name}:{node.line}: step '{label}' of required-checks "
                         f"job '{job_name}' declares a custom shell "
                         f"({scalar(node.value)!r}).\n"
                         "  A custom shell changes failure semantics — it can drop "
                         "pipefail, so a\n  pipeline reports the exit status of its "
-                        "last command instead of the one that failed."
-                        + _lift(entry)
+                        "last command instead of the one that failed.",
                     )
+                )
 
             # R2 — a step-level env that captures a pin.
             if "env" not in step:
@@ -399,8 +424,6 @@ def check_workflow(
                 if not shadowed and not tool_pin:
                     continue
                 entry = f"{name}::{job_name}::{label}::env::{var}"
-                if entry in allowlist:
-                    continue
                 if tool_pin:
                     why = (
                         f"'{var}' is a tool pin assigned in "
@@ -416,14 +439,44 @@ def check_workflow(
                         "value the pin above does not state."
                     )
                 findings.append(
-                    f"{name}:{node.line}: step '{label}' of job '{job_name}' "
-                    f"overrides a pinned variable — {why}" + _lift(entry)
+                    (
+                        entry,
+                        f"{name}:{node.line}: step '{label}' of job '{job_name}' "
+                        f"overrides a pinned variable — {why}",
+                    )
                 )
     return findings
 
 
-def audit() -> list[str]:
-    """Run every rule over every workflow. Returns the complete finding list."""
+def check_workflow(
+    path: Path,
+    document: dict[str, Node],
+    gate_jobs: frozenset[str],
+    pinned: frozenset[str],
+    allowlist: dict[str, str],
+) -> list[str]:
+    """Return one finding per violated rule. Empty list means green."""
+    return [
+        message + _lift(entry)
+        for entry, message in refusals(path, document, gate_jobs, pinned)
+        if entry not in allowlist
+    ]
+
+
+def _workflow_paths() -> list[Path]:
+    """Every workflow this module reads. An empty directory is a red gate.
+
+    Fail-closed for two rules at once: an audit over no files reports no
+    finding, and a stale-entry check over no files reports every entry stale.
+    """
+    paths = sorted(WORKFLOW_DIR.glob("*.yml"))
+    if not paths:
+        raise WorkflowIntegrityError(f"no workflows found under {WORKFLOW_DIR}")
+    return paths
+
+
+def gate_jobs_from_contract() -> frozenset[str]:
+    """The gate-job set, derived from `release_contract.py`'s own constants."""
     import importlib.util
     import sys
 
@@ -435,16 +488,64 @@ def audit() -> list[str]:
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
+    return gate_job_names(module.REQUIRED_STATUS_CHECKS, module.PR_GATE_MAIN_JOBS)
 
-    gate_jobs = gate_job_names(module.REQUIRED_STATUS_CHECKS, module.PR_GATE_MAIN_JOBS)
+
+def refusable_entries() -> frozenset[str]:
+    """Every allowlist key the workflows in this repository generate today.
+
+    This is what an entry has to name to be doing work. Computed with the
+    allowlist ignored, so an exempted construct still appears here — otherwise
+    every entry would erase its own justification the moment it was added.
+    """
+    gate_jobs = gate_jobs_from_contract()
+    pinned = pinned_tool_variables()
+    entries: set[str] = set()
+    for path in _workflow_paths():
+        document = parse_workflow(path.read_text(encoding="utf-8"), str(path))
+        entries.update(entry for entry, _ in refusals(path, document, gate_jobs, pinned))
+    return frozenset(entries)
+
+
+def stale_allowlist_failures(
+    allowlist: dict[str, str], refusable: frozenset[str]
+) -> list[str]:
+    """An exemption that exempts nothing must be deleted.
+
+    This is the rule that replaced an equals-``{}`` pin on the shipped table.
+    Asserting the table is EMPTY is an inventory pin on the lift mechanism
+    itself: it is true only until the first legitimate entry, and it turns the
+    documented one-line lift red at the moment an agent follows it. Asserting
+    that every entry still names a construct some workflow really declares
+    keeps the table describing reality — in both directions, since it refuses
+    an entry added for a violation nobody has proposed just as it refuses one
+    left behind after the construct was removed.
+
+    A malformed key fails through the same door and needs no separate rule: an
+    entry naming no refusable construct is stale whether that is because the
+    workflow changed or because the key was mistyped.
+    """
+    relative = ALLOWLIST_PATH.relative_to(REPO_ROOT)
+    failures: list[str] = []
+    for entry in sorted(allowlist):
+        if entry in refusable:
+            continue
+        failures.append(
+            f"allowlist entry '{entry}' is stale: no workflow this gate reads "
+            "declares that construct today, so the entry exempts nothing.\n"
+            f"  Delete the line from the [{ALLOWLIST_TABLE}] table of {relative}."
+        )
+    return failures
+
+
+def audit() -> list[str]:
+    """Run every rule over every workflow. Returns the complete finding list."""
+    gate_jobs = gate_jobs_from_contract()
     pinned = pinned_tool_variables()
     allowlist = load_allowlist()
 
     findings: list[str] = []
-    paths = sorted(WORKFLOW_DIR.glob("*.yml"))
-    if not paths:
-        raise WorkflowIntegrityError(f"no workflows found under {WORKFLOW_DIR}")
-    for path in paths:
+    for path in _workflow_paths():
         document = parse_workflow(path.read_text(encoding="utf-8"), str(path))
         findings.extend(check_workflow(path, document, gate_jobs, pinned, allowlist))
     return findings

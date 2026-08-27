@@ -55,6 +55,27 @@ would copy a third party's contact detail into a tracked file — publishing it 
 second time, in the working tree, where it was not before. The SHA names the
 same exception and carries none of it. For the same reason no message below
 ever echoes the offending address: these messages land in public CI logs.
+
+WHERE THAT LINE IS DRAWN, AND WHY THE SUBJECT IS ON THE OTHER SIDE
+==================================================================
+
+`check_commits` echoes the commit SUBJECT verbatim while echoing neither
+address. That asymmetry is a decision, not an oversight, and the two fields
+differ on both halves of the reason:
+
+  * An ADDRESS is the thing this gate exists to keep unpublished, it can be a
+    THIRD PARTY's — arriving from an unpinned environment or an imported
+    commit, belonging to somebody who never chose to appear here — and it is
+    the one field a reader does not need, because the message says how to
+    inspect it locally.
+  * A SUBJECT is the acting agent's OWN text, in a commit the agent has just
+    pushed to this repository, so it is already published on the pull request
+    the gate is running for; repeating it in the log of that same run
+    discloses nothing new. It is also what makes a refusal actionable at a
+    glance when a range holds several commits.
+
+If a subject ever needs to carry an address, that is a commit-message problem
+to fix before pushing, exactly as the LIFT text below already says.
 """
 
 from __future__ import annotations

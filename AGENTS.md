@@ -783,6 +783,16 @@ committer, on every outgoing commit — is exactly:
 
   A negative control is only evidence once its positive twin is green.
 
+- **Both identity rules are now mechanical, on the range a PR proposes.**
+  `scripts/ci/commit_identity.py` runs in the `security` job and refuses any
+  commit in `base..head` whose author OR committer is not the identity above,
+  and any commit message carrying a co-author trailer. It exists because the
+  secret scan reads blobs and can see neither. Fix an offending commit rather
+  than lifting the rule whenever it has not been pushed yet — an address that
+  reaches published history cannot be withdrawn — and see "What the secret
+  scan cannot see" under Quality gates for the two things it deliberately does
+  not cover.
+
   The key was registered 2026-08-18; agent commits show `Verified` on
   GitHub. Main-only merge enforcement (requirement 2) is what keeps the
   owner's phone and other-machine merges unblocked — signing is a
@@ -879,7 +889,7 @@ included; it is the same battery CI enforces:
     # because `break` succeeded, so it swallows the failure it just stopped on.
     rc=0; for s in test_release_contract test_dependabot_contract \
                    test_chart_render_census test_subcommand_callers \
-                   test_workflow_integrity; do \
+                   test_workflow_integrity test_commit_identity; do \
       python3 -I -B -m unittest discover -s scripts/ci -p "$s.py" || rc=1; \
     done; test "${rc}" -eq 0
     docker build .                              # Dockerfile/build-input changes
@@ -918,6 +928,22 @@ included; it is the same battery CI enforces:
   (`tests/security/test_containerd_cri_health_contract_matrix.py`); Go
   suites here express the same pair as a behavior pin plus a named
   pending-contract test documented in its comment.
+- **What the secret scan cannot see.** `gitleaks git` and `gitleaks dir` both
+  read BLOB CONTENT. Commit author/committer identities and commit MESSAGE
+  bodies are neither, so neither scan has ever covered the surface requirement
+  3 governs — an unpinned `GIT_AUTHOR_EMAIL` or a co-author trailer passed
+  every gate in this repository and became permanently public on merge. That
+  surface is now held by `scripts/ci/commit_identity.py`, which walks the
+  range a pull request PROPOSES and refuses both. Its two stated non-goals are
+  deliberate: it is not a history audit, because history is append-only
+  (requirement 2) and a gate that could only refuse an unfixable past would
+  need a permanently growing exemption list; and it does not run on `main`
+  pushes, because the owner's merge is stamped with GitHub's own web-flow
+  committer and every commit in the range was already checked at the pull
+  request head where an agent could still fix it. Known historical exceptions
+  are recorded by SHA in `scripts/ci/ci_gate_allowlist.toml` — never by
+  address, which would copy personal data into the tree that requirement 11
+  keeps it out of.
 - **Secret scan, both modes.** `gitleaks git` (full history) AND
   `gitleaks dir` (working tree) run before every push — the same scans
   CI runs. This repository keeps no `.gitleaksignore` today; if a
@@ -948,7 +974,11 @@ included; it is the same battery CI enforces:
   `.github/workflows` — `continue-on-error` on a required-check job or step,
   a step-level `env:` that captures a pin, and a custom `shell:` on a gate
   step — and deliberately pins NO step inventory, per the gate design
-  doctrine above. Both lift through
+  doctrine above; and the commit-identity gate
+  (`scripts/ci/commit_identity.py` plus its suite), which walks the range this
+  pull request proposes and refuses any commit whose author OR committer is
+  not the sanctioned noreply identity and any commit message carrying a
+  co-author trailer. All three lift through
   `scripts/ci/ci_gate_allowlist.toml`),
   `dependency-review` (PRs only; fails on high severity), `application`
   (toolchain pinned AND verified — Node 24.19.0, npm 11.17.0,

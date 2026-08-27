@@ -66,3 +66,39 @@
 # pinned variable at step level. The seed records the measured baseline rather
 # than reserving room for violations nobody has proposed.
 [workflow_integrity]
+
+# ---------------------------------------------------------------------------
+# scripts/ci/commit_identity.py
+#
+# Every commit a pull request proposes must be authored AND committed as the
+# owner's noreply identity, and no commit message may carry a co-author
+# trailer. Both rules sit on a surface `gitleaks` structurally cannot see: it
+# scans blob content, while identities and messages are neither.
+#
+# Entry format — the commit SHA, full and lowercase:
+#
+#   "<40-lowercase-hex>" = "why this commit's identity or trailer is accepted"
+#
+# NAME THE COMMIT BY SHA, NEVER BY ADDRESS. Requirement 11 keeps personal data
+# out of this repository; an allowlist keyed by address would copy a third
+# party's contact detail into a tracked file, publishing it a second time
+# somewhere it was not before. The suite refuses an "@" in a reason for the
+# same reason.
+#
+# The five entries below are the repository's KNOWN historical exceptions,
+# found by a security sweep on 2026-08-27 and recorded rather than erased.
+# They are ancestors of `main`, permanently public, and predate this gate;
+# history here is append-only (requirement 2), so no pull request can repair
+# them and rewriting from the root is forbidden. Recording them is what lets
+# the gate refuse anything NEW without lying about the past.
+#
+# These entries are NOT reached by the ordinary pull-request run, whose range
+# starts at the PR base — they are load-bearing for any wider range, and the
+# suite proves each names a real commit that really does violate a rule, so a
+# seed for a clean commit would be reported rather than kept.
+[commit_identity]
+"696d9621f2a29ac21ca63274f5b91222ac7aa283" = "root commit; authored and committed under a personal identity before the noreply rule existed. Ancestor of main and unrewritable."
+"8267007ddf84478a804e5f1170fe8e62c6c87047" = "onboarding squash carrying one co-author trailer; predates the no-trailer rule. Ancestor of main and unrewritable."
+"d9d17c1c949aebcebe8b8e5221df3fdb9a328083" = "hardening squash carrying two co-author trailers; predates the no-trailer rule. Ancestor of main and unrewritable."
+"38f4b0956dd5ad03fa0e4d83c2d1442ca736aeaa" = "SBOM squash carrying one co-author trailer; predates the no-trailer rule. Ancestor of main and unrewritable."
+"73c275c011d39c0aa376a597a8f886a2fd598a23" = "GHCR-tag squash carrying one co-author trailer; predates the no-trailer rule. Ancestor of main and unrewritable."

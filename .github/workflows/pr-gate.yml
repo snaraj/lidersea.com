@@ -75,6 +75,31 @@ jobs:
         # teaches agents to re-record it instead of thinking. The reasoning
         # is written out in both files. Same one-line lift mechanism.
         run: python3 -I -B -m unittest discover -s scripts/ci -p 'test_workflow_integrity.py' -v
+      - name: Test the commit identity and co-author trailer rules
+        # `gitleaks git` and `gitleaks dir` both scan BLOB CONTENT. Commit
+        # author/committer identities and commit message bodies are neither,
+        # so the enforced secret scan has always had zero coverage over the
+        # surface requirement 3 governs. This suite pins the two refusals with
+        # synthetic commits, and checks the seeded historical exceptions
+        # against the real objects so they cannot become decoration.
+        run: python3 -I -B -m unittest discover -s scripts/ci -p 'test_commit_identity.py' -v
+      - name: Refuse a foreign identity or co-author trailer in this pull request
+        # Scoped to the range this pull request PROPOSES, deliberately. History
+        # is append-only (requirement 2), so re-auditing every commit could
+        # only refuse a past no PR can fix. It is skipped on main pushes for a
+        # stated reason rather than by omission: the owner's merge is stamped
+        # with GitHub's own web-flow committer, every commit in the range was
+        # already checked here where an agent could still fix it, and refusing
+        # GitHub's merge identity would hold main CI red forever. Lift with one
+        # line in scripts/ci/ci_gate_allowlist.toml; the failure prints it.
+        if: github.event_name == 'pull_request'
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          python3 -I -B scripts/ci/commit_identity.py \
+            --base "${PR_BASE_SHA}" --head "${PR_HEAD_SHA}"
       - name: Enforce one exact patch from the protected base
         if: github.event_name != 'workflow_dispatch'
         env:

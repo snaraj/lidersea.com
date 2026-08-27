@@ -327,9 +327,18 @@ class TheAllowlistIsTrustworthy(unittest.TestCase):
 
     def test_an_entry_without_a_reason_fails_closed(self) -> None:
         original = WI.ALLOWLIST_PATH.read_text(encoding="utf-8")
+        header = f"[{WI.ALLOWLIST_TABLE}]\n"
+        self.assertIn(header, original, "the table this rule reads is missing")
         try:
+            # Inserted directly under its OWN header, never appended to the end
+            # of the file: the allowlist holds several tables, and an appended
+            # key belongs to whichever table happens to be last.
             WI.ALLOWLIST_PATH.write_text(
-                original + '\n"synthetic.yml::security::Scan::shell" = ""\n',
+                original.replace(
+                    header,
+                    header + '"synthetic.yml::security::Scan::shell" = ""\n',
+                    1,
+                ),
                 encoding="utf-8",
             )
             with self.assertRaises(WI.WorkflowIntegrityError) as caught:

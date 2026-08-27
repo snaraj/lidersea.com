@@ -17,7 +17,10 @@ What it does pin, and why each is load-bearing:
   * the shipped allowlist's seeded entries are exactly the commits that really
     do violate, checked against the REAL objects in this repository, so the
     exemptions describe reality instead of being decoration;
-  * the one-line lift works end to end.
+  * the one-line lift works end to end;
+  * the gate step is WIRED and is guarded to `pull_request` events — a
+    behavioural pin, not a step inventory, because that guard is what keeps
+    main CI green and nothing else pinned it (see `GUARD_RATIONALE`).
 """
 
 from __future__ import annotations
@@ -48,6 +51,66 @@ HEAD_PLACEHOLDER = "c" * 40
 #: test has already done the damage, and the damage is a fixed point under a
 #: second application. `tearDown` compares against these bytes instead.
 ALLOWLIST_BASELINE = CI.ALLOWLIST_PATH.read_bytes()
+
+#: The string that identifies the ONE `pr-gate.yml` step this module is the
+#: gate for. The workflow pin below selects that step by what it RUNS, never by
+#: its name or its position, so steps may be added, renamed or reordered.
+GATE_INVOCATION = "scripts/ci/commit_identity.py"
+
+#: A workflow step begins at a `- name:` list item, at whatever indentation the
+#: file happens to use. Matching the ITEM rather than a fixed column keeps the
+#: reader working across a legitimate reformat.
+STEP_START = re.compile(r"(?m)^[ \t]*-[ \t]+name:")
+
+#: The guard, matched as BEHAVIOUR rather than as literal text: the bare and
+#: the `${{ … }}` spellings both pass, quoting and internal whitespace are
+#: free, and the condition may carry further terms. `pull_request_target` does
+#: NOT pass — the closing quote is part of the pattern.
+PULL_REQUEST_GUARD = re.compile(r"""github\.event_name\s*==\s*['"]pull_request['"]""")
+
+#: Printed by every failure of the pin below. A pin whose message only says
+#: "this changed" teaches an agent to re-record it; this one says what breaks.
+GUARD_RATIONALE = """WHY THIS GUARD EXISTS, AND WHY IT IS PINNED
+
+The `pr-gate.yml` step that runs scripts/ci/commit_identity.py must be guarded
+`if: github.event_name == 'pull_request'`. That guard is not a scope
+preference. It is what keeps MAIN CI GREEN, because pr-gate.yml runs on pushes
+to `main` as well as on pull requests, and the gate has no safe reading there:
+
+  * with the guard removed, a main push supplies no `github.event.pull_request`
+    payload, so PR_BASE_SHA and PR_HEAD_SHA expand EMPTY and the module exits 1
+    on a range it cannot read;
+  * hand it a real push range instead and it still exits 1, because the owner's
+    merge commit is stamped with GitHub's own web-flow committer, which is
+    deliberately NOT a sanctioned identity — see
+    `test_githubs_own_merge_identity_is_not_sanctioned_either`, which is
+    correct and must not be relaxed to make a push pass.
+
+Both directions were measured at 0.1.37. Either way main CI goes red over a
+commit no pull request can repair, and the release chain behind it stalls. The
+failure would appear on the merge, not on the pull request that caused it.
+
+This pins BEHAVIOUR, not inventory. It selects the step by the module it
+invokes, so steps may be added, renamed, reordered or removed freely, and both
+condition spellings pass. There is deliberately NO allowlist line for it: the
+lift mechanism exists so a gate can stop refusing a construct that turned out
+to be safe, and an entry that switches this guard off is not that — it is the
+hole this test refuses. The real lift is to make the gate SAFE on the other
+event first (give the range a push-shaped source, and decide what the merge
+identity means there), then widen this pattern in the same pull request."""
+
+
+def pr_gate_steps() -> list[str]:
+    """`pr-gate.yml` split into step blocks, one per `- name:` item.
+
+    Deliberately not a step inventory — the caller picks the single block that
+    invokes the module under test and ignores every other one.
+    """
+    text = (CI.REPO_ROOT / ".github" / "workflows" / "pr-gate.yml").read_text(
+        encoding="utf-8"
+    )
+    starts = [match.start() for match in STEP_START.finditer(text)]
+    return [text[a:b] for a, b in zip(starts, starts[1:] + [len(text)])]
 
 
 def commit(
@@ -665,6 +728,92 @@ class TheCommandLineReportsBothOutcomes(unittest.TestCase):
         self.assertIn("scripts/ci/commit_identity.py", text)
         self.assertIn("test_commit_identity.py", text)
         self.assertTrue(re.search(r"--base\s", text))
+
+
+class TheGateStepRunsOnPullRequestEventsOnly(unittest.TestCase):
+    """The `if:` that keeps main CI green, which nothing pinned until 0.1.37.
+
+    `pr-gate.yml` runs on pushes to `main` as well as on pull requests, and
+    the step that invokes `scripts/ci/commit_identity.py` carries
+    `if: github.event_name == 'pull_request'`. That guard is not a preference
+    about scope; it is load-bearing for main CI, and a future edit could delete
+    it and only discover the consequence when the owner's next merge turns main
+    red. `test_a_push_to_main_proposes_no_range` pins the SUITE half of the
+    same boundary. This pins the WORKFLOW half.
+
+    The rationale is in `GUARD_RATIONALE` below, which is also the failure
+    message, so an agent that trips this is told why the guard exists rather
+    than being invited to re-record a pin.
+    """
+
+    def gate_step(self) -> str:
+        steps = [s for s in pr_gate_steps() if GATE_INVOCATION in s]
+        self.assertEqual(
+            len(steps),
+            1,
+            f"expected exactly one pr-gate step to invoke {GATE_INVOCATION}, "
+            f"found {len(steps)}. This pin selects the step BY THE MODULE IT "
+            f"RUNS rather than by position or name; if the invocation legitimately "
+            f"moved or was duplicated, update the selection here in the same pull "
+            f"request.\n\n{GUARD_RATIONALE}",
+        )
+        return steps[0]
+
+    def test_the_gate_step_carries_the_pull_request_guard(self) -> None:
+        condition = re.search(r"(?m)^[ \t]*if:[ \t]*(?P<cond>.+?)[ \t]*$", self.gate_step())
+        self.assertIsNotNone(
+            condition, f"that step declares no `if:` at all.\n\n{GUARD_RATIONALE}"
+        )
+        self.assertRegex(
+            condition.group("cond"),
+            PULL_REQUEST_GUARD,
+            f"that step's condition is {condition.group('cond')!r}.\n\n"
+            f"{GUARD_RATIONALE}",
+        )
+
+    def test_the_guard_pattern_refuses_every_other_condition(self) -> None:
+        """A pattern that matched any `if:` would pin nothing at all.
+
+        The positive spellings are both real: a bare expression and the
+        `${{ … }}` form are equivalent in an `if:`, so pinning one literal
+        spelling would break on a legitimate reformat.
+        """
+        for accepted in (
+            "github.event_name == 'pull_request'",
+            "${{ github.event_name == 'pull_request' }}",
+            'github.event_name  ==  "pull_request"',
+            "github.event_name == 'pull_request' && github.actor != 'nobody'",
+        ):
+            with self.subTest(accepted=accepted):
+                self.assertRegex(accepted, PULL_REQUEST_GUARD)
+        for refused in (
+            "github.event_name != 'workflow_dispatch'",
+            "github.event_name == 'push'",
+            "${{ github.event_name == 'push' }}",
+            "github.event_name == 'pull_request_target'",
+            "always()",
+            "",
+        ):
+            with self.subTest(refused=refused):
+                self.assertNotRegex(refused, PULL_REQUEST_GUARD)
+
+    def test_the_step_reader_really_splits_steps(self) -> None:
+        """A reader returning the whole file as one blob makes the pin vacuous.
+
+        It would find the invocation in the "blob" and then find the guard
+        somewhere else entirely — another step's `if:`, or a comment — so the
+        assertion above would pass with the guard deleted. A lower bound rather
+        than a count: steps are added freely, and no inventory is pinned here.
+        """
+        steps = pr_gate_steps()
+        self.assertGreater(len(steps), 1)
+        self.assertTrue(all(STEP_START.match(step) for step in steps))
+        self.assertEqual(
+            sum(GATE_INVOCATION in step for step in steps),
+            1,
+            "the invocation must land in exactly one block, or the selection "
+            "above is reading more than the step it means to read",
+        )
 
 
 if __name__ == "__main__":  # pragma: no cover - manual invocation

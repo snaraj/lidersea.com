@@ -124,6 +124,26 @@ Git, image, and GitHub Release tags use the exact plain `vX.Y.Z` form.
   requirement 11 exists to prevent — and the suite proves each names a real
   commit that really does break a rule, so an exemption that stopped exempting
   anything would be reported instead of kept.
+- A behavioural pin on the gate step's own `if:` guard
+  (`TheGateStepRunsOnPullRequestEventsOnly` in
+  `scripts/ci/test_commit_identity.py`). The SUITE half of the main-push
+  boundary is held by `test_a_push_to_main_proposes_no_range`; the WORKFLOW
+  half was held by nothing, so a future edit could delete
+  `if: github.event_name == 'pull_request'` from the step and discover the
+  consequence only when the owner's next merge turned main red. Both directions
+  were measured: with the guard gone, a main push supplies no pull-request
+  payload, so the step's range variables expand empty and the module exits 1 on
+  a range it cannot read; hand it a real push range instead and it still exits
+  1, on GitHub's web-flow committer. The pin selects the step BY THE MODULE IT
+  INVOKES and matches the condition by pattern, so steps may be added, renamed,
+  reordered or removed and both the bare and `${{ … }}` spellings pass — it is
+  behaviour, not a step inventory, and `pull_request_target` does not satisfy
+  it. Its failure message states why the guard exists rather than inviting an
+  agent to re-record a pin, and it carries no allowlist line on purpose: the
+  lift mechanism exists so a gate can stop refusing a construct that turned out
+  to be safe, and an entry that switches this guard off is not that. Killed by
+  four mutants — guard deleted, guard swapped for a different event test, the
+  step reader collapsed to one blob, and the condition pattern widened.
 - `scripts/ci/ci_gate_allowlist.toml`, the shared lift mechanism for all three
   gates. Every refusal above is liftable with ONE line carrying a written
   reason, and every failure message names the file and prints the exact line
@@ -178,10 +198,25 @@ Git, image, and GitHub Release tags use the exact plain `vX.Y.Z` form.
 - A SECOND defect, found while making the range explicit and worse than the
   first: the suite's workflow step carries no `if:` guard, so it also runs on
   pushes to `main` — where `HEAD` is the owner's squash merge under GitHub's
-  web-flow identity. The shipped suite fails 3 of 37 against a simulated main
-  push, which would have held main CI permanently red after this pull request
+  web-flow identity. A failure count is meaningless without the CHECKOUT SHAPE
+  it was measured under, so both shapes are stated rather than one bare figure.
+  Under the shape `actions/checkout` with `fetch-depth: 0` actually produces on
+  a push to `main` — the branch fetched to `refs/remotes/origin/main` at the
+  pushed SHA, so `origin/main` equals `HEAD` and the merge-base range collapses
+  to empty — the pre-repair suite fails **2 of 37**, and two further assertions
+  pass VACUOUSLY over that empty range. Under a checkout whose `origin/main`
+  LAGS `HEAD` the range is non-empty, those two are genuinely reached, and it
+  fails **3 of 37** — a different failing SET, not merely one more. An earlier
+  draft of this entry gave the bare figure 3 of 37, which is the second shape
+  only. The same counts hold on `workflow_dispatch`, a THIRD unguarded event
+  this entry did not previously name: `pr-gate.yml` declares that trigger too,
+  and the pre-repair suite is red under it in both shapes. Every combination is
+  red, so the defect is confirmed either way and only the figure moves — any of
+  them would have held main CI permanently red after this pull request
   merged and blocked the release chain, over a commit no pull request can
-  repair. The gate STEP was already guarded `if: github.event_name ==
+  repair. The repair keys on "not `pull_request`" rather than on "push", which
+  is why it closes the `workflow_dispatch` path in the same stroke. The gate
+  STEP was already guarded `if: github.event_name ==
   'pull_request'` for exactly this reason; the suite now honours the same
   boundary, returning no range on any non-pull-request event and skipping the
   real-range assertions with a stated reason rather than auditing a range the
@@ -272,7 +307,18 @@ Git, image, and GitHub Release tags use the exact plain `vX.Y.Z` form.
   only if widening it is cheap — so the trade is deliberate and, on balance,
   right. It is recorded here rather than glossed, because the reviewer is owed
   the honest version: the table CAN accumulate exemptions; what it cannot do is
-  keep one whose case has resolved. `refusals()` is now allowlist-blind and both
+  keep one whose case has resolved. A FIFTH copy of the same retracted claim
+  shipped in `AGENTS.md`'s gate design doctrine — added by this pull request
+  itself and missed by the four-place sweep — where "the allowlist keeps
+  describing reality instead of accumulating exemptions" made the identical
+  move. It is corrected there too, and at more length than the others on
+  purpose: `AGENTS.md` is the canonical contract a cold agent operates from, so
+  a false capability claim in it outlives the pull request that introduced it.
+  A repository-wide re-sweep for a sixth copy — the wording rather than the
+  phrase, across every tracked file — found none. The one further occurrence
+  anywhere is inside `e97d7df`'s commit message, which append-only history
+  (requirement 2) makes unfixable and which `a1b1c86`'s message already
+  retracts on the record. `refusals()` is now allowlist-blind and both
   `check_workflow` and `refusable_entries` read it, so the set a lift can
   silence and the set a lift may name cannot drift apart. The round trip is a
   test rather than a promise, in both directions.

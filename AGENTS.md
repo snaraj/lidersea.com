@@ -854,8 +854,22 @@ preferences.
    development, not a security event. An entry without a reason is not a
    decision, it is a hole, and the gates fail closed on one. Entries are
    scoped as tightly as the gate allows and deleted when the case that
-   justified them is gone — the suites refuse a stale entry, so the allowlist
-   keeps describing reality instead of accumulating exemptions.
+   justified them is gone — the suites refuse a stale entry, so no exemption
+   outlives the case that justified it.
+
+   That stale-entry rule is a TRADE, and this contract states it rather than
+   claiming a free win. It does NOT bound how many entries a table holds: as a
+   predicate over the table's contents it is strictly WEAKER than pinning the
+   table empty — an empty table satisfies "no stale entry" vacuously, while a
+   table carrying one live, correct exemption passes the stale rule and failed
+   the empty-table pin. What goes with it is a tripwire: under an empty-table
+   pin the FIRST legitimate exemption forced a reviewed edit to the gate's own
+   suite, and under the stale-entry rule it lands as one silent line in a data
+   file. The trade is made deliberately, because an empty-table pin is itself
+   an inventory pin on the very table this lift mechanism writes to — applying
+   verbatim the line a refusal prints silences the refusal and immediately
+   fails the assertion, so the instruction reaching a public CI log is one an
+   agent cannot follow. Rule 1 governs rule 2's own machinery.
 
 **This does not relax requirement 4.** Lifting an over-broad refusal about
 repository mechanics is not weakening a security behaviour. Nothing here

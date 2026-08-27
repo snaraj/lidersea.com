@@ -67,8 +67,9 @@
 # than reserving room for violations nobody has proposed.
 #
 # The suite refuses a STALE entry — one naming a construct no workflow declares
-# today, whether the cause is a removed construct or a mistyped key — so this
-# table cannot quietly accumulate exemptions. It does NOT assert the table is
+# today, whether the cause is a removed construct or a mistyped key — so no
+# entry outlives the case that justified it. It does NOT bound how many entries
+# this table holds, and it does NOT assert the table is
 # empty. That assertion lived in the suite until 0.1.37 and broke the one-line
 # lift described above: applying the exact line a refusal printed silenced the
 # refusal and immediately failed the empty-table pin, so the instruction in the

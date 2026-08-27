@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import re
 import sys
+import tomllib
 import unittest
 from pathlib import Path
 
@@ -34,6 +35,15 @@ import commit_identity as CI  # noqa: E402
 OWNER = CI.SANCTIONED_EMAIL
 FOREIGN = "someone-else@example.invalid"
 TRAILER_LINE = "Co-authored-by" + ": Someone <someone@example.invalid>"
+
+#: The tracked allowlist exactly as it sits on disk at import time, captured
+#: before any test can run. One test below rewrites that REAL file and restores
+#: it in `finally`; a restore that silently stopped working would corrupt it —
+#: deleting the five recorded historical exceptions — while this suite stayed
+#: green, because a test reading its own "before" reads it AFTER an earlier
+#: test has already done the damage, and the damage is a fixed point under a
+#: second application. `tearDown` compares against these bytes instead.
+ALLOWLIST_BASELINE = CI.ALLOWLIST_PATH.read_bytes()
 
 
 def commit(
@@ -47,28 +57,160 @@ def commit(
     return CI.Commit(sha, author, committer, subject, message)
 
 
+def entry_under_own_header(document: str, table: str, line: str) -> str:
+    """Insert `line` directly beneath `table`'s OWN header.
+
+    Never appended to the end of the document. This allowlist holds several
+    tables, and a key appended to the end joins whichever table happens to be
+    LAST — which today is this gate's own `[commit_identity]`. That is exactly
+    why the mistake is invisible from this file, and why the pin that guards
+    this helper drives it against a document whose target table is NOT last.
+    """
+    header = f"[{table}]\n"
+    if header not in document:
+        raise AssertionError(f"the table {table!r} is missing from the document")
+    return document.replace(header, header + line, 1)
+
+
+def _parents(revision: str) -> tuple[str, ...]:
+    """The parent SHAs of `revision`, in order, straight from git."""
+    return tuple(CI._git("rev-list", "--parents", "-n", "1", revision).split()[1:])
+
+
+def proposed_head(revision: str = "HEAD") -> str:
+    """The commit this checkout PROPOSES, which is not always `HEAD`.
+
+    Under a `pull_request` event `actions/checkout` checks out
+    `refs/pull/N/merge` — GitHub's synthetic merge of the branch into its base.
+    `HEAD` is therefore that merge commit: its committer is GitHub's own
+    web-flow identity, and its SECOND parent is the commit the pull request
+    actually proposes. A suite that audited `HEAD` there would be auditing
+    GitHub's construct rather than the agent's work, and this gate refuses that
+    identity — correctly — so the assertions below went red in CI while passing
+    on every developer machine, where `HEAD` really is the branch tip. The
+    workflow's own gate step never had the defect: it passes the exact base and
+    head SHAs from the event payload and resolves no symbolic name at all.
+
+    Resolution is STRUCTURAL, not environmental. Two parents means a merge and
+    the second parent is the side being offered, on GitHub and on a laptop
+    alike; no `GITHUB_*` variable is read, so one code path runs in both places
+    and there is no branch that only ever executes in CI. Exactly two parents,
+    never "two or more": GitHub's merge ref always has two, so a three-parent
+    HEAD is not one, has no single proposed side, and resolves to `HEAD` so the
+    gate judges it on its own identity rather than silently auditing one
+    arbitrary branch of three.
+
+    Two alternatives were considered and rejected:
+
+      * Teaching `violations()` to ADMIT a two-parent commit carrying GitHub's
+        committer. That punches a hole in the one rule this module exists to
+        enforce — any commit with that identity would pass — and
+        `test_githubs_own_merge_identity_is_not_sanctioned_either` states the
+        opposite as a deliberate decision. The web-flow identity is out of
+        SCOPE here; it is never sanctioned.
+      * Allowlisting the merge commit by SHA. GitHub rebuilds that ref on every
+        push, so the entry would be stale before the next commit landed.
+
+    Tests elsewhere in this suite still name `HEAD` literally, deliberately:
+    an unreadable-range error path, git's collapsing of a repeated revision,
+    and an existence probe all hold for ANY revision and gain nothing from
+    resolution. Only an assertion that reads a commit's identity or defines
+    the audited range needs this helper.
+    """
+    parents = _parents(revision)
+    return parents[1] if len(parents) == 2 else revision
+
+
+class TheProposedHeadIsResolvedStructurally(unittest.TestCase):
+    """The helper that keeps this suite pointed at the right commit in CI.
+
+    The repository can only ever be in ONE of the shapes below, so each is
+    driven through a hand-written `_git` (testing doctrine: stdlib only,
+    hand-written fakes, no mock framework). The last test covers what those
+    fakes structurally cannot: that the real git invocation is the right one.
+    """
+
+    HEAD_SHA = "a" * 40
+    BASE_SHA = "b" * 40
+    PROPOSED = "c" * 40
+    THIRD = "d" * 40
+
+    def resolve(self, rev_list_line: str) -> str:
+        original = CI._git
+        try:
+            CI._git = lambda *args: rev_list_line
+            return proposed_head()
+        finally:
+            CI._git = original
+
+    def test_a_two_parent_head_resolves_to_the_side_being_proposed(self) -> None:
+        """CI's shape: `refs/pull/N/merge`, base first, proposed second."""
+        self.assertEqual(
+            self.resolve(f"{self.HEAD_SHA} {self.BASE_SHA} {self.PROPOSED}\n"),
+            self.PROPOSED,
+        )
+
+    def test_a_plain_checkout_resolves_to_the_revision_itself(self) -> None:
+        """Every developer machine, and every push to `main`."""
+        self.assertEqual(self.resolve(f"{self.HEAD_SHA} {self.BASE_SHA}\n"), "HEAD")
+
+    def test_a_root_commit_resolves_to_itself(self) -> None:
+        """A parentless HEAD must not index off the end of the parent list."""
+        self.assertEqual(self.resolve(f"{self.HEAD_SHA}\n"), "HEAD")
+
+    def test_an_octopus_merge_is_not_treated_as_a_pull_request_merge(self) -> None:
+        """Fail closed: GitHub's merge ref has EXACTLY two parents.
+
+        A three-parent HEAD has no single proposed side. Resolving to `HEAD`
+        leaves the gate judging that commit on its own identity, which is the
+        conservative answer; picking one branch of three would audit an
+        arbitrary subset and call it the proposal.
+        """
+        self.assertEqual(
+            self.resolve(
+                f"{self.HEAD_SHA} {self.BASE_SHA} {self.PROPOSED} {self.THIRD}\n"
+            ),
+            "HEAD",
+        )
+
+    def test_the_parent_reader_agrees_with_git_on_this_checkout(self) -> None:
+        """The fakes above cannot see a WRONG `rev-list` invocation.
+
+        They feed `_parents` a line this suite wrote itself, so a mutation of
+        the git arguments would survive all four. This runs the real command
+        against the real checkout and compares it against the parent list git
+        reports through an entirely different formatter.
+        """
+        expected = tuple(CI._git("log", "-1", "--format=%P", "HEAD").split())
+        self.assertEqual(_parents("HEAD"), expected)
+
+
 class TheRepositoryRangeIsGreen(unittest.TestCase):
     def test_this_branch_is_clean_against_its_own_base(self) -> None:
         """The commits this pull request proposes must pass on their own.
 
         Resolved from git rather than hard-coded: the branch point is
         whatever `main` and this head actually share, so the assertion keeps
-        meaning as the branch grows.
+        meaning as the branch grows. Both ends go through `proposed_head`,
+        because under a `pull_request` event `HEAD` is GitHub's synthetic merge
+        commit rather than this branch's tip — see that helper for why.
         """
-        base = CI._git("merge-base", "HEAD", "origin/main").strip()
-        findings = CI.audit(base, "HEAD")
+        head = proposed_head()
+        base = CI._git("merge-base", head, "origin/main").strip()
+        findings = CI.audit(base, head)
         self.assertEqual(findings, [], "\n\n".join(findings))
 
     def test_the_range_reader_actually_returns_commits(self) -> None:
         """An empty range would make the assertion above vacuous."""
-        base = CI._git("merge-base", "HEAD", "origin/main").strip()
-        shas = CI.commits_in_range(base, "HEAD")
+        head = proposed_head()
+        base = CI._git("merge-base", head, "origin/main").strip()
+        shas = CI.commits_in_range(base, head)
         self.assertTrue(shas, "the range under test contains no commits")
         for sha in shas:
             self.assertRegex(sha, r"^[0-9a-f]{40}$")
 
     def test_reading_a_real_commit_recovers_its_fields(self) -> None:
-        head = CI.read_commits(["HEAD"])[0]
+        head = CI.read_commits([proposed_head()])[0]
         self.assertRegex(head.sha, r"^[0-9a-f]{40}$")
         self.assertEqual(head.author_email, OWNER)
         self.assertEqual(head.committer_email, OWNER)
@@ -232,6 +374,40 @@ class TheSeededHistoricalEntriesDescribeReality(unittest.TestCase):
 
 
 class TheLiftMechanismWorks(unittest.TestCase):
+    def tearDown(self) -> None:
+        """The tracked allowlist must survive every test in this class.
+
+        One test below rewrites the REAL file and puts it back in `finally`.
+        Comparing against `ALLOWLIST_BASELINE` — captured at import, before any
+        test ran — rather than against a "before" read inside the test is what
+        makes this catch a broken restore: a per-test snapshot is taken after
+        any earlier damage has already landed, and rewriting an
+        already-damaged file reproduces it exactly, so the check passes on a
+        corrupted tree.
+        """
+        self.assertEqual(
+            CI.ALLOWLIST_PATH.read_bytes(),
+            ALLOWLIST_BASELINE,
+            "a test in this class left the tracked allowlist modified on disk",
+        )
+
+    def test_the_blank_reason_fixture_lands_under_its_own_header(self) -> None:
+        """`entry_under_own_header` must not degrade into an append.
+
+        The fixture below inserts a blank-reason key to prove `load_allowlist`
+        fails closed. Appending it to the end of the file instead would put it
+        in whichever table is LAST — which in the shipped allowlist is this
+        gate's own `[commit_identity]`, so an append passes that test for
+        entirely the wrong reason and the two spellings are indistinguishable
+        from inside this file. This drives the helper against a document where
+        the target table is NOT last, which is the only arrangement that tells
+        them apart.
+        """
+        document = '[first]\n"aaa" = "x"\n\n[second]\n"bbb" = "y"\n'
+        parsed = tomllib.loads(entry_under_own_header(document, "first", '"ccc" = ""\n'))
+        self.assertIn("ccc", parsed["first"], "the entry missed its own table")
+        self.assertNotIn("ccc", parsed["second"], "an appended entry joins the LAST table")
+
     def test_every_refusal_prints_the_exact_line_to_add(self) -> None:
         for offender in (
             commit(sha="a" * 40, author=FOREIGN),
@@ -268,13 +444,15 @@ class TheLiftMechanismWorks(unittest.TestCase):
 
     def test_an_entry_without_a_reason_fails_closed(self) -> None:
         original = CI.ALLOWLIST_PATH.read_text(encoding="utf-8")
-        header = f"[{CI.ALLOWLIST_TABLE}]\n"
-        self.assertIn(header, original, "the table this rule reads is missing")
         try:
             # Inserted under its OWN header rather than appended: the allowlist
             # holds several tables and an appended key joins whichever is last.
+            # The helper is pinned by the placement test above; the restore is
+            # pinned by this class's `tearDown`.
             CI.ALLOWLIST_PATH.write_text(
-                original.replace(header, header + f'"{"f" * 40}" = ""\n', 1),
+                entry_under_own_header(
+                    original, CI.ALLOWLIST_TABLE, f'"{"f" * 40}" = ""\n'
+                ),
                 encoding="utf-8",
             )
             with self.assertRaises(CI.CommitIdentityError) as caught:
@@ -291,7 +469,7 @@ class TheReaderRefusesWhatItCannotRead(unittest.TestCase):
 
     def test_a_message_containing_the_field_separator_is_still_read(self) -> None:
         """Real bodies hold arbitrary text; the separators must be exotic."""
-        head = CI.read_commits(["HEAD"])[0]
+        head = CI.read_commits([proposed_head()])[0]
         self.assertNotIn(CI._FIELD, head.subject)
         self.assertNotIn(CI._RECORD, head.subject)
 
@@ -359,8 +537,9 @@ class TheReaderRefusesWhatItCannotRead(unittest.TestCase):
 
 class TheCommandLineReportsBothOutcomes(unittest.TestCase):
     def test_a_clean_range_exits_zero(self) -> None:
-        base = CI._git("merge-base", "HEAD", "origin/main").strip()
-        self.assertEqual(CI.main(["--base", base, "--head", "HEAD"]), 0)
+        head = proposed_head()
+        base = CI._git("merge-base", head, "origin/main").strip()
+        self.assertEqual(CI.main(["--base", base, "--head", head]), 0)
 
     def test_an_unreadable_range_exits_one(self) -> None:
         self.assertEqual(

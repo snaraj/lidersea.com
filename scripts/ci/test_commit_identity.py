@@ -22,8 +22,11 @@ What it does pin, and why each is load-bearing:
 
 from __future__ import annotations
 
+import json
+import os
 import re
 import sys
+import tempfile
 import tomllib
 import unittest
 from pathlib import Path
@@ -35,6 +38,7 @@ import commit_identity as CI  # noqa: E402
 OWNER = CI.SANCTIONED_EMAIL
 FOREIGN = "someone-else@example.invalid"
 TRAILER_LINE = "Co-authored-by" + ": Someone <someone@example.invalid>"
+HEAD_PLACEHOLDER = "c" * 40
 
 #: The tracked allowlist exactly as it sits on disk at import time, captured
 #: before any test can run. One test below rewrites that REAL file and restores
@@ -72,145 +76,218 @@ def entry_under_own_header(document: str, table: str, line: str) -> str:
     return document.replace(header, header + line, 1)
 
 
-def _parents(revision: str) -> tuple[str, ...]:
-    """The parent SHAs of `revision`, in order, straight from git."""
-    return tuple(CI._git("rev-list", "--parents", "-n", "1", revision).split()[1:])
+def proposed_range() -> tuple[str, str] | None:
+    """The exact `(base, head)` this run is asked to judge, or `None`.
 
-
-def proposed_head(revision: str = "HEAD") -> str:
-    """The commit this checkout PROPOSES, which is not always `HEAD`.
+    TAKEN FROM THE EVENT PAYLOAD, NEVER DERIVED FROM `HEAD`
+    ======================================================
 
     Under a `pull_request` event `actions/checkout` checks out
-    `refs/pull/N/merge` — GitHub's synthetic merge of the branch into its base.
-    `HEAD` is therefore that merge commit: its committer is GitHub's own
-    web-flow identity, and its SECOND parent is the commit the pull request
-    actually proposes. A suite that audited `HEAD` there would be auditing
-    GitHub's construct rather than the agent's work, and this gate refuses that
-    identity — correctly — so the assertions below went red in CI while passing
-    on every developer machine, where `HEAD` really is the branch tip. The
-    workflow's own gate step never had the defect: it passes the exact base and
-    head SHAs from the event payload and resolves no symbolic name at all.
+    `refs/pull/N/merge` — GitHub's synthetic merge of the branch into its base,
+    whose committer is GitHub's own web-flow identity. Assertions here used to
+    resolve `HEAD`, so in CI they read that merge commit rather than the branch
+    tip and this gate refused it, correctly, while every local run stayed green
+    because locally `HEAD` really IS the tip.
 
-    Resolution is STRUCTURAL, not environmental. Two parents means a merge and
-    the second parent is the side being offered, on GitHub and on a laptop
-    alike; no `GITHUB_*` variable is read, so one code path runs in both places
-    and there is no branch that only ever executes in CI. Exactly two parents,
-    never "two or more": GitHub's merge ref always has two, so a three-parent
-    HEAD is not one, has no single proposed side, and resolves to `HEAD` so the
-    gate judges it on its own identity rather than silently auditing one
-    arbitrary branch of three.
+    The fix is not to teach the suite how to walk back from a merge ref. It is
+    to stop asking `HEAD` at all. `pull_request.base.sha` and
+    `pull_request.head.sha` are the SAME two values the workflow's gate step
+    passes to `commit_identity.py`, read from the same payload, so the suite and
+    the gate judge one identical range and neither depends on what the checkout
+    happens to have put at `HEAD`. Nothing here regresses if the checkout's
+    depth or ref changes later.
 
-    Two alternatives were considered and rejected:
+    FAIL CLOSED, WITH NO FALL-BACK TO `HEAD`
+    ========================================
 
-      * Teaching `violations()` to ADMIT a two-parent commit carrying GitHub's
-        committer. That punches a hole in the one rule this module exists to
-        enforce — any commit with that identity would pass — and
-        `test_githubs_own_merge_identity_is_not_sanctioned_either` states the
-        opposite as a deliberate decision. The web-flow identity is out of
-        SCOPE here; it is never sanctioned.
-      * Allowlisting the merge commit by SHA. GitHub rebuilds that ref on every
-        push, so the entry would be stale before the next commit landed.
+    Under a pull request the payload is the only honest source, so an
+    unreadable or incomplete one RAISES. A fall-back to `HEAD` is precisely the
+    defect this function exists to remove: it would restore the silent, green,
+    wrong behaviour on the one event where `HEAD` is not the branch tip. The
+    module's own CLI takes the same position — `--base` and `--head` are
+    `required=True` with no default, so the range can never be reached by
+    omission.
 
-    Tests elsewhere in this suite still name `HEAD` literally, deliberately:
-    an unreadable-range error path, git's collapsing of a repeated revision,
-    and an existence probe all hold for ANY revision and gain nothing from
-    resolution. Only an assertion that reads a commit's identity or defines
-    the audited range needs this helper.
+    WHY A PUSH TO `main` RETURNS `None` RATHER THAN A RANGE
+    ======================================================
+
+    On a push to `main` the range is the owner's merge, and its committer is
+    GitHub's web-flow identity. `commit_identity.py` documents that as OUT OF
+    SCOPE, and the workflow's gate step is guarded
+    `if: github.event_name == 'pull_request'` for exactly that reason — every
+    commit was already judged at the pull-request head, where an agent could
+    still fix it.
+
+    The suite's step carries NO such guard, so it does run on main pushes, and
+    that is a real defect this returns `None` to close: an assertion reading
+    `HEAD` there would read the owner's squash merge, refuse it, and hold main
+    CI permanently red — blocking the release chain over a commit no pull
+    request can repair. A stated skip honours the same boundary the gate step
+    draws instead of auditing a range the gate itself declines to audit.
+
+    With no `GITHUB_EVENT_NAME` at all this is a developer checkout, where
+    `HEAD` genuinely is the branch tip and the branch point against
+    `origin/main` is the useful pre-push range.
     """
-    parents = _parents(revision)
-    return parents[1] if len(parents) == 2 else revision
+    event_name = os.environ.get("GITHUB_EVENT_NAME", "")
+    if not event_name:
+        head = CI._git("rev-parse", "HEAD").strip()
+        return CI._git("merge-base", head, "origin/main").strip(), head
+    if event_name != "pull_request":
+        return None
+    event_path = os.environ.get("GITHUB_EVENT_PATH", "")
+    if not event_path or not Path(event_path).is_file():
+        raise CI.CommitIdentityError(
+            "GITHUB_EVENT_NAME is 'pull_request' but the event payload is "
+            f"unreadable ({event_path!r}); refusing to fall back to HEAD, "
+            "which under this event is GitHub's synthetic merge commit"
+        )
+    payload = json.loads(Path(event_path).read_text(encoding="utf-8"))
+    pull = payload.get("pull_request") or {}
+    base = (pull.get("base") or {}).get("sha")
+    head = (pull.get("head") or {}).get("sha")
+    if not base or not head:
+        raise CI.CommitIdentityError(
+            "the pull_request payload carries no base.sha/head.sha pair; "
+            "refusing to guess the range this pull request proposes"
+        )
+    return base, head
 
 
-class TheProposedHeadIsResolvedStructurally(unittest.TestCase):
-    """The helper that keeps this suite pointed at the right commit in CI.
+def require_range(case: unittest.TestCase) -> tuple[str, str]:
+    """The pull-request range, or skip the calling test with a stated reason."""
+    found = proposed_range()
+    if found is None:
+        case.skipTest(
+            "this event proposes no pull-request range (see proposed_range): "
+            "the owner's merge is out of scope for the identity rule, and "
+            "refusing it here would hold main CI red"
+        )
+    return found
 
-    The repository can only ever be in ONE of the shapes below, so each is
-    driven through a hand-written `_git` (testing doctrine: stdlib only,
-    hand-written fakes, no mock framework). The last test covers what those
-    fakes structurally cannot: that the real git invocation is the right one.
+
+class TheAuditedRangeComesFromTheEventPayload(unittest.TestCase):
+    """The resolver, driven through every shape the environment can take.
+
+    The environment is saved and restored by hand rather than through a mock
+    framework (testing doctrine: stdlib only, hand-written fakes).
     """
 
-    HEAD_SHA = "a" * 40
-    BASE_SHA = "b" * 40
-    PROPOSED = "c" * 40
-    THIRD = "d" * 40
+    BASE = "b" * 40
+    HEAD = "c" * 40
 
-    def resolve(self, rev_list_line: str) -> str:
-        original = CI._git
+    def resolve(self, environment: dict[str, str], git=None):
+        saved = {
+            key: os.environ.get(key)
+            for key in ("GITHUB_EVENT_NAME", "GITHUB_EVENT_PATH")
+        }
+        original_git = CI._git
         try:
-            CI._git = lambda *args: rev_list_line
-            return proposed_head()
+            for key, value in saved.items():
+                os.environ.pop(key, None)
+            os.environ.update(environment)
+            if git is not None:
+                CI._git = git
+            return proposed_range()
         finally:
-            CI._git = original
+            CI._git = original_git
+            for key, value in saved.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
 
-    def test_a_two_parent_head_resolves_to_the_side_being_proposed(self) -> None:
-        """CI's shape: `refs/pull/N/merge`, base first, proposed second."""
-        self.assertEqual(
-            self.resolve(f"{self.HEAD_SHA} {self.BASE_SHA} {self.PROPOSED}\n"),
-            self.PROPOSED,
+    def payload_file(self, payload: str) -> str:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        path = Path(directory.name) / "event.json"
+        path.write_text(payload, encoding="utf-8")
+        return str(path)
+
+    def test_a_pull_request_run_takes_both_shas_from_the_payload(self) -> None:
+        """And touches git for the range not at all.
+
+        The `git` fake raises, so any surviving `HEAD` resolution on this path
+        is an error rather than a passing test — which is the whole point:
+        under this event `HEAD` is GitHub's synthetic merge commit.
+        """
+
+        def refuse(*args):
+            raise AssertionError(f"the payload path must not consult git: {args}")
+
+        path = self.payload_file(
+            '{"pull_request": {"base": {"sha": "%s"}, "head": {"sha": "%s"}}}'
+            % (self.BASE, self.HEAD)
+        )
+        found = self.resolve(
+            {"GITHUB_EVENT_NAME": "pull_request", "GITHUB_EVENT_PATH": path},
+            git=refuse,
+        )
+        self.assertEqual(found, (self.BASE, self.HEAD))
+
+    def test_an_unreadable_payload_fails_closed_rather_than_using_head(self) -> None:
+        """The exact regression this function exists to prevent."""
+        for path in ("", "/nonexistent/event.json"):
+            with self.subTest(path=path):
+                with self.assertRaises(CI.CommitIdentityError) as caught:
+                    self.resolve(
+                        {"GITHUB_EVENT_NAME": "pull_request", "GITHUB_EVENT_PATH": path}
+                    )
+                self.assertIn("refusing to fall back to HEAD", str(caught.exception))
+
+    def test_a_payload_missing_either_sha_fails_closed(self) -> None:
+        for payload in (
+            '{"pull_request": {"head": {"sha": "%s"}}}' % HEAD_PLACEHOLDER,
+            '{"pull_request": {"base": {"sha": "%s"}}}' % HEAD_PLACEHOLDER,
+            '{"pull_request": {}}',
+            "{}",
+        ):
+            with self.subTest(payload=payload):
+                path = self.payload_file(payload)
+                with self.assertRaises(CI.CommitIdentityError) as caught:
+                    self.resolve(
+                        {"GITHUB_EVENT_NAME": "pull_request", "GITHUB_EVENT_PATH": path}
+                    )
+                self.assertIn("refusing to guess", str(caught.exception))
+
+    def test_a_push_to_main_proposes_no_range(self) -> None:
+        """The owner's merge is out of scope, and refusing it would hold main red."""
+        path = self.payload_file('{"before": "%s", "after": "%s"}' % (self.BASE, self.HEAD))
+        self.assertIsNone(
+            self.resolve({"GITHUB_EVENT_NAME": "push", "GITHUB_EVENT_PATH": path})
         )
 
-    def test_a_plain_checkout_resolves_to_the_revision_itself(self) -> None:
-        """Every developer machine, and every push to `main`."""
-        self.assertEqual(self.resolve(f"{self.HEAD_SHA} {self.BASE_SHA}\n"), "HEAD")
-
-    def test_a_root_commit_resolves_to_itself(self) -> None:
-        """A parentless HEAD must not index off the end of the parent list."""
-        self.assertEqual(self.resolve(f"{self.HEAD_SHA}\n"), "HEAD")
-
-    def test_an_octopus_merge_is_not_treated_as_a_pull_request_merge(self) -> None:
-        """Fail closed: GitHub's merge ref has EXACTLY two parents.
-
-        A three-parent HEAD has no single proposed side. Resolving to `HEAD`
-        leaves the gate judging that commit on its own identity, which is the
-        conservative answer; picking one branch of three would audit an
-        arbitrary subset and call it the proposal.
-        """
-        self.assertEqual(
-            self.resolve(
-                f"{self.HEAD_SHA} {self.BASE_SHA} {self.PROPOSED} {self.THIRD}\n"
-            ),
-            "HEAD",
-        )
-
-    def test_the_parent_reader_agrees_with_git_on_this_checkout(self) -> None:
-        """The fakes above cannot see a WRONG `rev-list` invocation.
-
-        They feed `_parents` a line this suite wrote itself, so a mutation of
-        the git arguments would survive all four. This runs the real command
-        against the real checkout and compares it against the parent list git
-        reports through an entirely different formatter.
-        """
-        expected = tuple(CI._git("log", "-1", "--format=%P", "HEAD").split())
-        self.assertEqual(_parents("HEAD"), expected)
+    def test_a_developer_checkout_uses_the_local_branch_point(self) -> None:
+        """No event at all: `HEAD` really is the tip, and the range is useful."""
+        found = self.resolve({})
+        self.assertIsNotNone(found)
+        base, head = found
+        self.assertEqual(head, CI._git("rev-parse", "HEAD").strip())
+        self.assertEqual(base, CI._git("merge-base", head, "origin/main").strip())
 
 
 class TheRepositoryRangeIsGreen(unittest.TestCase):
     def test_this_branch_is_clean_against_its_own_base(self) -> None:
         """The commits this pull request proposes must pass on their own.
 
-        Resolved from git rather than hard-coded: the branch point is
-        whatever `main` and this head actually share, so the assertion keeps
-        meaning as the branch grows. Both ends go through `proposed_head`,
-        because under a `pull_request` event `HEAD` is GitHub's synthetic merge
-        commit rather than this branch's tip — see that helper for why.
+        The range comes from `proposed_range` — the event payload in CI, the
+        local branch point on a developer machine — never from `HEAD`, which
+        under a `pull_request` event is GitHub's synthetic merge commit.
         """
-        head = proposed_head()
-        base = CI._git("merge-base", head, "origin/main").strip()
+        base, head = require_range(self)
         findings = CI.audit(base, head)
         self.assertEqual(findings, [], "\n\n".join(findings))
 
     def test_the_range_reader_actually_returns_commits(self) -> None:
         """An empty range would make the assertion above vacuous."""
-        head = proposed_head()
-        base = CI._git("merge-base", head, "origin/main").strip()
+        base, head = require_range(self)
         shas = CI.commits_in_range(base, head)
         self.assertTrue(shas, "the range under test contains no commits")
         for sha in shas:
             self.assertRegex(sha, r"^[0-9a-f]{40}$")
 
     def test_reading_a_real_commit_recovers_its_fields(self) -> None:
-        head = CI.read_commits([proposed_head()])[0]
+        head = CI.read_commits([require_range(self)[1]])[0]
         self.assertRegex(head.sha, r"^[0-9a-f]{40}$")
         self.assertEqual(head.author_email, OWNER)
         self.assertEqual(head.committer_email, OWNER)
@@ -469,7 +546,7 @@ class TheReaderRefusesWhatItCannotRead(unittest.TestCase):
 
     def test_a_message_containing_the_field_separator_is_still_read(self) -> None:
         """Real bodies hold arbitrary text; the separators must be exotic."""
-        head = CI.read_commits([proposed_head()])[0]
+        head = CI.read_commits([require_range(self)[1]])[0]
         self.assertNotIn(CI._FIELD, head.subject)
         self.assertNotIn(CI._RECORD, head.subject)
 
@@ -537,8 +614,7 @@ class TheReaderRefusesWhatItCannotRead(unittest.TestCase):
 
 class TheCommandLineReportsBothOutcomes(unittest.TestCase):
     def test_a_clean_range_exits_zero(self) -> None:
-        head = proposed_head()
-        base = CI._git("merge-base", head, "origin/main").strip()
+        base, head = require_range(self)
         self.assertEqual(CI.main(["--base", base, "--head", head]), 0)
 
     def test_an_unreadable_range_exits_one(self) -> None:

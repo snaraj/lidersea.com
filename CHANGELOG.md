@@ -95,7 +95,36 @@ Git, image, and GitHub Release tags use the exact plain `vX.Y.Z` form.
   free: the same entrypoint is pointed at a scratch directory holding one
   violating workflow and must report it. It pins NO step inventory, and both
   files argue at length why one must never be added.
-- `scripts/ci/ci_gate_allowlist.toml`, the shared lift mechanism for both
+- A commit-identity gate (`scripts/ci/commit_identity.py` and
+  `scripts/ci/test_commit_identity.py`) closing a surface the enforced secret
+  scan structurally could not reach. `gitleaks git` and `gitleaks dir` both
+  read BLOB CONTENT; commit author/committer identities and commit message
+  bodies are neither, so the two rules requirement 3 states — the owner
+  noreply identity in BOTH fields, and no co-author trailer ever — were prose
+  with zero mechanical coverage. An agent that forgot to pin
+  `GIT_AUTHOR_EMAIL` would have pushed a foreign address past every green
+  check, and it would have become permanently public on merge. The gate walks
+  the range a pull request PROPOSES and refuses both, with two stated
+  non-goals: it is not a history audit, because history is append-only and a
+  gate that could only refuse an unfixable past would need a permanently
+  growing exemption list; and it does not run on `main` pushes, because the
+  owner's merge is stamped with GitHub's own web-flow committer — 59 of
+  `main`'s 86 commits would be refused by a history-wide run — and refusing
+  that would hold main CI red forever while proving nothing an agent could act
+  on. No failure message
+  echoes the address it refused, because those messages land in public CI
+  logs.
+- Five historical exceptions recorded in the allowlist rather than erased: the
+  root commit, whose author and committer predate the noreply rule, and four
+  onboarding-era squashes carrying five co-author trailers between them. All
+  are ancestors of `main`, permanently public, and unrepairable without
+  rewriting history from the root, which requirement 2 forbids. They are
+  keyed by SHA and never by address — an allowlist keyed by address would copy
+  a third party's contact detail into a tracked file, which is exactly what
+  requirement 11 exists to prevent — and the suite proves each names a real
+  commit that really does break a rule, so an exemption that stopped exempting
+  anything would be reported instead of kept.
+- `scripts/ci/ci_gate_allowlist.toml`, the shared lift mechanism for all three
   gates. Every refusal above is liftable with ONE line carrying a written
   reason, and every failure message names the file and prints the exact line
   to add. An entry with a blank reason fails closed, and a stale entry — one

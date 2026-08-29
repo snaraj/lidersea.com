@@ -3594,6 +3594,60 @@ class ChangelogAppendOnlyTests(unittest.TestCase):
             RC.validate_snapshot(files)
         self.assertIn("newest release is 0.1.11", str(denied.exception))
 
+    def test_snapshot_runs_the_ordering_rules_on_the_file_the_release_ships(self):
+        """The band between the new release and the shipped history is the blind spot.
+
+        `require_changelog_append_only` is satisfied the moment the base's
+        released bytes survive as a suffix, so a version block spliced BETWEEN
+        the release being cut and the previously newest heading leaves it
+        completely undisturbed — this test asserts that acceptance rather than
+        assuming it. Only the whole-file ordering rules can see such a block,
+        and they are driven here THROUGH `validate_snapshot`: calling
+        `validate_changelog_history` directly still passes when
+        `validate_snapshot` has stopped calling it, so a direct-call test
+        cannot tell the two apart. Replacing that call with the parse it wraps
+        is a mutant the rest of the suite does not kill.
+        """
+        base = changelog("0.1.12")
+        released = f"## [0.1.13] - {CHANGELOG_DATE}\n\n- release\n\n"
+        for name, forged, marker in (
+            (
+                "a newer version forged below the release being cut",
+                f"## [0.1.99] - {CHANGELOG_DATE}\n\n- smuggled\n\n",
+                "appears below the older",
+            ),
+            (
+                # This one never reaches the ordering rules: the older
+                # exactly-one-current-heading check fires first. Kept because a
+                # reader deserves to know WHICH rule owns each forgery.
+                "the released version repeated below itself",
+                f"## [0.1.13] - {CHANGELOG_DATE}\n\n- smuggled\n\n",
+                "exactly one dated current-version heading",
+            ),
+            (
+                "a forged heading postdating the release being cut",
+                "## [0.1.1] - 2099-01-01\n\n- smuggled\n\n",
+                "after the newer",
+            ),
+            (
+                "a forged heading carrying an impossible calendar date",
+                "## [0.1.1] - 2026-02-31\n\n- smuggled\n\n",
+                "not a real ISO date",
+            ),
+        ):
+            with self.subTest(forgery=name):
+                files = snapshot("0.1.13", base)
+                self.assertIn(released, files["CHANGELOG.md"])
+                files["CHANGELOG.md"] = files["CHANGELOG.md"].replace(
+                    released, released + forged, 1
+                )
+                # The append-only guard cannot see this: every byte the base
+                # released is still the tail of the file, untouched.
+                RC.require_changelog_append_only(base, files["CHANGELOG.md"])
+                with self.assertRaises(RC.ContractError) as denied:
+                    RC.validate_snapshot(files)
+                self.assertIn(marker, str(denied.exception))
+
 
 class ChangelogAppendOnlyTransitionTests(unittest.TestCase):
     """The same property over a REAL base..head range, through the CI entrypoint.

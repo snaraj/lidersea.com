@@ -25,6 +25,7 @@
   --palette-dark-edge: #3d8098;
   --palette-dark-accent: #7fd4c6;
   --palette-dark-accent-ink: #04161e;
+  --palette-dark-meter-fill: #92e8d9;
 
   --palette-light-canvas: #f3f7f5;
   --palette-light-raised: #ffffff;
@@ -33,6 +34,7 @@
   --palette-light-edge: #5e8b86;
   --palette-light-accent: #0f5f57;
   --palette-light-accent-ink: #ffffff;
+  --palette-light-meter-fill: #083e38;
 
   /* Sepia is a third EXPLICIT choice, not a warmer dark: the same low-light
      comfort on a paper-toned surface rather than a cool one. Its values are
@@ -45,6 +47,7 @@
   --palette-sepia-edge: #8a765f;
   --palette-sepia-accent: #e0b578;
   --palette-sepia-accent-ink: #1c1714;
+  --palette-sepia-meter-fill: #ffd395;
 
   /* Scale tokens. No theme block may redeclare one: that is what keeps a
      reading-mode change from resizing anything. */
@@ -83,6 +86,7 @@
   --edge: var(--palette-dark-edge);
   --accent: var(--palette-dark-accent);
   --accent-ink: var(--palette-dark-accent-ink);
+  --meter-fill: var(--palette-dark-meter-fill);
 
   color-scheme: var(--ui-scheme);
   color: var(--ink);
@@ -102,6 +106,7 @@
     --edge: var(--palette-light-edge);
     --accent: var(--palette-light-accent);
     --accent-ink: var(--palette-light-accent-ink);
+    --meter-fill: var(--palette-light-meter-fill);
   }
 }
 
@@ -117,6 +122,7 @@
   --edge: var(--palette-light-edge);
   --accent: var(--palette-light-accent);
   --accent-ink: var(--palette-light-accent-ink);
+  --meter-fill: var(--palette-light-meter-fill);
 }
 
 :root[data-theme='dark'] {
@@ -128,6 +134,7 @@
   --edge: var(--palette-dark-edge);
   --accent: var(--palette-dark-accent);
   --accent-ink: var(--palette-dark-accent-ink);
+  --meter-fill: var(--palette-dark-meter-fill);
 }
 
 /* Sepia declares the dark UI scheme because it IS a low-light surface: form
@@ -142,6 +149,7 @@
   --edge: var(--palette-sepia-edge);
   --accent: var(--palette-sepia-accent);
   --accent-ink: var(--palette-sepia-accent-ink);
+  --meter-fill: var(--palette-sepia-meter-fill);
 }
 
 * {
@@ -439,11 +447,13 @@ p {
   background: var(--edge);
 }
 
+/* Its own token, not --accent: accent-on-edge measured 1.97-2.56:1, under
+   the 3:1 the contrast sweep in tests/experience.test.mjs now enforces. */
 .ratings__meter-fill {
   display: block;
   block-size: 100%;
   border-radius: inherit;
-  background: var(--accent);
+  background: var(--meter-fill);
 }
 
 .ratings__count {

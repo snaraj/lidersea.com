@@ -495,15 +495,35 @@ test('colour literals exist only in the palette block', () => {
 
 // Every palette is validated for contrast, not asserted to be pretty. The
 // pairs below are every foreground that carries meaning on the background it
-// is painted on. Text meets WCAG 2.2 AA (4.5:1); the switcher's border and
-// the focus ring are non-text interface boundaries and meet 3:1.
+// is painted on. Text meets WCAG 2.2 AA (4.5:1); the switcher's border, the
+// focus ring, and the ratings meter are non-text interface boundaries and
+// meet 3:1.
 //
-// The ratings meter's fill on its own track is deliberately NOT here, and the
-// exclusion is the reason rather than an oversight: the meter is aria-hidden
-// and repeats a value the number and the review count already state in text,
-// so it is not a graphic required to understand the content. Were it ever the
-// sole encoding of a value, it would have to join interfacePairs — and it does
-// not clear 3:1 today.
+// The meter's boundaries used to be an EXCLUSION rather than rows here: its
+// fill was --accent painted straight onto the --edge track, which measures
+// 1.97:1 light, 2.28:1 sepia and 2.56:1 dark — all under the floor. The
+// exclusion argued the meter is aria-hidden and repeats a value the number and
+// the review count already state in text, so no assistive technology depends
+// on it. That was true and still missed the visitor it mattered to: a sighted
+// person reading a dim phone in daylight sees the bar before the digits, and
+// the filled/empty boundary is exactly what 1.4.11 exists to keep legible.
+//
+// So the fill became its own token. --meter-fill is --accent moved in OKLCH
+// LIGHTNESS ONLY until the boundary clears 3:1 — hue drift is under 1 degree
+// in all three palettes, and chroma is held wherever the sRGB gamut allows —
+// so the bar reads as the brand colour rather than a second one:
+//
+//   palette   accent    meter-fill   fill/track   fill/card
+//   dark      #7fd4c6   #92e8d9       3.12:1       9.89:1
+//   light     #0f5f57   #083e38       3.14:1      11.96:1
+//   sepia     #e0b578   #ffd395       3.10:1      11.19:1
+//
+// The TRACK deliberately stays --edge, so the edge/raised row below still
+// covers it. Giving the track a token of its own would have cleared the same
+// 3:1 by receding it instead — and dropped the track's own contrast against
+// the card from 3.18-3.81:1 to roughly 2.5:1, closing one exclusion by opening
+// another. Both meter boundaries are swept rows now; nothing about this widget
+// sits outside the floors.
 test('every palette clears its contrast floors', () => {
   const palette = paletteLiterals();
   const textPairs = [
@@ -518,6 +538,10 @@ test('every palette clears its contrast floors', () => {
     ['edge', 'raised'],
     ['accent', 'canvas'],
     ['accent', 'raised'],
+    // The meter, both boundaries: the filled/empty edge that carries the
+    // value, and the fill against the card it is painted on.
+    ['meter-fill', 'edge'],
+    ['meter-fill', 'raised'],
   ];
   assertCatalogIsFullyStamped();
   for (const theme of stampedThemes) {
@@ -899,6 +923,33 @@ test('the ratings strip pairs every value with text and shape', () => {
   assert.match(component, /\{platform\.rating\}/, 'the rating must render as text');
   assert.match(component, /\{platform\.reviewCount\} reviews/, 'the count must render as text');
   assert.match(component, /meterPercent\(platform, ratings\.summary\.scale\)/);
+});
+
+// The wiring the contrast sweep cannot see. That sweep validates the LITERALS
+// --palette-*-meter-fill against --palette-*-edge, which stays green even if
+// the meter goes back to painting itself with --accent and the new token is
+// simply never consumed — a validated colour nothing renders. So the two
+// rules are pinned to the tokens the sweep actually measured: the fill takes
+// --meter-fill, the track stays --edge, and either one drifting to some other
+// token makes the floors above describe a widget that no longer exists.
+test('the meter paints itself with the tokens the contrast sweep validates', () => {
+  const rule = (selector) => {
+    const block = declarationBlocks(styles).find((entry) => entry.selector === selector);
+    assert.ok(block, `the ${selector} rule is missing`);
+    const background = declarations(block.body).find(({ property }) => property === 'background');
+    assert.ok(background, `${selector} declares no background`);
+    return background.value.trim();
+  };
+  assert.equal(
+    rule('.ratings__meter-fill'),
+    'var(--meter-fill)',
+    'the meter fill must consume --meter-fill; --accent on --edge is the pair that failed 3:1',
+  );
+  assert.equal(
+    rule('.ratings__meter'),
+    'var(--edge)',
+    'the meter track must stay --edge, the token the fill was validated against',
+  );
 });
 
 // Zero CLS again, for late data this time: the strip's band exists at its

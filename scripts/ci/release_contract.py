@@ -221,6 +221,171 @@ def _direct_child_scalar(text: str, parent: str, key: str) -> str:
     return _direct_child_entry(text, parent, key)[1]
 
 
+#: One dated release heading in the Keep a Changelog file. The date group is
+#: shape-only: `dt.date.fromisoformat` decides whether it is a real calendar
+#: date, so 2026-02-31 parses here and is refused below.
+CHANGELOG_RELEASE_RE = re.compile(
+    r"^## \[(?P<version>[0-9]+\.[0-9]+\.[0-9]+)\] - (?P<date>[0-9]{4}-[0-9]{2}-[0-9]{2})$",
+    re.MULTILINE,
+)
+
+#: What an author must do instead of editing a section that already shipped.
+#: It is printed by every append-only refusal, because a refusal that does not
+#: name the sanctioned path teaches the reader to look for a way around it.
+CHANGELOG_ERRATUM_INSTRUCTION = (
+    "CHANGELOG.md is the human-readable half of the release ledger and its "
+    "released sections are APPEND-ONLY: a new version block goes above the "
+    "newest released heading and nothing at or below that heading may change. "
+    "Correct a shipped entry by writing a NEW erratum entry under the version "
+    "this range releases — naming the release it corrects — never by editing "
+    "the section that already shipped. Restore the released bytes exactly and "
+    "move the correction into the new block."
+)
+
+
+@dataclass(frozen=True)
+class ChangelogRelease:
+    """One dated release heading and where it starts in the file."""
+
+    version: Version
+    date: dt.date
+    start: int
+
+
+def parse_changelog_releases(text: str) -> list[ChangelogRelease]:
+    """Return every dated release heading, in the order the file lists them."""
+    releases: list[ChangelogRelease] = []
+    for match in CHANGELOG_RELEASE_RE.finditer(text):
+        version = Version.parse(match.group("version"))
+        try:
+            date = dt.date.fromisoformat(match.group("date"))
+        except ValueError as exc:
+            raise ContractError(
+                f"changelog release {version} is dated {match.group('date')!r}, "
+                "which is not a real ISO date"
+            ) from exc
+        releases.append(ChangelogRelease(version=version, date=date, start=match.start()))
+    return releases
+
+
+def validate_changelog_history(text: str) -> list[ChangelogRelease]:
+    """Refuse a changelog whose released headings are not one descending ledger.
+
+    Shape only: duplicates, a reordered pair, and a historical date that
+    postdates a newer release all deny here, on any single snapshot. It cannot
+    see a DELETED heading — nothing in one file says what used to be in it —
+    which is why `require_changelog_append_only` compares base to head.
+    """
+    releases = parse_changelog_releases(text)
+    if not releases:
+        raise ContractError("changelog carries no dated release heading")
+    previous = releases[0]
+    for entry in releases[1:]:
+        if entry.version == previous.version:
+            raise ContractError(
+                f"changelog lists release {entry.version} more than once"
+            )
+        if entry.version > previous.version:
+            raise ContractError(
+                f"changelog release {entry.version} appears below the older "
+                f"{previous.version}; released headings read newest first"
+            )
+        if entry.date > previous.date:
+            raise ContractError(
+                f"changelog release {entry.version} is dated {entry.date}, after "
+                f"the newer {previous.version} dated {previous.date}"
+            )
+        previous = entry
+    return releases
+
+
+def released_changelog_history(text: str) -> str:
+    """Return the exact bytes a released changelog may never change again.
+
+    Everything from the NEWEST dated heading to end of file: every released
+    section plus any undated tail block below them, which is equally released
+    history. An empty result means nothing has been released yet.
+    """
+    releases = parse_changelog_releases(text)
+    if not releases:
+        return ""
+    return text[releases[0].start :]
+
+
+def _changelog_sections(text: str) -> dict[Version, str]:
+    """Map each dated release to its bytes, for refusal diagnostics only.
+
+    The OLDEST section runs to end of file, so an edit to an undated tail
+    block ("## [0.1.3] and earlier") is reported against the oldest dated
+    release. That is a message-precision detail: the byte comparison in
+    `require_changelog_append_only` covers those bytes either way.
+    """
+    releases = parse_changelog_releases(text)
+    sections: dict[Version, str] = {}
+    for index, entry in enumerate(releases):
+        end = releases[index + 1].start if index + 1 < len(releases) else len(text)
+        sections[entry.version] = text[entry.start : end]
+    return sections
+
+
+def require_changelog_append_only(base_text: str, head_text: str) -> None:
+    """Refuse any head that rewrites changelog history the base already shipped.
+
+    The whole property is one byte comparison: the base's released history —
+    its newest dated heading through end of file — must survive in the head as
+    an exact SUFFIX. That admits exactly one edit shape, inserting above the
+    newest released heading, and refuses every other: a deleted heading, a
+    reworded historical entry, a mutated historical date, a reordered pair, and
+    a new block spliced in below the top. The per-section comparison below
+    exists only to say WHICH release was disturbed.
+    """
+    history = released_changelog_history(base_text)
+    if not history:
+        return  # nothing has been released yet, so there is no history to keep
+    if head_text.endswith(history):
+        return
+    base_sections = _changelog_sections(base_text)
+    head_sections = _changelog_sections(head_text)
+    removed = sorted(
+        (version for version in base_sections if version not in head_sections),
+        reverse=True,
+    )
+    mutated = sorted(
+        (
+            version
+            for version, section in base_sections.items()
+            if version in head_sections and head_sections[version] != section
+        ),
+        reverse=True,
+    )
+    if history in head_text:
+        # Every shipped byte is still present, in order, but no longer at the
+        # end: something was written BELOW the released history. A merely
+        # "contains" check would accept this, which is why the test above is a
+        # suffix — a version block invented under the oldest release is as much
+        # a forged ledger as a deleted one.
+        finding = (
+            "content was appended below the released history, which must stay "
+            "the tail of the file"
+        )
+    elif removed:
+        finding = "released changelog sections deleted: " + ", ".join(
+            str(version) for version in removed
+        )
+    elif mutated:
+        finding = "released changelog sections rewritten: " + ", ".join(
+            str(version) for version in mutated
+        )
+    else:
+        # Every released section kept its own bytes, so the break is positional:
+        # something was inserted or reordered inside the released history.
+        finding = (
+            "released changelog history was reordered, or a section was inserted "
+            "below the newest released heading"
+        )
+    raise ContractError(f"{finding}. {CHANGELOG_ERRATUM_INSTRUCTION}")
+
+
 def validate_snapshot(files: Mapping[str, str]) -> ReleaseIntent:
     required = {"VERSION", "chart/Chart.yaml", "chart/values.yaml", "CHANGELOG.md"}
     missing = sorted(required.difference(files))
@@ -248,6 +413,15 @@ def validate_snapshot(files: Mapping[str, str]) -> ReleaseIntent:
     top = re.compile(rf"^## \[Unreleased\]\s*\n+## \[{escaped}\] - {re.escape(headings[0])}$", re.MULTILINE)
     if not top.search(files["CHANGELOG.md"]):
         raise ContractError("current release must immediately follow an empty Unreleased heading")
+    # Everything above reads the CURRENT version's heading only, so every
+    # heading below the first was unguarded: a snapshot could repeat, reorder,
+    # or misdate its own history and still validate.
+    releases = validate_changelog_history(files["CHANGELOG.md"])
+    if releases[0].version != version:
+        raise ContractError(
+            f"changelog's newest release is {releases[0].version}, not the "
+            f"released {version}"
+        )
     return ReleaseIntent(source_sha="", version=version)
 
 
@@ -491,6 +665,13 @@ def validate_transition(repository: Path, base_sha: str, head_sha: str, *, first
         for path in ("VERSION", "chart/Chart.yaml", "chart/values.yaml", "CHANGELOG.md")
     }
     head = validate_snapshot(head_files)
+    # Only a base-to-head comparison can prove the changelog is append-only:
+    # the head snapshot alone cannot say what the base already published, so a
+    # range that deletes or rewrites a released section satisfies every other
+    # check in this module.
+    require_changelog_append_only(
+        _git_file(repository, base_sha, "CHANGELOG.md"), head_files["CHANGELOG.md"]
+    )
     # The endpoint check remains a useful independent assertion, while the
     # shared state machine above also examines every intermediate commit.
     require_next_patch(base_version, head.version)

@@ -31,13 +31,38 @@ sys.modules[SPEC.name] = RC
 SPEC.loader.exec_module(RC)
 
 
-def snapshot(version: str) -> dict[str, str]:
+CHANGELOG_DATE = "2026-08-13"
+
+
+def changelog(version: str, previous: str | None = None) -> str:
+    """One Keep-a-Changelog file that APPENDS ``version`` above shipped history.
+
+    Real releases only ever insert above the newest dated heading, and
+    ``RC.require_changelog_append_only`` now enforces exactly that, so the
+    fixture repositories have to grow the same way a real one does. Every
+    released date is identical on purpose: equal dates are legal down the file
+    (a repository can ship twice in a day), so the fixtures exercise the
+    ordering rule at its boundary rather than avoiding it.
+    """
+    entry = f"## [{version}] - {CHANGELOG_DATE}\n\n- release\n"
+    history = RC.released_changelog_history(previous) if previous else ""
+    return "# Changelog\n\n## [Unreleased]\n\n" + entry + (f"\n{history}" if history else "")
+
+
+def snapshot(version: str, previous_changelog: str | None = None) -> dict[str, str]:
     return {
         "VERSION": version + "\n",
         "chart/Chart.yaml": f"apiVersion: v2\nversion: {version}\nappVersion: \"{version}\"\n",
         "chart/values.yaml": f"image:\n  tag: v{version}\n",
-        "CHANGELOG.md": f"# Changelog\n\n## [Unreleased]\n\n## [{version}] - 2026-08-13\n\n- release\n",
+        "CHANGELOG.md": changelog(version, previous_changelog),
     }
+
+
+def released_snapshot(root: Path, version: str) -> dict[str, str]:
+    """The next release's four locks, carrying ``root``'s existing changelog."""
+    existing = root / "CHANGELOG.md"
+    previous = existing.read_text(encoding="utf-8") if existing.exists() else None
+    return snapshot(version, previous)
 
 
 def event(sha: str) -> dict[str, object]:
@@ -3180,7 +3205,7 @@ class GitTransitionTests(unittest.TestCase):
         return subprocess.run(["git", "-C", str(root), *args], check=True, text=True, stdout=subprocess.PIPE).stdout.strip()
 
     def commit(self, root: Path, version: str) -> str:
-        files = snapshot(version)
+        files = released_snapshot(root, version)
         for name, contents in files.items():
             path = root / name
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -3368,6 +3393,361 @@ class GitTransitionTests(unittest.TestCase):
             self.assertIn("VERSION disappeared after initialization", str(denied.exception))
 
 
+#: A three-release changelog with distinct bodies and two distinct dates, so a
+#: mutation to any one section is visible and the date rule has something to
+#: order. Written once and mutated per case, exactly as a real edit would.
+HISTORY_CHANGELOG = (
+    "# Changelog\n"
+    "\n"
+    "All notable changes.\n"
+    "\n"
+    "## [Unreleased]\n"
+    "\n"
+    "## [0.1.12] - 2026-08-13\n"
+    "\n"
+    "- newest\n"
+    "\n"
+    "## [0.1.11] - 2026-08-12\n"
+    "\n"
+    "- middle\n"
+    "\n"
+    "## [0.1.10] - 2026-08-12\n"
+    "\n"
+    "- oldest\n"
+    "\n"
+    "## [0.1.9] and earlier\n"
+    "\n"
+    "Imported from the monorepo publishers.\n"
+)
+
+
+def released_above(previous: str, version: str, date: str = "2026-08-14") -> str:
+    """The one legitimate edit: a new dated block above all shipped history."""
+    return (
+        "# Changelog\n"
+        "\n"
+        "All notable changes.\n"
+        "\n"
+        "## [Unreleased]\n"
+        "\n"
+        f"## [{version}] - {date}\n"
+        "\n"
+        "- newer\n"
+        "\n"
+    ) + RC.released_changelog_history(previous)
+
+
+class ChangelogAppendOnlyTests(unittest.TestCase):
+    """`CHANGELOG.md` is the human-readable half of the release ledger.
+
+    Before this battery, `validate_snapshot` read the CURRENT version's heading
+    and nothing else, so every heading below the first was unguarded: a range
+    could delete a shipped release, reorder two, or rewrite a historical entry
+    and every release control still reported success. The failure mode that
+    exposed it was a plausible mechanical edit — an insertion that replaced the
+    span down to and including an older heading — not a hostile one.
+    """
+
+    def test_shipped_history_is_a_suffix_of_every_later_changelog(self):
+        head = released_above(HISTORY_CHANGELOG, "0.1.13")
+        # The legitimate direction: insert above, keep every shipped byte.
+        RC.require_changelog_append_only(HISTORY_CHANGELOG, head)
+        self.assertTrue(head.endswith(RC.released_changelog_history(HISTORY_CHANGELOG)))
+        # Editing the preamble ABOVE the shipped history is not a rewrite of
+        # released content and stays allowed; the guard starts at the newest
+        # dated heading, deliberately, so the format note can still be fixed.
+        RC.require_changelog_append_only(
+            HISTORY_CHANGELOG, head.replace("All notable changes.", "All notable changes here.")
+        )
+
+    def test_every_way_of_disturbing_shipped_history_is_refused(self):
+        # Each mutant is the real edit it names, applied to the head only.
+        cases = {
+            "deleted middle heading": HISTORY_CHANGELOG.replace(
+                "## [0.1.11] - 2026-08-12\n\n- middle\n\n", ""
+            ),
+            "deleted tail": HISTORY_CHANGELOG.replace(
+                "## [0.1.10] - 2026-08-12\n\n- oldest\n\n"
+                "## [0.1.9] and earlier\n\nImported from the monorepo publishers.\n",
+                "",
+            ),
+            "deleted undated tail block": HISTORY_CHANGELOG.replace(
+                "## [0.1.9] and earlier\n\nImported from the monorepo publishers.\n", ""
+            ),
+            "rewritten historical entry": HISTORY_CHANGELOG.replace(
+                "- middle\n", "- middle, corrected in place\n"
+            ),
+            "mutated historical date": HISTORY_CHANGELOG.replace(
+                "## [0.1.11] - 2026-08-12", "## [0.1.11] - 2026-08-11"
+            ),
+            "reordered pair": HISTORY_CHANGELOG.replace(
+                "## [0.1.11] - 2026-08-12\n\n- middle\n\n## [0.1.10] - 2026-08-12\n\n- oldest\n",
+                "## [0.1.10] - 2026-08-12\n\n- oldest\n\n## [0.1.11] - 2026-08-12\n\n- middle\n",
+            ),
+            "duplicated version": HISTORY_CHANGELOG.replace(
+                "## [0.1.10] - 2026-08-12", "## [0.1.11] - 2026-08-12"
+            ),
+            # A "contains" test would accept this one: every shipped byte is
+            # still there, in order, with a forged release written under it.
+            "version block invented below the shipped history": HISTORY_CHANGELOG
+            + "\n## [0.1.8] - 2026-08-01\n\n- never shipped\n",
+            "new section spliced in below the top": HISTORY_CHANGELOG.replace(
+                "## [0.1.11] - 2026-08-12",
+                "## [0.1.115] - 2026-08-12\n\n- smuggled\n\n## [0.1.11] - 2026-08-12",
+            ),
+        }
+        for name, mutant in cases.items():
+            with self.subTest(mutant=name):
+                self.assertNotEqual(mutant, HISTORY_CHANGELOG)
+                with self.assertRaises(RC.ContractError) as denied:
+                    RC.require_changelog_append_only(HISTORY_CHANGELOG, mutant)
+                # A refusal that does not name the sanctioned repair teaches
+                # the reader to look for a way around it.
+                self.assertIn("erratum", str(denied.exception))
+                self.assertIn("APPEND-ONLY", str(denied.exception))
+
+    def test_refusal_names_the_release_it_found_disturbed(self):
+        with self.assertRaises(RC.ContractError) as deleted:
+            RC.require_changelog_append_only(
+                HISTORY_CHANGELOG,
+                HISTORY_CHANGELOG.replace("## [0.1.11] - 2026-08-12\n\n- middle\n\n", ""),
+            )
+        self.assertIn("deleted: 0.1.11", str(deleted.exception))
+        with self.assertRaises(RC.ContractError) as rewritten:
+            RC.require_changelog_append_only(
+                HISTORY_CHANGELOG, HISTORY_CHANGELOG.replace("- middle\n", "- edited\n")
+            )
+        self.assertIn("rewritten: 0.1.11", str(rewritten.exception))
+        with self.assertRaises(RC.ContractError) as spliced:
+            RC.require_changelog_append_only(
+                HISTORY_CHANGELOG,
+                HISTORY_CHANGELOG.replace(
+                    "## [0.1.11] - 2026-08-12",
+                    "## [0.1.115] - 2026-08-12\n\n- smuggled\n\n## [0.1.11] - 2026-08-12",
+                ),
+            )
+        self.assertIn("reordered", str(spliced.exception))
+        with self.assertRaises(RC.ContractError) as below:
+            RC.require_changelog_append_only(
+                HISTORY_CHANGELOG,
+                HISTORY_CHANGELOG + "\n## [0.1.8] - 2026-08-01\n\n- never shipped\n",
+            )
+        self.assertIn("appended below the released history", str(below.exception))
+
+    def test_an_erratum_under_the_new_release_is_the_accepted_repair(self):
+        # The sanctioned way to correct 0.1.11: say so in the NEW block.
+        corrected = released_above(HISTORY_CHANGELOG, "0.1.13").replace(
+            "- newer\n", "- newer\n- Erratum: 0.1.11's entry named the wrong file.\n"
+        )
+        RC.require_changelog_append_only(HISTORY_CHANGELOG, corrected)
+        self.assertIn("Erratum", corrected)
+
+    def test_a_base_with_no_released_history_guards_nothing(self):
+        # A repository before its first release has nothing to protect, and
+        # saying so here is what keeps the guard honest rather than accidental.
+        empty = "# Changelog\n\n## [Unreleased]\n"
+        self.assertEqual(RC.released_changelog_history(empty), "")
+        RC.require_changelog_append_only(empty, HISTORY_CHANGELOG)
+
+    def test_one_snapshot_alone_must_read_as_a_descending_ledger(self):
+        self.assertEqual(
+            [entry.version for entry in RC.validate_changelog_history(HISTORY_CHANGELOG)],
+            [RC.Version.parse(raw) for raw in ("0.1.12", "0.1.11", "0.1.10")],
+        )
+        for name, mutant, marker in (
+            (
+                "duplicate",
+                HISTORY_CHANGELOG.replace("## [0.1.10] - 2026-08-12", "## [0.1.11] - 2026-08-12"),
+                "more than once",
+            ),
+            (
+                "ascending pair",
+                HISTORY_CHANGELOG.replace(
+                    "## [0.1.11] - 2026-08-12\n\n- middle\n\n## [0.1.10] - 2026-08-12\n\n- oldest\n",
+                    "## [0.1.10] - 2026-08-12\n\n- oldest\n\n## [0.1.11] - 2026-08-12\n\n- middle\n",
+                ),
+                "read newest first",
+            ),
+            (
+                "historical date after a newer release",
+                HISTORY_CHANGELOG.replace("## [0.1.11] - 2026-08-12", "## [0.1.11] - 2026-08-15"),
+                "after the newer",
+            ),
+            (
+                "impossible calendar date",
+                HISTORY_CHANGELOG.replace("## [0.1.11] - 2026-08-12", "## [0.1.11] - 2026-02-31"),
+                "not a real ISO date",
+            ),
+            ("no dated heading", "# Changelog\n\n## [Unreleased]\n", "no dated release heading"),
+        ):
+            with self.subTest(mutant=name), self.assertRaises(RC.ContractError) as denied:
+                RC.validate_changelog_history(mutant)
+            self.assertIn(marker, str(denied.exception))
+
+    def test_snapshot_refuses_a_history_the_released_version_does_not_top(self):
+        files = snapshot("0.1.10")
+        files["CHANGELOG.md"] = (
+            "# Changelog\n\n## [0.1.11] - 2026-08-14\n\n- ahead\n\n"
+            + files["CHANGELOG.md"].split("# Changelog\n\n", 1)[1]
+        )
+        with self.assertRaises(RC.ContractError) as denied:
+            RC.validate_snapshot(files)
+        self.assertIn("newest release is 0.1.11", str(denied.exception))
+
+    def test_snapshot_runs_the_ordering_rules_on_the_file_the_release_ships(self):
+        """The band between the new release and the shipped history is the blind spot.
+
+        `require_changelog_append_only` is satisfied the moment the base's
+        released bytes survive as a suffix, so a version block spliced BETWEEN
+        the release being cut and the previously newest heading leaves it
+        completely undisturbed — this test asserts that acceptance rather than
+        assuming it. Only the whole-file ordering rules can see such a block,
+        and they are driven here THROUGH `validate_snapshot`: calling
+        `validate_changelog_history` directly still passes when
+        `validate_snapshot` has stopped calling it, so a direct-call test
+        cannot tell the two apart. Replacing that call with the parse it wraps
+        is a mutant the rest of the suite does not kill.
+        """
+        base = changelog("0.1.12")
+        released = f"## [0.1.13] - {CHANGELOG_DATE}\n\n- release\n\n"
+        for name, forged, marker in (
+            (
+                "a newer version forged below the release being cut",
+                f"## [0.1.99] - {CHANGELOG_DATE}\n\n- smuggled\n\n",
+                "appears below the older",
+            ),
+            (
+                # This one never reaches the ordering rules: the older
+                # exactly-one-current-heading check fires first. Kept because a
+                # reader deserves to know WHICH rule owns each forgery.
+                "the released version repeated below itself",
+                f"## [0.1.13] - {CHANGELOG_DATE}\n\n- smuggled\n\n",
+                "exactly one dated current-version heading",
+            ),
+            (
+                "a forged heading postdating the release being cut",
+                "## [0.1.1] - 2099-01-01\n\n- smuggled\n\n",
+                "after the newer",
+            ),
+            (
+                "a forged heading carrying an impossible calendar date",
+                "## [0.1.1] - 2026-02-31\n\n- smuggled\n\n",
+                "not a real ISO date",
+            ),
+        ):
+            with self.subTest(forgery=name):
+                files = snapshot("0.1.13", base)
+                self.assertIn(released, files["CHANGELOG.md"])
+                files["CHANGELOG.md"] = files["CHANGELOG.md"].replace(
+                    released, released + forged, 1
+                )
+                # The append-only guard cannot see this: every byte the base
+                # released is still the tail of the file, untouched.
+                RC.require_changelog_append_only(base, files["CHANGELOG.md"])
+                with self.assertRaises(RC.ContractError) as denied:
+                    RC.validate_snapshot(files)
+                self.assertIn(marker, str(denied.exception))
+
+
+class ChangelogAppendOnlyTransitionTests(unittest.TestCase):
+    """The same property over a REAL base..head range, through the CI entrypoint.
+
+    `scripts/ci/release_contract.py transition` is what `pr-gate.yml` runs on
+    every pull request and every push to `main`, so a guard that only holds for
+    a directly-called helper would not hold where it matters.
+    """
+
+    def git(self, root: Path, *args: str) -> str:
+        return subprocess.run(
+            ["git", "-C", str(root), *args], check=True, text=True, stdout=subprocess.PIPE
+        ).stdout.strip()
+
+    def write(self, root: Path, files: dict[str, str], message: str) -> str:
+        for name, contents in files.items():
+            path = root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(contents, encoding="utf-8")
+        self.git(root, "add", ".")
+        self.git(
+            root, "-c", "user.name=Release Test", "-c", "user.email=release@example.invalid",
+            "commit", "-m", message,
+        )
+        return self.git(root, "rev-parse", "HEAD")
+
+    def repo(self, temporary: str) -> tuple[Path, str]:
+        root = Path(temporary)
+        self.git(root, "init", "-q")
+        self.git(root, "branch", "-m", "main")
+        files = snapshot("0.1.12")
+        files["CHANGELOG.md"] = HISTORY_CHANGELOG
+        return root, self.write(root, files, "0.1.12")
+
+    def head_with(self, root: Path, base: str, contents: str) -> str:
+        self.git(root, "checkout", "-q", "-B", "topic", base)
+        files = snapshot("0.1.13")
+        files["CHANGELOG.md"] = contents
+        return self.write(root, files, "0.1.13")
+
+    def test_the_pr_gate_accepts_an_append_and_refuses_a_rewrite(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root, base = self.repo(temporary)
+            appended = self.head_with(
+                root, base, released_above(HISTORY_CHANGELOG, "0.1.13")
+            )
+            intent = RC.validate_transition(root, base, appended, first_parent=True)
+            self.assertEqual(intent, RC.ReleaseIntent(appended, RC.Version.parse("0.1.13")))
+            self.assertEqual(
+                RC.classify_transition(root, base, appended, first_parent=True)["class"],
+                "artifact",
+            )
+
+            # The exact defect issue #88 records: an insertion that also
+            # consumed the heading below it, orphaning a shipped release.
+            orphaned = self.head_with(
+                root,
+                base,
+                released_above(HISTORY_CHANGELOG, "0.1.13").replace(
+                    "## [0.1.12] - 2026-08-13\n\n- newest\n\n", ""
+                ),
+            )
+            for call in (RC.validate_transition, RC.classify_transition):
+                with self.subTest(call=call.__name__), self.assertRaises(RC.ContractError) as denied:
+                    call(root, base, orphaned, first_parent=True)
+                self.assertIn("deleted: 0.1.12", str(denied.exception))
+                self.assertIn("erratum", str(denied.exception))
+
+    def test_the_recovery_window_walks_the_same_guard(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root, base = self.repo(temporary)
+            rewritten = self.head_with(
+                root,
+                base,
+                released_above(HISTORY_CHANGELOG, "0.1.13").replace("- middle\n", "- amended\n"),
+            )
+            with self.assertRaises(RC.ContractError) as denied:
+                RC.discover_transition_window(root, rewritten)
+            self.assertIn("rewritten: 0.1.11", str(denied.exception))
+
+    def test_the_command_line_denies_with_the_erratum_instruction(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root, base = self.repo(temporary)
+            head = self.head_with(
+                root,
+                base,
+                released_above(HISTORY_CHANGELOG, "0.1.13").replace("- oldest\n", "- redone\n"),
+            )
+            completed = subprocess.run(
+                [
+                    sys.executable, "-I", "-B", str(HERE / "release_contract.py"), "transition",
+                    "--repository", str(root), "--base", base, "--head", head, "--first-parent",
+                ],
+                check=False, text=True, capture_output=True,
+            )
+            self.assertEqual(completed.returncode, 1)
+            self.assertIn("DENY: released changelog sections rewritten: 0.1.10", completed.stderr)
+            self.assertIn("erratum", completed.stderr)
+
+
 class NoArtifactClassTests(unittest.TestCase):
     """The documentation-only class must fail closed in every direction."""
 
@@ -3375,7 +3755,7 @@ class NoArtifactClassTests(unittest.TestCase):
         return subprocess.run(["git", "-C", str(root), *args], check=True, text=True, stdout=subprocess.PIPE).stdout.strip()
 
     def release_commit(self, root: Path, version: str) -> str:
-        files = snapshot(version)
+        files = released_snapshot(root, version)
         for name, contents in files.items():
             path = root / name
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -3485,7 +3865,7 @@ class NoArtifactClassTests(unittest.TestCase):
     def test_docs_range_with_full_release_patch_stays_artifact(self):
         with tempfile.TemporaryDirectory() as temporary:
             root, base = self.repo(temporary)
-            files = dict(snapshot("0.1.10"))
+            files = dict(released_snapshot(root, "0.1.10"))
             files["AGENTS.md"] = "agents contract\n"
             head = self.paths_commit(root, files, "release with docs")
             verdict = RC.classify_transition(root, base, head, first_parent=True)
@@ -3832,7 +4212,7 @@ sys.stdout.write(str(entry["status"]))
         ).stdout.strip()
 
     def release_commit(self, root: Path, version: str) -> str:
-        files = snapshot(version)
+        files = released_snapshot(root, version)
         for name, contents in files.items():
             path = root / name
             path.parent.mkdir(parents=True, exist_ok=True)

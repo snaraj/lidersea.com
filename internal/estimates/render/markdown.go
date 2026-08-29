@@ -11,13 +11,10 @@ import (
 	"github.com/snaraj/lidersea.com/internal/estimates"
 )
 
-// Format names the registry key.
 func (markdownRenderer) Format() string { return FormatMarkdown }
 
-// ContentType is the markdown media type.
 func (markdownRenderer) ContentType() string { return "text/markdown; charset=utf-8" }
 
-// Render produces the markdown document.
 func (markdownRenderer) Render(estimate estimates.Estimate) ([]byte, error) {
 	var b strings.Builder
 	b.WriteString("# Estimate\n\n")

@@ -152,9 +152,9 @@ type FilePlatform struct {
 	// with no rating yet is a legitimate, honest state).
 	ProfileURL string `json:"profileUrl"`
 	// FeedURL is the machine-readable endpoint the gated collector reads.
-	// Empty in the shipped snapshot: no supported platform offers a
-	// rating read without an account credential (see the PR that
-	// introduced this file), so nothing is fetched today.
+	// Empty in the shipped snapshot: at the time this file was written no
+	// supported rating platform offered a rating read without an account
+	// credential, so nothing is fetched today.
 	FeedURL string `json:"feedUrl"`
 	// RatingTenths is the captured rating in integer tenths, 10 to 50.
 	// Zero on a pending platform.

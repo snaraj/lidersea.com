@@ -56,7 +56,7 @@ func TestParseAcceptsOnlyCatalogValues(t *testing.T) {
 }
 
 // TestCatalogIsTheClosedSetOfThemes pins the catalog's own consistency: the
-// default is a member, the two explicit reading themes are present, and no
+// default is a member, all three explicit reading themes are present, and no
 // entry repeats.
 func TestCatalogIsTheClosedSetOfThemes(t *testing.T) {
 	t.Parallel()

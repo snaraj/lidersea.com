@@ -6,15 +6,17 @@
  * 1. Palette literals appear exactly once, in the palette block below.
  *    Everything else consumes a token.
  * 2. Every theme rule — the [data-theme] blocks and the
- *    prefers-color-scheme mapping — declares CUSTOM PROPERTIES ONLY. A
- *    theme can therefore change colour and nothing else, which is what
- *    makes a theme switch incapable of moving a box.
- * 3. Layout uses logical properties and fluid sizes, so nothing has a
+ *    prefers-color-scheme mapping — declares CUSTOM PROPERTIES ONLY, so a
+ *    theme cannot smuggle in a padding, font-size or border-width. That is
+ *    the source-side half of zero layout shift; the outcome itself is
+ *    measured in three engines by the browser lane, because this rule alone
+ *    would still admit a theme redefining a spacing token.
+ * 3. Sizing is fluid and expressed in logical properties, so nothing has a
  *    fixed width that could push the page wider than a 320px viewport.
  */
 
 :root {
-  /* Palette source of truth. Both themes are always defined, so switching
+  /* Palette source of truth. Every palette is always defined, so switching
      is a remapping of tokens rather than a redefinition of colours. */
   --palette-dark-canvas: #08202b;
   --palette-dark-raised: #0e2f3d;
@@ -44,8 +46,8 @@
   --palette-sepia-accent: #e0b578;
   --palette-sepia-accent-ink: #1c1714;
 
-  /* Scale tokens: theme-independent by construction, because a theme rule
-     may only declare custom properties that carry colour. */
+  /* Scale tokens. No theme block may redeclare one: that is what keeps a
+     reading-mode change from resizing anything. */
   --space-2xs: 0.25rem;
   --space-xs: 0.5rem;
   --space-sm: 0.75rem;
@@ -185,7 +187,7 @@ body,
 
 /* The appearance control is ONE icon button. The reading modes live in the
    popover it opens, so the chrome holds a single round target at every
-   viewport instead of a row of labels that had to wrap on a narrow phone. */
+   viewport rather than a row of labels that would wrap on a narrow phone. */
 .theme-menu {
   position: relative;
   display: inline-flex;

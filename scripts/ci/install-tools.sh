@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # Install the exact pinned CI tools with SHA-256-verified downloads, outside
-# the checkout so tree scanners never scan the scanners. Mirrors the pattern
-# proven in snaraj/website-infrastructure.
+# the checkout so tree scanners never scan the scanners.
 set -euo pipefail
 
 GITLEAKS_VERSION=v8.30.1

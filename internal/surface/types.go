@@ -29,7 +29,6 @@ const (
 // Envelope is the one JSON shape every surface response uses, so the UI can
 // route, title, and freshness-check any surface without knowing its payload.
 type Envelope struct {
-	// Schema is always the Schema constant.
 	Schema string `json:"schema"`
 	// ID names the surface instance (for example "board").
 	ID string `json:"id"`
@@ -104,6 +103,8 @@ var (
 )
 
 // Registry is the ordered catalog of every surface this site defines. The
-// server wires exactly these routes; tests pin the catalog's internal
-// consistency so a new surface is a conscious registration, never drift.
+// server's mux switches on these descriptors' routes one by one rather than
+// iterating this slice, so TestRegistryRoutesAgreeWithTheMux is what keeps
+// the two from drifting apart — and the catalog's own consistency tests are
+// what make adding a surface a conscious registration.
 var Registry = []Descriptor{Board, Reviews, Ratings, Estimates}

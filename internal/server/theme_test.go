@@ -191,10 +191,13 @@ func TestOriginNeverSetsACookie(t *testing.T) {
 	}
 }
 
-// TestThemedShellsAreStampedOnceAtConstruction is the performance contract
-// behind the mechanism: every theme's document is built during New, so no
-// navigation — of any theme, in any order — reads or transforms the
-// entrypoint again.
+// TestThemedShellsAreStampedOnceAtConstruction is the read-once contract, in
+// both halves. Availability: a broken bundle fails during New — before
+// Kubernetes can route traffic to the pod — rather than on a visitor's first
+// request. Performance: every theme's document is built during New, so no
+// navigation, of any theme in any order, reads or transforms the entrypoint
+// again. The read counter is the faultFS's, so both halves are measured
+// rather than reasoned about.
 func TestThemedShellsAreStampedOnceAtConstruction(t *testing.T) {
 	t.Parallel()
 	fsys := &faultFS{files: testsupport.FrontendFS()}

@@ -1,20 +1,16 @@
 # Build outputs and local artifacts
 frontend/node_modules/
-# Playwright's per-run output directory (issue #22's browser lanes). Traces,
-# videos, and screenshots are all off, so this holds only the last-run marker
-# and any failure context — run state, never source.
+# Playwright's outputDir (frontend/playwright.config.mjs): run state, never
+# source.
 frontend/test-results/
-# CPython's bytecode cache for the scripts/ci contract suites. Every documented
-# invocation passes -B and writes nothing, but -B is a flag a person can forget
-# and importlib still caches on the run that omits it — so a plain
-# `python3 -m unittest ...` leaves .pyc files behind that a later lane has to
-# clean by hand. Ignoring the directory costs nothing and removes that trap.
-# Only __pycache__/ is listed: CPython 3 writes bytecode nowhere else, and this
-# repository has no pytest (the suites are stdlib unittest), so a .pytest_cache
-# rule would be a guess at a tool that is not here.
+# A `python3 -m unittest ...` that omits the documented -B leaves bytecode
+# here for a later lane to clean by hand.
 __pycache__/
 internal/web/dist/*
 !internal/web/dist/.gitkeep
+# A hand-run `go test -coverprofile=...` from the repo root. CI writes every
+# profile to RUNNER_TEMP instead, so nothing in the gate produces these — but
+# a generated profile that reaches history cannot be withdrawn.
 coverage.out
 *.cover.out
 .DS_Store

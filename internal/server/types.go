@@ -94,9 +94,9 @@ type Config struct {
 	Ratings *ratings.Store
 }
 
-// handler serves the immutable frontend files after New has validated the
-// bundle's entrypoint. It remains private so callers cannot bypass the mux's
-// health endpoints or the securityHeaders wrapper.
+// handler serves the immutable frontend files after NewSite has read and
+// stamped the bundle's entrypoint. It remains private so callers cannot
+// bypass the mux's health endpoints or the securityHeaders wrapper.
 type handler struct {
 	// assets is the read-only, build-generated frontend filesystem.
 	assets fs.FS
@@ -122,6 +122,5 @@ type apiHandler struct {
 // reviewWriteUnavailable is the data payload of the honest 503 the review
 // write path returns while no persistence exists.
 type reviewWriteUnavailable struct {
-	// Reason is reviewStorageUnavailableReason.
 	Reason string `json:"reason"`
 }

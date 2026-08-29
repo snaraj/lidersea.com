@@ -338,7 +338,7 @@ class TheRepositoryRangeIsGreen(unittest.TestCase):
         under a `pull_request` event is GitHub's synthetic merge commit.
         """
         base, head = require_range(self)
-        findings = CI.audit(base, head)
+        _, findings = CI.audit(base, head)
         self.assertEqual(findings, [], "\n\n".join(findings))
 
     def test_the_range_reader_actually_returns_commits(self) -> None:

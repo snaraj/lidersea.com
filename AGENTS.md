@@ -393,11 +393,14 @@ conscious edits, never fights:
   outbound destination nobody reviewed. The full procedure is in the
   `internal/ratings` package doc.
 - Small UI assets, when they arrive, live under documented categories with
-  size ceilings, mirroring naranjo.online. Heavy media (portfolio video,
-  high-resolution photography, audio) never enters git, the bundle, the
-  embed, the image, or a ConfigMap/Secret — it belongs to dedicated
-  platform storage, and introducing a media pipeline here is an owner
-  decision, not incremental drift.
+  size ceilings derived from this repository's own measurements. Heavy media
+  (portfolio video, high-resolution photography, audio) never enters git, the
+  bundle, the embed, the image, or a ConfigMap/Secret — it belongs to
+  dedicated platform storage. The SERVING half already exists as
+  `internal/media` and is the owner decision this line used to defer; what
+  stays an owner decision is turning it on, which needs the storage the
+  env-gated media directory would point at. The chart declares no media
+  volume today, so the shipped deployment serves no media at all.
 - CSP changes happen in lockstep: `securityHeaders` in
   `internal/server/server.go`, `testsupport.SiteContentSecurityPolicy`,
   and every pinned test value move in the same commit.
@@ -912,6 +915,15 @@ included; it is the same battery CI enforces:
     gitleaks git --no-banner --redact --max-target-megabytes=2 .
     gitleaks dir --no-banner --redact .
 
+For rendering changes, add the browser smoke lane. It needs real engines
+rather than only Node, and it drives the SHIPPED artifact, so the binary path
+is required rather than defaulted:
+
+    (cd frontend && npm run build)
+    CGO_ENABLED=0 go build -o /tmp/lidersea-server ./cmd/server
+    cd frontend && npx playwright install chromium firefox webkit && \
+      LIDERSEA_SMOKE_BINARY=/tmp/lidersea-server npm run smoke
+
 - **Coverage floor.** `GO_COVERAGE_FLOOR` is 95.0 (measured 97.6 when
   last raised), enforced in `.github/workflows/pr-gate.yml` on total
   production statements with `internal/testsupport` filtered from the
@@ -1019,7 +1031,22 @@ included; it is the same battery CI enforces:
   (`go-coverage.json`, `frontend-tests.json`). Badge numbers are
   CI-computed, never hand-edited; the badge publishes the identical
   number the gate enforced.
-- **codeql.yml** — pull requests, `main` pushes, weekly cron.
+- **browser-smoke.yml** — pull requests and manual dispatch (no `main` push
+  trigger, for the same reason `container` has none): three jobs, one CSS
+  engine each, driving the built binary at phone viewports. It holds
+  `contents: read` and nothing else, receives no secret, and publishes
+  nothing. Deliberately NOT a job in `pr-gate.yml`: the release publisher
+  authorizes against that workflow's exact job inventory. One honest limit —
+  `npx playwright install` downloads the engine builds itself, so they are
+  not checksum-verified the way `scripts/ci/install-tools.sh` verifies every
+  other third-party binary. What IS pinned is the exact runner version,
+  asserted against the lockfile across all three driver packages before the
+  download and refused if any of them declares an install script.
+- **codeql.yml** — pull requests, `main` pushes, weekly cron. Its
+  concurrency guard is load-bearing rather than cosmetic: the weekly cron
+  resolves to the same group as a push run at that SHA, and cancelling that
+  run would leave the release orchestrator with no `event=push` CodeQL
+  success to authorize against.
 - **release-after-main.yml** — success-only exact-SHA main-CI completion;
   its separate `platform-release` job uses only the isolated settings token and
   must pass before the ordinary-token job paginates and validates the exact
@@ -1091,9 +1118,18 @@ or changed frontend surface, retrofitted by the rendering-lanes arc
   never `100vh`; `@supports` fallbacks so layouts degrade gracefully;
   no horizontal body scroll at ≥ 320px (wide content scrolls inside its
   own container); `prefers-reduced-motion` respected; autoplaying
-  video, when it ever arrives, is `playsinline` and muted. Stage 2 —
-  browser-emulated smoke lanes in CI — is an owner decision, gated in
-  that issue.
+  video, when it ever arrives, is `playsinline` and muted.
+- **Rendering lanes, stage 2** (issue #22): `browser-smoke.yml` drives the
+  SHIPPED binary — the Go server with the built bundle embedded, never a
+  dev server — through Chromium, WebKit and Gecko at phone viewports,
+  asserting the same floors as measured boxes and computed styles. The two
+  halves answer different questions and neither replaces the other: a
+  source pin binds the next build on every engine, a lane proves this build
+  survived three real cascades, so a floor lands with both. It is a
+  SEPARATE workflow on purpose — release authorization pins `pr-gate.yml`'s
+  job inventory exactly, so a seventh job there would make every subsequent
+  merge unreleasable. Whether the lane becomes a REQUIRED check is an owner
+  ruleset decision, not this repository's to assume.
 - **Reading themes.** The site serves one shell per theme in
   `internal/theme`'s catalog (`system`, `light`, `dark`, `sepia`), each stamped
   with its `data-theme` attribute during `NewSite` and chosen per request

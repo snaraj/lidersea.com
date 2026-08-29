@@ -1,15 +1,17 @@
 // surfaces.go serves the surface catalog under /api/ by COMPOSING the domain
-// packages: internal/board, internal/reviews, and internal/estimates (with
-// its render subpackage) produce every payload; this file owns only the HTTP
-// boundary — routing, method contracts, gates, decoding, and cache identity.
+// packages: internal/board, internal/reviews, internal/ratings, and
+// internal/estimates (with its render subpackage) produce every payload; this
+// file owns only the HTTP boundary — routing, method contracts, gates,
+// decoding, and cache identity.
 // Routing is explicit: exactly the registry's routes exist, every unknown
 // /api/ path is an opaque 404, and the sitewide read-only contract holds
 // everywhere except the two documented, individually-gated write carve-outs
 // (POST /api/reviews and POST /api/estimates/preview), which are off by
 // default and admit POST on their one route only. The security-header
 // policy — including the CSP's form-action 'none' — is identical in every
-// mode: the UI submits gated writes with fetch(), which default-src 'self'
-// already governs, so opening a gate never touches a header.
+// mode: a carve-out accepts a JSON request body and nothing else, so it is
+// reached by script under default-src 'self' rather than by a browser form
+// submission, and opening a gate never needs a header to move.
 
 package server
 
@@ -61,7 +63,10 @@ func (a *apiHandler) serveBoard(w http.ResponseWriter, r *http.Request) {
 	}
 	page, err := board.Page(r.URL.Query().Get("cursor"))
 	if err != nil {
-		http.Error(w, "unknown board cursor", http.StatusBadRequest)
+		// The message is the domain's own sentinel, so it is spelled once
+		// rather than copied here. board.Page returns this error and no
+		// other, which is why no discrimination is needed.
+		http.Error(w, board.ErrUnknownCursor.Error(), http.StatusBadRequest)
 		return
 	}
 	serveSurfaceJSON(w, r, surface.NewEnvelope(surface.Board, surface.StatusOK, board.PublishedAt(), page))

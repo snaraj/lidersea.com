@@ -9,6 +9,16 @@ on:
 
 permissions: {}
 
+# Cancellation is for superseded pull-request runs and nothing else. The group
+# falls back to `github.sha` off a pull request, so two main pushes never share
+# one — but the weekly schedule resolves to the default branch's head SHA, which
+# IS the group of a push run still analysing that commit. The guard is what
+# stops the cron from cancelling it. Releases depend on that: the orchestrator
+# polls `codeql.yml/runs?branch=main&event=push&head_sha=<merged>` and
+# `select_codeql_main_run` (scripts/ci/release_contract.py) accepts only
+# conclusion `success`. A cancelled push run concludes `cancelled`, and the
+# schedule's own run carries `event: schedule`, so the filter discards it —
+# clearing that state needs a deliberate re-run of the exact cancelled run.
 concurrency:
   group: codeql-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}

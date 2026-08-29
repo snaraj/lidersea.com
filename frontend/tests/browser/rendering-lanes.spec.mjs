@@ -43,7 +43,6 @@ const SAFE_AREA_FALLBACK_PX = 20; // --space-md, 1.25rem at the 16px root
    the slowest entry is the one a visitor perceives. */
 function slowestSeconds(computed) {
   const parts = computed.split(',').map((part) => Number.parseFloat(part.trim()));
-  expect(parts.length, `unreadable duration ${computed}`).toBeGreaterThan(0);
   for (const part of parts) expect(Number.isNaN(part), `unreadable duration ${computed}`).toBe(false);
   return Math.max(...parts);
 }
@@ -204,11 +203,14 @@ test.describe('rendering lanes', () => {
     });
 
     // The measured set has to be the real one, not whatever happened to be in
-    // the DOM. Six is the floor the page cannot go under while the disclosure
-    // is open — the appearance trigger, the four reading modes, and at least
-    // one ratings anchor — and the trigger is checked by identity as well,
-    // because a disclosure that failed to open would still leave five other
-    // nodes behind and a bare count would not notice.
+    // the DOM. Six is the floor with the disclosure open and the strip
+    // settled `ready` — the appearance trigger, the four reading modes, and
+    // at least one ratings anchor. This binary always serves /api/ratings, so
+    // `ready` is the state settle() reaches here; a build that answered
+    // `unavailable` would render no anchors at all and fail this line, which
+    // is the right outcome rather than a flake. The trigger is checked by
+    // identity as well, because a disclosure that failed to open would still
+    // leave five other nodes behind and a bare count would not notice.
     expect(controls.length, 'the page rendered too few controls to measure').toBeGreaterThanOrEqual(
       6,
     );

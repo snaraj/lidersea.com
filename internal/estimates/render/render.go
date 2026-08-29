@@ -17,9 +17,8 @@ func For(format string) (Renderer, bool) {
 	return renderer, ok
 }
 
-// Formats lists the registered render formats, sorted, for diagnostics and
-// tests. FormatJSON is not listed: it is the canonical value, not a
-// rendering.
+// Formats lists the registered render formats, sorted. FormatJSON is not
+// listed: it is the canonical value, not a rendering.
 func Formats() []string {
 	names := make([]string, 0, len(registry))
 	for name := range registry {

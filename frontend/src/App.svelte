@@ -32,8 +32,7 @@
   /*
     Closing the popover unmounts whatever the keyboard was on, so focus must
     be handed back to the trigger deliberately. Without this it falls to
-    <body> and the next Tab restarts at the top of the page — the segmented
-    control this replaced had no such trap, and neither may this.
+    <body> and the next Tab restarts at the top of the page.
   */
   function dismissMenu(): void {
     open = false;
@@ -126,7 +125,6 @@
     }
   });
 
-  /* Percentage of the scale, for the meter that pairs shape with the number. */
   function meterPercent(platform: RatingsPlatform, scale: number): number {
     return Math.round(((platform.rating ?? 0) / scale) * 100);
   }

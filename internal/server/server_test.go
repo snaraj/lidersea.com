@@ -250,8 +250,10 @@ func TestForwardedProtoPolicy(t *testing.T) {
 // TestNoRequestMethodCanEverMutate is the executable safety contract that
 // permits TLS 1.3 0-RTT (early data) at the edge. 0-RTT carries a replay risk,
 // so it is only admissible where no request can change server state. Every
-// route here answers reads and refuses every mutating method, and this test
-// exists so that property can never silently regress into a replayable one.
+// route of the DEFAULT build answers reads and refuses every mutating method,
+// and this test exists so that property can never silently regress into a
+// replayable one. The two write carve-outs are off in that build by
+// definition; enabling one is the decision that also re-opens this question.
 func TestNoRequestMethodCanEverMutate(t *testing.T) {
 	siteHandler := testHandler(t)
 	mutating := []string{

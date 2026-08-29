@@ -104,8 +104,6 @@ SANCTIONED_EMAIL = "39077795+snaraj@users.noreply.github.com"
 #: refusal costs one allowlist line, a missed trailer costs a public address.
 _TRAILER = re.compile(r"^[ \t]*co-authored-by[ \t]*:", re.IGNORECASE | re.MULTILINE)
 
-_FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
-
 _FIELD = "\x1f"
 _RECORD = "\x1e"
 
@@ -259,10 +257,15 @@ def check_commits(commits: tuple[Commit, ...] | list[Commit], allowlist: dict[st
     return findings
 
 
-def audit(base: str, head: str, first_parent: bool = False) -> list[str]:
-    """Run every rule over `base..head`. Returns the complete finding list."""
+def audit(base: str, head: str, first_parent: bool = False) -> tuple[list[str], list[str]]:
+    """Run every rule over `base..head`. Returns (commit SHAs, findings).
+
+    This is the whole enforcement path, so main() calls it rather than
+    re-inlining the same three statements: a suite that exercised a function
+    CI never reached would prove nothing about CI.
+    """
     shas = commits_in_range(base, head, first_parent)
-    return check_commits(read_commits(shas), load_allowlist())
+    return shas, check_commits(read_commits(shas), load_allowlist())
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -282,8 +285,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
     try:
-        shas = commits_in_range(args.base, args.head, args.first_parent)
-        findings = check_commits(read_commits(shas), load_allowlist())
+        shas, findings = audit(args.base, args.head, args.first_parent)
     except CommitIdentityError as error:
         print(f"DENY: {error}", file=sys.stderr)
         return 1

@@ -95,7 +95,8 @@ func TestPublishedAtIsFixedUTC(t *testing.T) {
 }
 
 // TestBlocksAreWellFormed requires every sample block to satisfy the
-// media-mosaic/v1 contract the UI reserves layout from: valid kinds, media
+// media-mosaic/v1 contract a consumer would reserve layout from: valid
+// kinds, media
 // exactly on media kinds, intrinsic dimensions with a CSS-ready aspect,
 // accessibility text, declared variants, posters on video, parseable
 // timestamps, and non-nil tags.

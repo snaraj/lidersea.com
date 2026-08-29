@@ -16,11 +16,10 @@ const sources = { fallback, component, styles };
 const stylesCode = styles.replace(/\/\*[\s\S]*?\*\//g, '');
 
 // Comments and string literals are not code, and an assertion about code
-// that reads either is not testing what its message says. The delta review
-// proved both directions on the previous spelling of this file: '/*' and
-// '*/' in two string literals spliced two function bodies together, which
-// revived a repaired bug at 14/14 green, while `const s = "}"` in ordinary
-// correct code produced a FALSE RED.
+// that reads either is not testing what its message says. Both directions
+// were measured: '/*' and '*/' in two string literals spliced two function
+// bodies together and revived a repaired bug with the suite still green,
+// while `const s = "}"` in ordinary correct code produced a FALSE RED.
 //
 // So the component is read through two offset-preserving masks. Both blank
 // comments; the SHAPE additionally blanks the contents of string and
@@ -103,7 +102,7 @@ function blockAfter(marker, opener = '{', content = false) {
       }
     }
   }
-  return assert.fail(`${marker} has an unbalanced ${opener}${closer} block`);
+  assert.fail(`${marker} has an unbalanced ${opener}${closer} block`);
 }
 
 // Every theme the ORIGIN can stamp must be one this stylesheet paints, and
@@ -228,7 +227,6 @@ function declarationBlocks(css) {
   return blocks;
 }
 
-// Declarations of a block as { property, value } pairs.
 function declarations(body) {
   return body
     .split(';')
@@ -368,7 +366,6 @@ function contrastRatio(foreground, background) {
   return (lighter + 0.05) / (darker + 0.05);
 }
 
-// The palette block's literals, keyed by token name.
 function paletteLiterals() {
   const palette = {};
   for (const [, name, value] of stylesCode.matchAll(
@@ -444,7 +441,10 @@ test('theme rules can only change colour, never layout', () => {
       block.selector.includes('[data-theme') ||
       block.atRules.some((rule) => rule.includes('prefers-color-scheme')),
   );
-  assert.ok(themeBlocks.length >= 3, 'expected the light, dark, and system theme rules');
+  assert.ok(
+    themeBlocks.length >= 3,
+    'expected a rule for each stamped theme plus the prefers-color-scheme mapping',
+  );
   for (const block of themeBlocks) {
     for (const { property } of declarations(block.body)) {
       assert.ok(
@@ -493,11 +493,18 @@ test('colour literals exist only in the palette block', () => {
   }
 });
 
-// Both palettes are validated for contrast, not asserted to be pretty. The
-// pairs below are every foreground the shell paints on every background it
-// paints them on. Text meets WCAG 2.2 AA (4.5:1); the switcher's border and
+// Every palette is validated for contrast, not asserted to be pretty. The
+// pairs below are every foreground that carries meaning on the background it
+// is painted on. Text meets WCAG 2.2 AA (4.5:1); the switcher's border and
 // the focus ring are non-text interface boundaries and meet 3:1.
-test('both palettes clear their contrast floors', () => {
+//
+// The ratings meter's fill on its own track is deliberately NOT here, and the
+// exclusion is the reason rather than an oversight: the meter is aria-hidden
+// and repeats a value the number and the review count already state in text,
+// so it is not a graphic required to understand the content. Were it ever the
+// sole encoding of a value, it would have to join interfacePairs — and it does
+// not clear 3:1 today.
+test('every palette clears its contrast floors', () => {
   const palette = paletteLiterals();
   const textPairs = [
     ['ink', 'canvas'],
@@ -771,9 +778,9 @@ test('the appearance menu is a dismissible disclosure, not a colour-only control
   // Closing unmounts whatever the keyboard was on, so focus must be handed
   // back deliberately. Without this it lands on <body> and the next Tab
   // restarts at the top of the page.
-  // Anchored to the three places that have to be true, because the delta
-  // review evaded the previous spelling of this pin three ways while
-  // svelte-check stayed at 0 and all 14 tests stayed green: it relocated
+  // Anchored to the three places that have to be true, because an earlier
+  // spelling of this pin was evaded three ways while svelte-check stayed at
+  // 0 and the suite stayed green: it relocated
   // bind:this onto an option button inside {#if open} (a markup
   // restructure does that by accident, and .focus() on a detached node is
   // a silent no-op), it retained the trigger?.focus() token in dead code

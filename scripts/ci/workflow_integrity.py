@@ -63,16 +63,12 @@ trip — refuse, paste the printed line, green — because a lift instruction th
 turns the build red when you follow it is worse than no lift at all: it lands
 in a public CI log and misinstructs the next agent.
 
-An earlier version of that suite asserted the shipped table equalled ``{}``.
-That is an INVENTORY PIN on the very table the lift mechanism writes to, and
-it broke the round trip exactly as described above: applying the printed line
-silenced the refusal and immediately failed the empty-table assertion.  What
-keeps the table honest instead is ``stale_allowlist_failures`` below, which is
-the rule the sibling gate in ``test_subcommand_callers.py`` already used: an
-entry must name a construct some workflow REALLY declares today, so an
-exemption cannot outlive the case that justified it and cannot be added for a
-violation nobody has proposed.  ``load_allowlist`` holds the other half — an
-entry with no written reason is a hole, and fails closed.
+What keeps the table honest is ``stale_allowlist_failures`` below, the rule the
+sibling gate in ``test_subcommand_callers.py`` already used: an entry must name
+a construct some workflow REALLY declares today, so an exemption cannot outlive
+the case that justified it and cannot be added for a violation nobody has
+proposed.  ``load_allowlist`` holds the other half — an entry with no written
+reason is a hole, and fails closed.
 
 READER SCOPE
 ============
@@ -512,11 +508,11 @@ def stale_allowlist_failures(
 ) -> list[str]:
     """An exemption that exempts nothing must be deleted.
 
-    This is the rule that replaced an equals-``{}`` pin on the shipped table.
-    Asserting the table is EMPTY is an inventory pin on the lift mechanism
-    itself: it is true only until the first legitimate entry, and it turns the
-    documented one-line lift red at the moment an agent follows it. Asserting
-    that every entry still names a construct some workflow really declares
+    Never assert instead that the table is EMPTY: that is an inventory pin on
+    the lift mechanism itself, true only until the first legitimate entry, and
+    it turns the documented one-line lift red at the moment an agent follows
+    it. Asserting that every entry still names a construct some workflow really
+    declares
     keeps the table describing reality — in both directions, since it refuses
     an entry added for a violation nobody has proposed just as it refuses one
     left behind after the construct was removed.

@@ -1,6 +1,9 @@
-// Package server exposes the production HTTP handler for lidersea.com. It
-// serves only the embedded frontend and Kubernetes health probes, keeping the
-// application stateless and suitable for replicated, pull-based deployments.
+// Package server exposes the production HTTP handler for lidersea.com: the
+// themed frontend shells and their embedded assets, the read-only surface/v1
+// API under /api/, the Kubernetes health probes, and — only when its
+// environment gate is configured — the immutable media path. Nothing here
+// holds request-scoped state, so the application stays replicable and
+// suitable for pull-based deployment.
 package server
 
 import (

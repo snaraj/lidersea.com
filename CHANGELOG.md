@@ -7,6 +7,61 @@ Git, image, and GitHub Release tags use the exact plain `vX.Y.Z` form.
 
 ## [Unreleased]
 
+## [0.1.38] - 2026-08-28
+
+### Added
+
+- Released changelog history is now append-only, proved base to head. The only
+  changelog edit a release may make is an insertion ABOVE the previously newest
+  dated heading: everything from that heading through end of file — every
+  shipped section and the undated tail block below them — must survive
+  byte-identical. `require_changelog_append_only` in
+  `scripts/ci/release_contract.py` reduces the whole property to one byte
+  comparison, testing that the base's released history is an exact SUFFIX of
+  the head. It is a suffix and not a containment on purpose: a containment
+  check keeps every shipped byte satisfied while a forged version block is
+  written UNDER the oldest release, and a fabricated release corrupts the
+  ledger exactly as much as a deleted one.
+- `validate_snapshot` additionally reads ALL the dated headings in one file,
+  where before it read the current version's heading and nothing else. A
+  duplicate version, a reordered pair, a date that is not a real calendar date,
+  a historical date that postdates a newer release, and a newest heading that
+  is not the version being released each deny. Those rules constrain shape and
+  cannot see a DELETED heading — nothing in one file says what used to be in
+  it — which is why the base comparison is the load-bearing half.
+
+### Fixed
+
+- A pull request could silently delete released changelog headings with every
+  gate green. `validate_snapshot` validated the changelog by finding exactly
+  ONE dated heading for the CURRENT version and asserting it immediately
+  followed an empty `## [Unreleased]`; that was the whole changelog check, so
+  every heading below the first was unguarded. A range could delete a shipped
+  release — one heading, or all of them — reorder two, misdate one, or rewrite
+  a historical entry's body, and the four-way release lock, the transition
+  contract, the full PR gate, and the publisher all stayed green. The tag
+  ledger and the GitHub Releases stayed correct either way, so the damage was a
+  silent divergence between the changelog and the real release history. The
+  failure mode is a plausible MECHANICAL edit, not a hostile one: an edit
+  meaning to insert a new version block above an older heading instead replaced
+  the span from `[Unreleased]` down to and including that heading.
+
+### Changed
+
+- `validate_transition` compares the base's `CHANGELOG.md` to the head's, so
+  the rule holds on every pull request, every push to `main`, and in recovery:
+  `classify_transition`'s artifact branch and `discover_transition_window` both
+  route through it. The no-artifact branch already required `CHANGELOG.md`
+  byte-identical base to head, which implies append-only, so it gained no
+  redundant call.
+- Every append-only refusal names the sanctioned repair. Correct a shipped
+  entry by writing a NEW erratum entry under the version the range is
+  releasing, naming the release it corrects — never by editing the section that
+  already shipped. That is the documented lift and it is one line in one pull
+  request, so this gate deliberately ships no allowlist table: an entry there
+  would be keyed by a released version and no suite could ever prove it stale,
+  leaving a permanent hole in exactly the property the gate exists to hold.
+
 ## [0.1.37] - 2026-08-26
 
 ### Security

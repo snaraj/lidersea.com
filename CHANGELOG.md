@@ -7,6 +7,26 @@ Git, image, and GitHub Release tags use the exact plain `vX.Y.Z` form.
 
 ## [Unreleased]
 
+## [0.1.40] - 2026-08-28
+
+### Changed
+
+- The ratings meter's fill now clears WCAG 2.2's 3:1 non-text contrast floor
+  against its own track, and both meter boundaries join the palette contrast
+  sweep instead of sitting outside it as a documented exclusion. The fill was
+  `--accent` painted onto the `--edge` track, measuring 1.97:1 light, 2.28:1
+  sepia and 2.56:1 dark — the boundary that carries the value was the least
+  legible edge in the widget. The fill now takes its own `--meter-fill` token:
+  `--accent` moved in OKLCH lightness alone until the boundary clears the
+  floor, with hue drift under one degree and chroma held wherever the sRGB
+  gamut allows, so the bar still reads as the brand colour rather than a
+  second one. Measured on the built binary in Chromium at 390px and 1440px in
+  every reading mode: fill/track 3.14:1 light, 3.12:1 dark, 3.10:1 sepia. The
+  track deliberately keeps `--edge`, so its own contrast against the card is
+  unchanged at 3.81/3.18/3.61:1 and the meter's share of the card area is
+  unchanged at 3.11% mobile and 1.37% desktop — the fill became more legible
+  without becoming larger or heavier.
+
 ## [0.1.39] - 2026-08-28
 
 ### Changed

@@ -38,10 +38,8 @@ jobs:
         # suite can fail without masking which contract broke.
         run: python3 -I -B -m unittest discover -s scripts/ci -p 'test_dependabot_contract.py' -v
       - name: Validate the Dependabot config directly
-        # Belt-and-suspenders alongside the discovery step above: this
-        # invokes the same validator CI-authors actually run, so the gate
-        # still catches a malformed dependabot.yml even if a future edit to
-        # the discovery glob or test layout stops collecting the suite.
+        # Runs the validator itself, so a discovery glob that stopped
+        # collecting the suite above cannot silently retire this check.
         run: python3 -I -B scripts/ci/dependabot_contract.py .github/dependabot.yml
       - name: Test the hostile whole-render NetworkPolicy census
         # Its own glob and its own named step, exactly like the two suites
@@ -297,30 +295,16 @@ jobs:
       - name: The ingress policy must pin one peer by its full identity
         run: ./scripts/ci/chart-ingress-pin.sh
       - name: The egress deny must be unrepresentable, and must bind the workload
-        # The pin above scopes itself to `spec.ingress` BY CONSTRUCTION, so
-        # nothing it does can notice `- Egress` leaving `policyTypes` — and
-        # that entry is the whole deny, because NetworkPolicySpec.Egress is
-        # `json:"egress,omitempty"` upstream and the API server drops the empty
-        # `egress: []` from the stored spec. Delete the one line and every other
-        # check in this job still passes while outbound access silently
-        # reopens. This step is what makes that a red build: it pins the
-        # rendered policy against a literal, refuses a battery of hostile
-        # rewrites of the real render, and censuses the COMPLETE installable
-        # render so a second NetworkPolicy — additive, and invisible to any
-        # raw-line pin — cannot allow what the first one denies.
-        #
-        # It also closes the OTHER half of the same defect, which reading the
-        # policy can never close. A NetworkPolicy has a `podSelector` naming
-        # which Pods it governs and rules saying what those Pods may do, and
-        # the two are independent: retarget the Deployment's Pod-template
-        # labels, leave the policy byte-identical, and the policy matches ZERO
-        # Pods. A policy that selects no Pod governs nothing, so those Pods get
-        # full outbound access — while helm lint, the ingress pin above, and
-        # every text and census assertion in this step stay green, because the
-        # policy's text is perfect. It simply applies to nothing. The census
-        # therefore binds the policy to the rendered workload as well: same
-        # namespace, Pod-template labels the selector really matches, and a
-        # selector that names this release rather than the whole namespace.
+        # The ingress pin above scopes itself to `spec.ingress` BY
+        # CONSTRUCTION, so nothing it does can notice `- Egress` leaving
+        # `policyTypes` — and that one entry is the whole deny. Delete it and
+        # every other check in this job still passes while outbound access
+        # silently reopens. This step is what makes that a red build; it also
+        # binds the policy to the rendered workload, because a policy whose
+        # `podSelector` matches no Pod governs nothing while its text still
+        # reads as a perfect deny. The full argument for both halves lives in
+        # the header of scripts/ci/chart-egress-pin.sh and the module docstring
+        # of scripts/ci/chart_render_census.py.
         run: ./scripts/ci/chart-egress-pin.sh
       - name: Chart version must match VERSION
         run: |

@@ -759,9 +759,10 @@ def validate_review_receipt(text: str, *, expected_head: str, role: str) -> str:
         if signature is None or signature.group(1) in {"Agent", "distinct context"}:
             raise ContractError("adversarial receipt signature is not distinct or bounded")
         return lines[1][len("VERDICT: ") :]
-    # The "main-worker" role retired with issue #124: the adversarial APPROVE
-    # at the exact final head plus green required checks is the complete
-    # review evidence before the coordinator flips Ready.
+    # `adversarial` is the only receipt role: that APPROVE at the exact final
+    # head, plus green required checks, is the complete review evidence before
+    # the coordinator flips Ready. Any other role is refused rather than
+    # defaulted.
     raise ContractError("receipt role must be adversarial")
 
 

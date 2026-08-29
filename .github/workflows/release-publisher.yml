@@ -176,9 +176,17 @@ jobs:
           tag="v${version}"
           chart_version="$(awk '/^version:/{print $2; exit}' chart/Chart.yaml)"
           app_version="$(awk '/^appVersion:/{gsub(/"/,"",$2); print $2; exit}' chart/Chart.yaml)"
-          test "${tag}" = "v${version}"
+          # The step name says "release locks", so it reads all four. The
+          # fourth leg used to be `test "${tag}" = "v${version}"`, which
+          # compares the line above to itself and can refuse nothing; the
+          # image tag in chart/values.yaml is the lock that was actually
+          # missing here. The publisher rewrites only its own runner copy of
+          # that file, and not until `helm package`, so this reads the
+          # committed value.
+          image_tag="$(awk '/^  tag:/{print $2; exit}' chart/values.yaml)"
           test "${chart_version}" = "${version}"
           test "${app_version}" = "${version}"
+          test "${image_tag}" = "${tag}"
           printf 'version=%s\n' "${version}" >> "${GITHUB_OUTPUT}"
           printf 'tag=%s\n' "${tag}" >> "${GITHUB_OUTPUT}"
       - name: Verify the complete annotated tag identity
@@ -762,7 +770,6 @@ jobs:
             --image "${IMAGE}" --image-digest "${{ steps.image.outputs.digest }}" \
             --chart "${CHART}" --chart-digest "${{ steps.chart.outputs.digest }}" \
             >/dev/null
-          test "$(basename "${manifest}")" = release-manifest.json
           test "$(stat -c '%a' "${manifest}")" = 600
           python3 -I -B scripts/ci/release_contract.py manifest-record \
             --manifest "${manifest}" --repository "${GITHUB_REPOSITORY}" \

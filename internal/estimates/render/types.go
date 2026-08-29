@@ -39,9 +39,9 @@ type markdownRenderer struct{}
 type htmlRenderer struct{}
 
 // registry is the closed set of available renderers. PDF deliberately has no
-// entry yet: PDF v1 is the browser's native print-to-PDF over the UI's print
-// view of the HTML rendering, and TRUE server-side PDF generation requires a
-// library — an owner dependency decision (requirement 9: the Go module stays
+// entry: the intended v1 is the browser's own print-to-PDF over the HTML
+// rendering above, and TRUE server-side PDF generation requires a library —
+// an owner dependency decision (requirement 9: the Go module stays
 // standard-library only), not incremental drift. Its slot in this registry
 // is reserved for that decision.
 var registry = map[string]Renderer{

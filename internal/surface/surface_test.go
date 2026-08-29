@@ -32,6 +32,7 @@ func TestEnvelopeVocabularyIsPinned(t *testing.T) {
 	for id, want := range map[string]string{
 		"board":     "media-mosaic/v1",
 		"reviews":   "reviews/v1",
+		"ratings":   "ratings/v1",
 		"estimates": "estimates/v1",
 	} {
 		found := false

@@ -1,10 +1,9 @@
 // html.go renders the canonical estimate as a complete, semantic HTML
 // document. It is deliberately unstyled and script-free: the site CSP
 // (default-src 'self', no inline anything) must hold if this document is
-// ever navigated to, and the UI's print stylesheet — the basis of the
-// browser-native print-to-PDF path — owns presentation through the class
-// hooks. Every text field passes through entity escaping; every figure is
-// the computed estimate's verbatim cents.
+// ever navigated to, so presentation is left entirely to the class hooks and
+// no stylesheet ships with it yet. Every text field passes through entity
+// escaping; every figure is the computed estimate's verbatim cents.
 
 package render
 
@@ -16,13 +15,10 @@ import (
 	"github.com/snaraj/lidersea.com/internal/estimates"
 )
 
-// Format names the registry key.
 func (htmlRenderer) Format() string { return FormatHTML }
 
-// ContentType is the HTML media type.
 func (htmlRenderer) ContentType() string { return "text/html; charset=utf-8" }
 
-// Render produces the HTML document.
 func (htmlRenderer) Render(estimate estimates.Estimate) ([]byte, error) {
 	esc := html.EscapeString
 	var b strings.Builder

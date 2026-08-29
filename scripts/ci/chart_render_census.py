@@ -571,13 +571,10 @@ class Reader:
                     # range STOPS at U+009F: `©`, `é`, CJK and emoji all read
                     # normally, and so does U+00A0 -- but U+00A0 reads normally
                     # only because the strip helpers above are ASCII-explicit.
-                    # This comment used to claim it "stays perfectly readable"
-                    # full stop, which was true of a MID-TOKEN U+00A0 and false
-                    # of a sole or edge one: `a: \xa0` was the value None here
-                    # against PyYAML's string "\xa0", because Python's
-                    # `str.strip()` had already eaten it. the ported reader's round-four
-                    # review measured that; the claim is narrowed to what the
-                    # refusal actually promises -- this range, and no more.
+                    # A sole or edge U+00A0 would otherwise read as the value
+                    # None here against PyYAML's "\xa0", because Python's own
+                    # `str.strip()` eats it. So the promise is exactly this
+                    # range, and no more.
                     self.fail("the C1 control character U+%04X is refused; a real YAML reader "
                               "rejects the entire stream for it, so a render this gate could "
                               "read would be a render nothing can install" % code, lineno)
@@ -2361,10 +2358,8 @@ metadata:
 spec:
 """ + _ALLOW_ALL_TAIL
 
-# the ported reader's differential review measured the two classes below. Both were
-# structurally out of reach of rounds one through four, because every corpus
-# alphabet those rounds swept was newline-free and both classes are about what
-# happens ACROSS a line break.
+# The two classes below are about what happens ACROSS a line break, so no
+# newline-free corpus alphabet can reach either of them.
 #
 # A document nobody spelled. `null` is a whole, legal top-level document; the
 # reader used to end it wherever the next line was not more indented, and start

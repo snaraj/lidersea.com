@@ -39,7 +39,7 @@
 #
 #   "some-subcommand" = "why this command has no non-test caller today"
 #
-# Seeded empty on purpose: at 0.1.37 every one of the 33 registered
+# Seeded empty on purpose: every one of the 33 registered
 # subcommands has a workflow, script, or doc caller. `settings-receipt` is
 # doc-only and needs no entry — an operator escape hatch invoked from
 # docs/release-governance.md is a real caller, and the gate reports the tier
@@ -61,7 +61,7 @@
 #   "<workflow>.yml::<job>::<step name>::shell"           = "reason"
 #   "<workflow>.yml::<job>::<step name>::env::<VARIABLE>"  = "reason"
 #
-# Seeded empty on purpose: at 0.1.37 no workflow in this repository declares
+# Seeded empty on purpose: no workflow in this repository declares
 # continue-on-error anywhere, declares a custom shell anywhere, or binds a
 # pinned variable at step level. The seed records the measured baseline rather
 # than reserving room for violations nobody has proposed.
@@ -69,11 +69,8 @@
 # The suite refuses a STALE entry — one naming a construct no workflow declares
 # today, whether the cause is a removed construct or a mistyped key — so no
 # entry outlives the case that justified it. It does NOT bound how many entries
-# this table holds, and it does NOT assert the table is
-# empty. That assertion lived in the suite until 0.1.37 and broke the one-line
-# lift described above: applying the exact line a refusal printed silenced the
-# refusal and immediately failed the empty-table pin, so the instruction in the
-# public CI log was one an agent could not follow.
+# this table holds, and it never asserts the table is empty: an empty-table pin
+# would refuse the exact line the failure message tells an agent to add.
 [workflow_integrity]
 
 # ---------------------------------------------------------------------------

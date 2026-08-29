@@ -1,15 +1,10 @@
 // A second repository pin beside provider neutrality: what a deployed
 // workload says about which release it is.
 //
-// Until this contract a Pod from this chart named its image as
-// `repository@sha256:<hex>` and carried no version label. That is a precise
-// machine identity and a useless human one — `kubectl describe pod` could not
-// tell an operator that the running bytes are release v0.1.9, and neither
-// could `kubectl get po -L app.kubernetes.io/version`, because nothing emitted
-// that label.
-//
-// The reference now states both halves, and these pins exist to keep them
-// honest about each other:
+// A digest alone is a precise machine identity and a useless human one:
+// `kubectl describe pod` cannot tell an operator which release the running
+// bytes are. The rendered reference therefore states both halves, and these
+// pins keep them honest about each other:
 //
 //   - the digest remains mandatory and remains the only thing that resolves.
 //     Kubernetes content-addresses it, cosign signs it, and the platform's
@@ -17,8 +12,9 @@
 //     (platform safety invariant 6, requirement 10 here).
 //   - the tag is exactly the release this chart claims to be. The gate's
 //     version lock already ties VERSION to the chart version and appVersion;
-//     the image tag is the fourth leg, because a reference reading
-//     `:v0.1.8@sha256:<v0.1.9 bytes>` would be worse than no tag at all.
+//     the image tag is the fourth leg, because a reference whose tag names one
+//     release and whose digest selects another's bytes would be worse than no
+//     tag at all.
 //
 // Requirement 9 keeps this module standard-library only, so these are byte
 // pins over the chart sources rather than a YAML decode — which also means

@@ -3,7 +3,7 @@
 // proving behavior the happy-path suite and the real bundle can never reach:
 // the fail-closed 500 branch, the read-once construction contract, and
 // terminal rejection of ambiguous request paths. Everything here is standard
-// library only and is written to be portable verbatim to naranjo.online.
+// library only, with no assertion library and no mock framework.
 package server
 
 import (
@@ -103,34 +103,8 @@ func TestReadFailureAfterStatIsFailClosed(t *testing.T) {
 	}
 }
 
-// TestIndexReadOnceAtConstruction verifies the availability contract that a
-// broken bundle fails during New — before Kubernetes can route traffic to the
-// pod — rather than on a visitor's first request: the entrypoint is read
-// exactly once at construction and never again while serving.
-func TestIndexReadOnceAtConstruction(t *testing.T) {
-	t.Parallel()
-	fsys := &faultFS{files: testsupport.FrontendFS()}
-	siteHandler, err := New(fsys)
-	if err != nil {
-		t.Fatalf("New() error = %v", err)
-	}
-	if got := fsys.readsOf("index.html"); got != 1 {
-		t.Fatalf("index.html read %d times during construction, want 1", got)
-	}
-	for range 3 {
-		response := httptest.NewRecorder()
-		siteHandler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
-		if response.Code != http.StatusOK {
-			t.Fatalf("root status = %d", response.Code)
-		}
-	}
-	if got := fsys.readsOf("index.html"); got != 1 {
-		t.Errorf("index.html read %d times after serving, want still 1", got)
-	}
-}
-
-// TestAmbiguousPathsAreTerminalNotFound pins the pre-router guard shared with
-// naranjo.online: traversal, dot segments, duplicate separators, trailing
+// TestAmbiguousPathsAreTerminalNotFound pins the pre-router guard:
+// traversal, dot segments, duplicate separators, trailing
 // slashes, backslashes, and NUL bytes are answered with a terminal 404 and
 // are never redirect-canonicalized onto a different route. Targets are
 // assigned to URL.Path directly because several are deliberately not

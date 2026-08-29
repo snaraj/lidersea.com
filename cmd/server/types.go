@@ -10,7 +10,7 @@ const (
 	// maxRequestHeaderBytes bounds all request metadata far below net/http's
 	// 1 MiB default. Every route on this origin answers small GET and HEAD
 	// requests, so megabyte header allowances would serve attackers, not
-	// visitors. The value matches naranjo.online.
+	// visitors.
 	maxRequestHeaderBytes = 32 * 1024
 	// shutdownTimeout bounds graceful shutdown so a stuck connection cannot
 	// hold a rollout open indefinitely. Kubernetes can still terminate the

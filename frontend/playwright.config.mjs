@@ -56,7 +56,9 @@ function derivedPort(seed) {
 }
 
 const port = process.env.LIDERSEA_SMOKE_PORT ?? derivedPort(new URL('.', import.meta.url).pathname);
-if (!/^[1-9][0-9]{3,4}$/.test(port)) {
+// The shape check alone would admit 99999, which is not a port at all and
+// would fail at bind time with a worse message than this one.
+if (!/^[1-9][0-9]{3,4}$/.test(port) || Number(port) > 65535) {
   throw new Error(`LIDERSEA_SMOKE_PORT must be an unprivileged port number, not ${port}`);
 }
 const origin = `http://127.0.0.1:${port}`;

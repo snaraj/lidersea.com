@@ -3,11 +3,11 @@
 // no HTTP, no I/O, no envelope knowledge — so the server layer composes it
 // into responses and every behavior here is testable as plain functions.
 //
-// The sample board ships first so the UI builds against the real contract;
-// real content arrives when the platform storage layer lands and a
-// publishing flow writes digest-addressed files under the media root (the
-// chart's media volume is documented, deliberately unwired, until that
-// storage design is decided).
+// The sample board ships first so the contract is fixed and testable before
+// any content exists; real content arrives when a publishing flow writes
+// digest-addressed files under the media root internal/media serves. No
+// shell component consumes /api/board yet, so the sample content and its
+// tests are the only things holding the shape.
 package board
 
 import (

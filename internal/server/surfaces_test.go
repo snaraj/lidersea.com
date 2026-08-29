@@ -19,8 +19,10 @@ import (
 	"github.com/snaraj/lidersea.com/internal/testsupport"
 )
 
-// Payload budgets: every surface page must fit its pinned ceiling so the UI
-// can rely on cheap first paints over any connection.
+// Payload budgets: every surface page must fit its pinned ceiling, so a
+// consumer can rely on cheap first paints over any connection. The ratings
+// budget is the one a visitor pays today; the rest are pinned before their
+// consumers exist, which is when a ceiling is cheapest to hold.
 const (
 	boardPageBudgetBytes   = 48 * 1024
 	reviewsPageBudgetBytes = 16 * 1024

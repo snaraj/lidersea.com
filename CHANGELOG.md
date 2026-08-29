@@ -7,6 +7,111 @@ Git, image, and GitHub Release tags use the exact plain `vX.Y.Z` form.
 
 ## [Unreleased]
 
+## [0.1.39] - 2026-08-28
+
+### Changed
+
+- Comment-truth pass across the tree. Every corrected comment made a factual
+  claim the code beside it contradicted, so each was load-bearing for the next
+  reader's decision and wrong. `internal/server`'s package doc said the handler
+  "serves only the embedded frontend and Kubernetes health probes" — it also
+  serves `/api/` and, when gated, the media path. `surfaces.go` justified its
+  unchanged CSP with "the UI submits gated writes with `fetch()`"; no UI
+  submits anything, and the real reason is stronger — `decodeJSONBody` requires
+  `application/json`, which no HTML form can emit, so a carve-out is
+  unreachable by form submission and `form-action 'none'` never has to move.
+  `internal/board` described "the chart's media volume" as documented but
+  unwired; the chart declares no media volume at all. `estimates/render` twice
+  named a UI print stylesheet and print view that do not exist.
+  `internal/server/types.go` credited `New` with validating the entrypoint;
+  `NewSite` does. `TestCatalogIsTheClosedSetOfThemes` said "the two explicit
+  reading themes" while requiring three.
+- `styles.css` claimed a custom-properties-only theme rule is "what makes a
+  theme switch incapable of moving a box". The enforcing test checks only the
+  `--` prefix, so a theme redefining a spacing token would pass it; the
+  no-shift OUTCOME is measured by the browser lane, and the comment now says
+  which half is which. The same block said "both themes" where three palettes
+  are defined, and the contrast test was named "both palettes".
+- The contrast test's "every foreground the shell paints on every background"
+  was false: the ratings meter's fill on its own track is a real painted pair
+  and is absent. The exclusion is now stated with its reason — the meter is
+  `aria-hidden` and repeats a value the number and review count already carry
+  in text, so it is not a graphic required to understand the content — and
+  records that it does not clear 3:1 today, so promoting it to the sole
+  encoding of a value would be a palette decision, not a free change.
+- Cross-repository references removed from code and comments (requirement 5):
+  a header-cap value said to match the sibling site, a fault-suite header
+  written "to be portable verbatim" to it, a path guard described as "shared
+  with" it, and an install-script provenance sentence. None was verifiable
+  from this repository, which is the point of the requirement.
+- `AGENTS.md` said browser-emulated smoke lanes in CI were still an owner
+  decision; `browser-smoke.yml` has been shipping them, and the CI map omitted
+  the workflow entirely. Both corrected, with the lane's one honest limit
+  stated: `npx playwright install` fetches the engine builds itself, so they
+  are not checksum-verified the way `scripts/ci/install-tools.sh` verifies
+  every other third-party binary. The same file still deferred "introducing a
+  media pipeline" as an owner decision while `internal/media` exists; what
+  remains deferred is enabling it.
+- `SECURITY.md`'s posture bullet described an earlier, simpler binary
+  ("embedded static content", "no outbound calls" unqualified). It now names
+  the surface API and states that the outbound collector, the media directory,
+  and both write carve-outs are separate environment gates whose absence is
+  off and whose malformed value fails startup.
+
+### Added
+
+- `codeql.yml`'s concurrency guard carries its rationale. The guard was already
+  correct; nothing recorded why it may not be simplified to `true`. The weekly
+  cron resolves to the same group as a push run at that SHA, and the release
+  orchestrator polls `codeql.yml/runs?branch=main&event=push&head_sha=<merged>`
+  while `select_codeql_main_run` accepts only `success` — so a cancelled push
+  run leaves the schedule's own `event: schedule` run outside the filter.
+- `frontend/playwright.config.mjs` now rejects a port above 65535. The shape
+  check admitted `99999`, which is not a port, so the guard's message
+  ("must be an unprivileged port number") promised more than it enforced.
+
+### Fixed
+
+- `release-publisher.yml` read the four release locks but only compared three.
+  Its fourth line was `test "${tag}" = "v${version}"`, comparing the line above
+  it to itself; the lock actually missing there — `image.tag` in
+  `chart/values.yaml` — is now the one it reads.
+- `commit_identity.py`'s `main()` re-inlined the three statements of `audit()`
+  instead of calling it, so the suite exercised a function CI never reached.
+  `audit()` now returns the SHAs alongside the findings and is the enforcement
+  path.
+- `serveBoard` hardcoded the text of `board.ErrUnknownCursor` rather than
+  reading the sentinel, so the same message existed twice with nothing linking
+  the two.
+
+### Removed
+
+- Dead code and vacuous assertions, each removed and the full gate re-run:
+  `_FULL_SHA` in `commit_identity.py` (zero references repository-wide);
+  `test "$(basename "${manifest}")" = release-manifest.json` in the publisher
+  (basename of a literal path); `expect(parts.length).toBeGreaterThan(0)` in
+  the browser lane (`String.split` always returns at least one element);
+  `TestIndexReadOnceAtConstruction`, whose subject, fake, and assertions are a
+  strict subset of `TestThemedShellsAreStampedOnceAtConstruction` — its
+  availability framing moved into the surviving test's comment, and the
+  broken-bundle half it also documented stays pinned by
+  `TestNewRejectsMissingEntrypoint` and `TestNewRejectsAnUnstampableShell`.
+- Resolved-history narration that outlived its subject: a comment in
+  `chart_render_census.py` whose entire topic was the edit history of the six
+  lines above it; two of three retellings of an empty-table pin that no longer
+  exists, leaving the forward-looking rule once in the function that
+  implements it; the "main-worker role retired with issue #124" note, replaced
+  by what the code does; `at 0.1.37` stamps in `ci_gate_allowlist.toml` that
+  re-stale every release; and a suite size ("14 tests") that is now 16, where
+  the evidence was "the mutation stayed green" and the count was decoration.
+- The 24-line third copy of the egress argument in `pr-gate.yml`, reduced to
+  the anti-deletion warning plus a pointer to the two files that make the
+  argument in full. Verbose restatements of the code below them, in Go and in
+  the frontend tests. And the orphaned "Fail-closed sentinel" sentence in
+  `chart/values.yaml`, which sat at the head of the `tag:` comment block while
+  describing the `digest:` field two keys below — the one place a reader could
+  conclude the release tag was the fail-closed sentinel.
+
 ## [0.1.38] - 2026-08-28
 
 ### Added

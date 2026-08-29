@@ -19,8 +19,13 @@ contract and the isolated Administration-read-only App-token recheck succeeds.
 ## Posture (what you can rely on)
 
 - The service is a single static Go binary in a shell-less distroless
-  image, running as a non-root user, serving embedded static content on
-  port 8080 with no runtime dependencies and no outbound calls.
+  image, running as a non-root user, serving the embedded bundle and the
+  read-only `surface/v1` API on port 8080 with no runtime dependency
+  beyond the Go standard library. The shipped configuration makes no
+  outbound call and serves no media: the ratings collector, the media
+  directory, and both write carve-outs are separate environment gates
+  whose absence is off, and an unparseable gate value fails startup
+  rather than resolving to either state.
 - Images and charts are published only after successful main CI by an
   exact-SHA orchestrator that creates the exact annotated Git tag and explicitly
   dispatches the protected-main publisher with that completed run's ID. A

@@ -7,6 +7,18 @@ Git, image, and GitHub Release tags use the exact plain `vX.Y.Z` form.
 
 ## [Unreleased]
 
+## [0.1.41] - 2026-08-31
+
+### Changed
+
+- `github/codeql-action/init` and `github/codeql-action/analyze` now move
+  together from v4.37.8 to v4.37.9 at the release's full commit SHA. The
+  repository-wide workflow-integrity suite now resolves every reference to
+  either role and rejects a drifted SHA or version comment, with independent
+  init-old and analyze-old mutants proving both directions fail closed. It
+  covers both GitHub workflow extensions and case-insensitive action identity,
+  including shadow-workflow and skipped-decoy mutations.
+
 ## [0.1.40] - 2026-08-28
 
 ### Changed

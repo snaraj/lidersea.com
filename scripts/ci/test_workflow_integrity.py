@@ -3,9 +3,10 @@
 READ THIS BEFORE ADDING A TEST HERE
 ===================================
 
-This suite pins THREE named dangerous constructs and the reader that finds
-them. It does NOT pin a step inventory, and one must never be added — not
-here, and not in `scripts/ci/workflow_integrity.py`.
+The imported gate pins THREE named dangerous constructs and the reader that
+finds them. This suite separately binds every CodeQL init/analyze role to one
+release tuple. Neither rule pins a step inventory, and one must never be added
+— not here, and not in `scripts/ci/workflow_integrity.py`.
 
 A step inventory is the assertion "job X contains exactly these steps". It
 looks like rigour and behaves like sand:
@@ -50,6 +51,63 @@ import workflow_integrity as WI  # noqa: E402
 
 GATE_JOBS = frozenset({"security", "application", "chart", "analyze"})
 PINNED = frozenset({"TRIVY_VERSION", "TRIVY_SHA256", "HELM_VERSION"})
+CODEQL_ROLE_PREFIX = re.compile(
+    r"^\s*(?:-\s*)?uses:\s*github/codeql-action/(init|analyze)@",
+    re.MULTILINE | re.IGNORECASE,
+)
+CODEQL_ROLE_REFERENCE = re.compile(
+    r"^\s*(?:-\s*)?uses:\s*github/codeql-action/(init|analyze)@([0-9a-f]{40})"
+    r"\s+#\s+(v[0-9]+\.[0-9]+\.[0-9]+)\s*$",
+    re.MULTILINE | re.IGNORECASE,
+)
+
+
+def workflow_files() -> list[Path]:
+    """Return every workflow extension GitHub accepts."""
+    return sorted((*WI.WORKFLOW_DIR.glob("*.yml"), *WI.WORKFLOW_DIR.glob("*.yaml")))
+
+
+def codeql_lockstep_problems(
+    workflow_texts: dict[str, str] | None = None,
+) -> list[str]:
+    """Require every CodeQL role to resolve to one full SHA/version tuple."""
+    if workflow_texts is None:
+        workflow_texts = {
+            path.name: path.read_text(encoding="utf-8")
+            for path in workflow_files()
+        }
+
+    problems: list[str] = []
+    references: list[tuple[str, str, str, str]] = []
+    for name, text in sorted(workflow_texts.items()):
+        for line_number, line in enumerate(text.splitlines(), start=1):
+            if not CODEQL_ROLE_PREFIX.match(line):
+                continue
+            match = CODEQL_ROLE_REFERENCE.fullmatch(line)
+            if match is None:
+                problems.append(
+                    f"{name}:{line_number}: CodeQL role must use a full lowercase "
+                    "SHA and trailing vX.Y.Z comment"
+                )
+                continue
+            role, sha, version = match.groups()
+            references.append((role.lower(), sha, version, f"{name}:{line_number}"))
+
+    roles = {role for role, _, _, _ in references}
+    missing = {"init", "analyze"} - roles
+    if missing:
+        problems.append(f"missing CodeQL role references: {', '.join(sorted(missing))}")
+
+    tuples = {(sha, version) for _, sha, version, _ in references}
+    if len(tuples) != 1:
+        rendered = ", ".join(
+            f"{location}={role}@{sha}#{version}"
+            for role, sha, version, location in references
+        )
+        problems.append(
+            "CodeQL init/analyze roles must share one SHA/version tuple; " + rendered
+        )
+    return problems
 
 #: The tracked allowlist exactly as it sits on disk at import time, captured
 #: before any test can run. Two classes below rewrite that REAL file and put it
@@ -145,7 +203,7 @@ class TheRealWorkflowsPass(unittest.TestCase):
 
     def test_every_workflow_is_readable(self) -> None:
         """An unreadable workflow must be a red gate, never a quiet pass."""
-        paths = sorted(WI.WORKFLOW_DIR.glob("*.yml"))
+        paths = workflow_files()
         self.assertTrue(paths, "no workflow files were found")
         for path in paths:
             with self.subTest(workflow=path.name):
@@ -172,6 +230,102 @@ class TheRealWorkflowsPass(unittest.TestCase):
 
     def test_the_baseline_is_green_so_every_finding_below_is_the_mutation(self) -> None:
         self.assertEqual(run(BASE), [])
+
+
+class CodeQLRolesStayOnOneRelease(unittest.TestCase):
+    OLD_SHA = "db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28"
+    OLD_VERSION = "v4.37.8"
+
+    @staticmethod
+    def workflow_texts() -> dict[str, str]:
+        return {
+            path.name: path.read_text(encoding="utf-8")
+            for path in workflow_files()
+        }
+
+    def drift_one_role(self, role: str) -> dict[str, str]:
+        texts = self.workflow_texts()
+        pattern = re.compile(
+            rf"(uses:\s*github/codeql-action/{role}@)[0-9a-f]{{40}}"
+            rf"(\s+#\s+)v[0-9]+\.[0-9]+\.[0-9]+"
+        )
+        for name, text in texts.items():
+            changed, count = pattern.subn(
+                rf"\g<1>{self.OLD_SHA}\g<2>{self.OLD_VERSION}", text, count=1
+            )
+            if count:
+                self.assertNotEqual(changed, text, f"{role} mutant changed no bytes")
+                texts[name] = changed
+                return texts
+        self.fail(f"no CodeQL {role} role exists to mutate")
+
+    def test_the_repository_uses_one_complete_release_tuple(self) -> None:
+        self.assertEqual(codeql_lockstep_problems(), [])
+
+    def test_an_init_only_rollback_is_refused(self) -> None:
+        problems = codeql_lockstep_problems(self.drift_one_role("init"))
+        self.assertTrue(problems, "the init-old mutant survived")
+        self.assertIn("share one SHA/version tuple", "\n".join(problems))
+
+    def test_an_analyze_only_rollback_is_refused(self) -> None:
+        problems = codeql_lockstep_problems(self.drift_one_role("analyze"))
+        self.assertTrue(problems, "the analyze-old mutant survived")
+        self.assertIn("share one SHA/version tuple", "\n".join(problems))
+
+    def test_a_short_ref_or_missing_version_comment_is_refused(self) -> None:
+        texts = self.workflow_texts()
+        name = next(name for name, text in texts.items() if "codeql-action/init@" in text)
+        texts[name] = re.sub(
+            r"github/codeql-action/init@[0-9a-f]{40}\s+#\s+v[0-9]+\.[0-9]+\.[0-9]+",
+            "github/codeql-action/init@v4",
+            texts[name],
+            count=1,
+        )
+        self.assertIn("full lowercase SHA", "\n".join(codeql_lockstep_problems(texts)))
+
+    def test_a_yaml_shadow_workflow_cannot_hide_another_release(self) -> None:
+        texts = self.workflow_texts()
+        texts["codeql-shadow.yaml"] = (
+            "name: CodeQL shadow\n"
+            "on:\n"
+            "  workflow_dispatch:\n"
+            "permissions: {}\n"
+            "jobs:\n"
+            "  analyze:\n"
+            "    runs-on: ubuntu-24.04\n"
+            "    steps:\n"
+            f"      - uses: github/codeql-action/init@{self.OLD_SHA} "
+            f"# {self.OLD_VERSION}\n"
+            f"      - uses: github/codeql-action/analyze@{self.OLD_SHA} "
+            f"# {self.OLD_VERSION}\n"
+        )
+        self.assertTrue(codeql_lockstep_problems(texts), "the .yaml shadow survived")
+
+    def test_repository_case_is_normalized_and_a_decoy_cannot_hide_drift(self) -> None:
+        texts = self.workflow_texts()
+        original = texts["codeql.yml"]
+        pattern = re.compile(
+            r"(?m)^(\s*)- name: Initialize CodeQL\n"
+            r"(\s*)uses: github/codeql-action/init@([0-9a-f]{40})"
+            r"\s+#\s*(v[0-9]+\.[0-9]+\.[0-9]+)\s*$"
+        )
+
+        def split_real_step(match: re.Match[str]) -> str:
+            item_indent, uses_indent, current_sha, current_version = match.groups()
+            return (
+                f"{item_indent}- name: Skipped current-release decoy\n"
+                f"{uses_indent}if: ${{{{ false }}}}\n"
+                f"{uses_indent}uses: github/codeql-action/init@{current_sha} "
+                f"# {current_version}\n"
+                f"{item_indent}- name: Initialize CodeQL\n"
+                f"{uses_indent}uses: GitHub/codeql-action/init@{self.OLD_SHA} "
+                f"# {self.OLD_VERSION}"
+            )
+
+        mutated, count = pattern.subn(split_real_step, original, count=1)
+        self.assertEqual(count, 1, "did not construct the case-variant decoy mutant")
+        texts["codeql.yml"] = mutated
+        self.assertTrue(codeql_lockstep_problems(texts), "the case-variant decoy survived")
 
 
 class ContinueOnErrorIsRefused(unittest.TestCase):

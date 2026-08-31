@@ -43,6 +43,7 @@ import sys
 import tempfile
 import tomllib
 import unittest
+from collections.abc import Iterator
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -52,46 +53,61 @@ import workflow_integrity as WI  # noqa: E402
 GATE_JOBS = frozenset({"security", "application", "chart", "analyze"})
 PINNED = frozenset({"TRIVY_VERSION", "TRIVY_SHA256", "HELM_VERSION"})
 CODEQL_ROLE_PREFIX = re.compile(
-    r"^\s*(?:-\s*)?uses:\s*github/codeql-action/(init|analyze)@",
-    re.MULTILINE | re.IGNORECASE,
+    r"^github/codeql-action/(init|analyze)@",
+    re.IGNORECASE,
 )
 CODEQL_ROLE_REFERENCE = re.compile(
-    r"^\s*(?:-\s*)?uses:\s*github/codeql-action/(init|analyze)@([0-9a-f]{40})"
-    r"\s+#\s+(v[0-9]+\.[0-9]+\.[0-9]+)\s*$",
-    re.MULTILINE | re.IGNORECASE,
+    r"^github/codeql-action/(init|analyze)@([0-9a-f]{40})$",
+    re.IGNORECASE,
 )
+CODEQL_VERSION_COMMENT = re.compile(r"\s+#\s+(v[0-9]+\.[0-9]+\.[0-9]+)\s*$")
 
 
-def workflow_files() -> list[Path]:
+def workflow_files(workflow_dir: Path = WI.WORKFLOW_DIR) -> list[Path]:
     """Return every workflow extension GitHub accepts."""
-    return sorted((*WI.WORKFLOW_DIR.glob("*.yml"), *WI.WORKFLOW_DIR.glob("*.yaml")))
+    return sorted((*workflow_dir.glob("*.yml"), *workflow_dir.glob("*.yaml")))
+
+
+def walk_nodes(mapping: dict[str, WI.Node]) -> Iterator[WI.Node]:
+    """Yield every structurally parsed mapping node at every sequence depth."""
+    for node in mapping.values():
+        yield node
+        yield from walk_nodes(node.children)
+        for item in node.items:
+            yield from walk_nodes(item)
 
 
 def codeql_lockstep_problems(
     workflow_texts: dict[str, str] | None = None,
+    workflow_dir: Path = WI.WORKFLOW_DIR,
 ) -> list[str]:
     """Require every CodeQL role to resolve to one full SHA/version tuple."""
     if workflow_texts is None:
         workflow_texts = {
             path.name: path.read_text(encoding="utf-8")
-            for path in workflow_files()
+            for path in workflow_files(workflow_dir)
         }
 
     problems: list[str] = []
     references: list[tuple[str, str, str, str]] = []
     for name, text in sorted(workflow_texts.items()):
-        for line_number, line in enumerate(text.splitlines(), start=1):
-            if not CODEQL_ROLE_PREFIX.match(line):
+        document = WI.parse_workflow(text, name)
+        for node in walk_nodes(document):
+            if node.key != "uses":
                 continue
-            match = CODEQL_ROLE_REFERENCE.fullmatch(line)
-            if match is None:
+            value = WI.scalar(node.value)
+            if not CODEQL_ROLE_PREFIX.match(value):
+                continue
+            reference = CODEQL_ROLE_REFERENCE.fullmatch(value)
+            version = CODEQL_VERSION_COMMENT.search(node.value or "")
+            if reference is None or version is None:
                 problems.append(
-                    f"{name}:{line_number}: CodeQL role must use a full lowercase "
+                    f"{name}:{node.line}: CodeQL role must use a full lowercase "
                     "SHA and trailing vX.Y.Z comment"
                 )
                 continue
-            role, sha, version = match.groups()
-            references.append((role.lower(), sha, version, f"{name}:{line_number}"))
+            role, sha = reference.groups()
+            references.append((role.lower(), sha, version[1], f"{name}:{node.line}"))
 
     roles = {role for role, _, _, _ in references}
     missing = {"init", "analyze"} - roles
@@ -284,8 +300,7 @@ class CodeQLRolesStayOnOneRelease(unittest.TestCase):
         self.assertIn("full lowercase SHA", "\n".join(codeql_lockstep_problems(texts)))
 
     def test_a_yaml_shadow_workflow_cannot_hide_another_release(self) -> None:
-        texts = self.workflow_texts()
-        texts["codeql-shadow.yaml"] = (
+        shadow = (
             "name: CodeQL shadow\n"
             "on:\n"
             "  workflow_dispatch:\n"
@@ -299,7 +314,17 @@ class CodeQLRolesStayOnOneRelease(unittest.TestCase):
             f"      - uses: github/codeql-action/analyze@{self.OLD_SHA} "
             f"# {self.OLD_VERSION}\n"
         )
-        self.assertTrue(codeql_lockstep_problems(texts), "the .yaml shadow survived")
+        with tempfile.TemporaryDirectory() as directory:
+            workflow_dir = Path(directory)
+            (workflow_dir / "codeql.yml").write_text(
+                (WI.WORKFLOW_DIR / "codeql.yml").read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            (workflow_dir / "codeql-shadow.yaml").write_text(shadow, encoding="utf-8")
+            self.assertTrue(
+                codeql_lockstep_problems(workflow_dir=workflow_dir),
+                "the on-disk .yaml shadow was not discovered",
+            )
 
     def test_repository_case_is_normalized_and_a_decoy_cannot_hide_drift(self) -> None:
         texts = self.workflow_texts()
@@ -326,6 +351,32 @@ class CodeQLRolesStayOnOneRelease(unittest.TestCase):
         self.assertEqual(count, 1, "did not construct the case-variant decoy mutant")
         texts["codeql.yml"] = mutated
         self.assertTrue(codeql_lockstep_problems(texts), "the case-variant decoy survived")
+
+    def test_a_quoted_real_role_cannot_hide_behind_an_unquoted_decoy(self) -> None:
+        texts = self.workflow_texts()
+        original = texts["codeql.yml"]
+        pattern = re.compile(
+            r"(?m)^(\s*)- name: Initialize CodeQL\n"
+            r"(\s*)uses: github/codeql-action/init@([0-9a-f]{40})"
+            r"\s+#\s*(v[0-9]+\.[0-9]+\.[0-9]+)\s*$"
+        )
+
+        def quote_real_step(match: re.Match[str]) -> str:
+            item_indent, uses_indent, current_sha, current_version = match.groups()
+            return (
+                f"{item_indent}- name: Unreachable current-release decoy\n"
+                f"{uses_indent}if: ${{{{ github.repository == 'never/real' }}}}\n"
+                f"{uses_indent}uses: github/codeql-action/init@{current_sha} "
+                f"# {current_version}\n"
+                f"{item_indent}- name: Initialize CodeQL\n"
+                f'{uses_indent}uses: "github/codeql-action/init@{self.OLD_SHA}" '
+                f"# {self.OLD_VERSION}"
+            )
+
+        mutated, count = pattern.subn(quote_real_step, original, count=1)
+        self.assertEqual(count, 1, "did not construct the quoted-real decoy mutant")
+        texts["codeql.yml"] = mutated
+        self.assertTrue(codeql_lockstep_problems(texts), "the quoted real role survived")
 
 
 class ContinueOnErrorIsRefused(unittest.TestCase):

@@ -103,21 +103,33 @@ def resolve_uses(node: WI.Node, origin: str) -> str:
 
 
 def local_action_entrypoint(root: Path, reference: str, origin: str, line: int) -> Path:
-    """Resolve a `./dir` reference to the file GitHub executes, or REFUSE.
+    """Resolve a `./` reference to the file GitHub executes, or REFUSE.
 
     A same-repository action lives at ANY repository-relative directory holding
     `action.yml` or `action.yaml`. `.github/actions` is a convention and
     nothing more; following the reference is what makes the sweep below the
     executable namespace rather than a naming habit.
+
+    Both `./` spellings resolve here, because `uses:` carries both: a job-level
+    local REUSABLE WORKFLOW names its file (`./.github/workflows/x.yml`), while
+    a step-level local ACTION names the directory holding its metadata. Reading
+    only the second refused the first, which is a legitimate construct this
+    repository may add on any ordinary day -- a gate that reddens on new work
+    it never anticipated is the failure this suite's own contract forbids.
     """
-    for name in ("action.yml", "action.yaml"):
-        entrypoint = root / reference[2:] / name
+    target = root / reference[2:]
+    candidates = (
+        (target,)
+        if target.suffix in (".yml", ".yaml")
+        else (target / "action.yml", target / "action.yaml")
+    )
+    for entrypoint in candidates:
         if entrypoint.is_file():
             return entrypoint
     raise WI.WorkflowIntegrityError(
-        f"{origin}:{line}: the same-repository action reference `{reference}` "
-        f"resolves to no `action.yml` or `action.yaml`, so this reader cannot "
-        f"see what the step runs."
+        f"{origin}:{line}: the same-repository reference `{reference}` names "
+        f"neither a workflow file nor a directory holding an `action.yml` or "
+        f"`action.yaml`, so this reader cannot see what runs."
     )
 
 
@@ -466,6 +478,30 @@ class CodeQLRolesStayOnOneRelease(unittest.TestCase):
                 )
                 self.assertTrue(problems, f"the {label} bypass survived")
                 self.assertIn(expected, "\n".join(problems))
+
+    def test_a_local_reusable_workflow_is_resolved_not_refused(self) -> None:
+        """A legitimate `./…/x.yml` job reference must not redden the gate.
+
+        The negative control for the sweep above. `uses:` names a file at job
+        level and a directory at step level, and reading only the directory
+        form turned an ordinary, correct workflow RED.
+        """
+        files = {
+            ".github/workflows/reusable.yml": self.current(),
+            ".github/workflows/caller.yml": (
+                "name: Caller\n"
+                "on:\n"
+                "  workflow_dispatch:\n"
+                "permissions: {}\n"
+                "jobs:\n"
+                "  analyze:\n"
+                "    uses: ./.github/workflows/reusable.yml\n"
+            ),
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            self.assertEqual(
+                codeql_lockstep_problems(self.write_tree(Path(directory), files)), []
+            )
 
     def test_a_reference_this_reader_cannot_resolve_is_refused(self) -> None:
         """Fail closed on an unresolved `uses:`, rather than walking past it.

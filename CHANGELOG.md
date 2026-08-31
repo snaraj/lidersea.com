@@ -7,6 +7,23 @@ Git, image, and GitHub Release tags use the exact plain `vX.Y.Z` form.
 
 ## [Unreleased]
 
+## [0.1.41] - 2026-08-31
+
+### Changed
+
+- `github/codeql-action/init` and `github/codeql-action/analyze` now move
+  together from v4.37.8 to v4.37.9 at the release's full commit SHA. The
+  workflow-integrity suite rejects a drifted SHA or version comment anywhere
+  GitHub can execute either role: both workflow extensions, and every
+  same-repository action a workflow reaches through a `./` reference, followed
+  transitively rather than swept from a directory convention. A `uses:` value
+  the reader cannot resolve is refused rather than skipped, so an explicitly
+  tagged reference can no longer walk past the rule. Every mutant — one-sided
+  rollbacks, a short ref, a shadow workflow, case and quote variants, and a
+  composite wrapper both inside and outside `.github/actions` — is built as a
+  real repository tree on disk, and the check takes no injectable text
+  mapping, so discovery cannot be made vacuous by the test that exercises it.
+
 ## [0.1.40] - 2026-08-28
 
 ### Changed

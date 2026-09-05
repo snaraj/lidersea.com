@@ -69,8 +69,9 @@ App token to a mutation step.
 The preflight uses `gh api --method GET` only, with GitHub REST API version
 `2026-03-10`. It reads repository merge/security settings, immutable releases,
 Actions policy, default workflow-token permissions, private vulnerability
-reporting, the exhaustive ruleset inventory, and the one exact active
-repository-owned `Protect-Main` ruleset. It does not create, update, or delete a
+reporting, the exhaustive ruleset inventory, and the two exact active
+repository-owned branch rulesets `Protect-Main` and `Owner-PR-Updates`.
+It does not create, update, or delete a
 setting, ref, Release, package, or other resource. Authentication, duplicate
 JSON members at any depth, a foreign field, or an inexact value is a denial.
 
@@ -134,6 +135,10 @@ The exact successful receipt is:
     {"context": "security", "integration_id": 15368}
   ],
   "restrict_updates": false,
+  "active_main_branch_ruleset_count": 2,
+  "owner_update_ruleset": "Owner-PR-Updates",
+  "owner_update_ref": "~DEFAULT_BRANCH",
+  "owner_update_fetch_and_merge": false,
   "secret_scanning": true,
   "secret_scanning_push_protection": true,
   "strict_status_checks": true
@@ -282,3 +287,61 @@ GitHub documents the immutable-release control and its protected tag/asset
 behavior in [Immutable releases](https://docs.github.com/en/code-security/concepts/supply-chain-security/immutable-releases),
 and documents strict required checks in the
 [repository rulesets REST contract](https://docs.github.com/en/rest/repos/rules).
+
+## Owner-account merge restriction
+
+The current threat model is public source for a privately operated, single-owner
+homelab. Review this boundary before granting another collaborator, administrator,
+automation principal, or tenant access. An agent holding the owner's credentials
+has the owner's GitHub identity; these rules cannot distinguish that agent from
+an interactive owner. Agents still have no delegated merge authority.
+
+Two active repository-owned branch rulesets compose the protection:
+
+- `Protect-Main` keeps every security check and signature requirement, with
+  an empty bypass list.
+- `Owner-PR-Updates` targets only `~DEFAULT_BRANCH`, has no exclusions, and
+  contains only `update` with `update_allows_fetch_and_merge: false`. Its sole
+  bypass is the repository owner's numeric `User` ID in `pull_request` mode.
+
+The owner exception belongs only to the second ruleset. Adding it to the core
+ruleset would bypass security checks. Immutable tag protection and its empty
+bypass list remain separate. The receipt's existing `restrict_updates: false`
+describes the core ruleset; the combined policy does restrict updates.
+
+The release settings receipt requires these additional observable facts:
+
+```json
+{
+  "active_main_branch_ruleset_count": 2,
+  "owner_update_ruleset": "Owner-PR-Updates",
+  "owner_update_ref": "~DEFAULT_BRANCH",
+  "owner_update_fetch_and_merge": false
+}
+```
+
+Administration-read callers cannot observe bypass actors. Their structural
+receipt must not claim owner-only authority. With the existing authorized
+ruleset-write credential, run this GET-only check alongside the existing
+core/tag zero-bypass checks; missing actor evidence fails, rather than becoming
+an empty list:
+
+```bash
+set -euo pipefail
+repository=snaraj/lidersea.com
+owner_id="$(gh api "users/${repository%%/*}" --jq '.id')"
+ruleset_id="$(gh api "repos/${repository}/rulesets" --paginate --slurp | jq -er '
+  add | map(select(.name == "Owner-PR-Updates" and .target == "branch"
+    and .enforcement == "active"))
+  | if length == 1 then .[0].id else error("ambiguous owner restriction") end')"
+gh api "repos/${repository}/rulesets/${ruleset_id}" | jq -e --argjson owner "$owner_id" '
+  .bypass_actors == [{actor_id:$owner, actor_type:"User", bypass_mode:"pull_request"}]
+  and .conditions == {ref_name:{include:["~DEFAULT_BRANCH"], exclude:[]}}
+  and .rules == [{type:"update", parameters:{update_allows_fetch_and_merge:false}}]
+' >/dev/null
+printf 'OWNER_PR_UPDATES=PASS\n'
+```
+
+Prepare and validate the release-validator compatibility change before adding
+the restriction. Read back both rulesets after applying it; preserve the
+existing zero-bypass security rules. No step in this procedure merges a PR.

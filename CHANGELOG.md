@@ -7,6 +7,17 @@ Git, image, and GitHub Release tags use the exact plain `vX.Y.Z` form.
 
 ## [Unreleased]
 
+## [0.1.42] - 2026-09-05
+
+### Changed
+
+- Release settings validation requires the separate owner-account merge
+  restriction while retaining all core security checks and signature controls.
+- Coverage badges reuse the successful application job's Go coverage and
+  frontend test count from the same run, removing repeated builds and tests
+  from main delivery. Missing or malformed metrics prevent publication;
+  the required release gates and Go coverage floor remain enforced.
+
 ## [0.1.41] - 2026-08-31
 
 ### Changed

@@ -197,6 +197,9 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
+    outputs:
+      go: ${{ steps.go_coverage.outputs.total }}
+      front: ${{ steps.frontend_tests.outputs.total }}
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -219,12 +222,21 @@ jobs:
           test "$(npm --version)" = "11.17.0"
           test "$(go env GOVERSION)" = "go1.26.6"
       - name: Build and check Svelte
+        id: frontend_tests
         working-directory: frontend
         run: |
+          set -euo pipefail
           test -f package-lock.json
           npm ci --ignore-scripts --no-audit --no-fund
           npm run check
-          npm test
+          # These source-contract tests report a passing-test count. Their
+          # experimental coverage total does not measure application code.
+          # Capture the entire TAP stream so parsing cannot close Node's pipe.
+          node --test --test-reporter=tap tests/*.test.mjs \
+            | tee "${RUNNER_TEMP}/frontend-tests.tap"
+          total="$(awk '/^# pass /{print $3}' "${RUNNER_TEMP}/frontend-tests.tap")"
+          [[ "${total}" =~ ^[1-9][0-9]*$ ]]
+          printf 'total=%s\n' "${total}" >> "${GITHUB_OUTPUT}"
           npm run build
       - name: Test Go service with the embedded frontend
         env:
@@ -239,6 +251,7 @@ jobs:
           CGO_ENABLED=0 go test ./...
           go test -race ./...
       - name: Enforce and report Go test coverage
+        id: go_coverage
         env:
           GOTOOLCHAIN: local
           # Ratchet-only floor (total statement coverage, measured at 97.6%
@@ -247,6 +260,7 @@ jobs:
           # enforced check and is out of policy.
           GO_COVERAGE_FLOOR: '95.0'
         run: |
+          set -euo pipefail
           CGO_ENABLED=0 go test -covermode=atomic \
             -coverprofile="${RUNNER_TEMP}/site.cover.out" ./...
           # internal/testsupport is shared test scaffolding: it executes only
@@ -273,6 +287,8 @@ jobs:
             }
             printf "Go coverage %.1f%% meets the %.1f%% floor\n", got, floor
           }'
+          [[ "${total}" =~ ^(100(\.0+)?|[0-9]{1,2}(\.[0-9]+)?)$ ]]
+          printf 'total=%s\n' "${total}" >> "${GITHUB_OUTPUT}"
 
   chart:
     runs-on: ubuntu-24.04
@@ -363,75 +379,25 @@ jobs:
           push: false
 
   coverage-badges:
-    # Runs only on main pushes: recomputes the Go coverage and the frontend
-    # test count and publishes shields-endpoint JSONs to the generated
-    # single-commit `badges` branch (no history value; force-updating it is
-    # the documented exception to the no-force-push rule). Zero external
-    # services or accounts.
+    # Publish this successful main-push application's numeric measurements.
+    # The generated single-commit badges branch has no history value;
+    # force-updating it is the documented exception to the no-force-push rule.
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: application
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     permissions:
       contents: write
     steps:
-      - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Set up Node
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: '24.19.0'
-          check-latest: false
-      - name: Set up Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version: '1.26.6'
-          check-latest: false
-          cache: false
-      - name: Compute badge metrics
-        id: cov
-        env:
-          GOTOOLCHAIN: local
-        run: |
-          # pipefail makes the TAP-count pipeline fail closed: node --test
-          # exiting nonzero fails this step and publishes nothing, instead of
-          # the pipeline silently taking awk's exit status and letting a
-          # partially failing suite publish a green count on a main push.
-          set -euo pipefail
-          pushd frontend >/dev/null
-          npm ci --ignore-scripts --no-audit --no-fund
-          npm run build
-          # The frontend badge reports the passing-test count, not a coverage
-          # percentage: these tests read source files as text, so no
-          # application file ever executes and the experimental coverage
-          # table has zero file rows — its "100%" total was vacuous. A
-          # coverage badge returns when real component tests execute the
-          # code. The TAP reporter is pinned so the summary format cannot
-          # change with TTY detection.
-          # awk must consume the full TAP stream: exiting at the first match
-          # sends node EPIPE mid-write, which pipefail (correctly) surfaces
-          # as failure even on a healthy suite. END-print keeps pipefail's
-          # guarantee - a failing suite still fails the step via node's own
-          # exit status - without the self-inflicted SIGPIPE.
-          front="$(node --test --test-reporter=tap tests/*.test.mjs 2>&1 \
-            | awk '/^# pass /{count=$3} END{print count}')"
-          popd >/dev/null
-          CGO_ENABLED=0 go test -covermode=atomic -coverprofile="${RUNNER_TEMP}/cp.out" ./...
-          # Same scaffolding exclusion as the enforcement step, so the badge
-          # publishes the identical production-statement number the gate holds.
-          grep -v '/internal/testsupport/' "${RUNNER_TEMP}/cp.out" > "${RUNNER_TEMP}/cp.production.out"
-          gopct="$(go tool cover -func="${RUNNER_TEMP}/cp.production.out" | awk '/^total:/{gsub(/%/,"",$3); print $3}')"
-          test -n "${gopct}" && test -n "${front}"
-          printf 'go=%s\n' "${gopct}" >> "${GITHUB_OUTPUT}"
-          printf 'front=%s\n' "${front}" >> "${GITHUB_OUTPUT}"
       - name: Publish badge JSONs to the badges branch
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GO_PCT: ${{ steps.cov.outputs.go }}
-          FRONT_PASS: ${{ steps.cov.outputs.front }}
+          GO_PCT: ${{ needs.application.outputs.go }}
+          FRONT_PASS: ${{ needs.application.outputs.front }}
         run: |
           set -euo pipefail
+          [[ "${GO_PCT}" =~ ^(100(\.0+)?|[0-9]{1,2}(\.[0-9]+)?)$ ]]
+          [[ "${FRONT_PASS}" =~ ^[1-9][0-9]*$ ]]
           color() {
             awk -v p="$1" 'BEGIN{ if (p>=90) print "brightgreen"; else if (p>=75) print "green"; else if (p>=60) print "yellow"; else print "orange" }'
           }

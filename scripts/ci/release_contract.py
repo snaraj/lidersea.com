@@ -1050,8 +1050,13 @@ def validate_settings_receipt(receipt: Mapping[str, object], repository: str) ->
         "secret_scanning_push_protection",
         "strict_status_checks",
     }
+    fields.update(OWNER_UPDATE_RECEIPT)
     if set(receipt) != fields:
         raise ContractError("settings receipt fields are missing or foreign")
+    for field, expected in OWNER_UPDATE_RECEIPT.items():
+        actual = receipt.get(field)
+        if type(actual) is not type(expected) or actual != expected:
+            raise ContractError(f"settings receipt {field} is not exact")
     if receipt.get("repository") != repository or receipt.get("branch") != "main":
         raise ContractError("settings receipt repository or branch is not exact")
     if _string_set(receipt.get("merge_methods"), "merge methods") != {"rebase", "squash"}:
@@ -1114,23 +1119,62 @@ def validate_settings_receipt(receipt: Mapping[str, object], repository: str) ->
         raise ContractError("repository code-coverage max drop must remain null")
 
 
-def _select_main_ruleset_id(summaries: object, repository: str) -> int:
-    candidates: list[Mapping[str, object]] = []
+OWNER_UPDATE_RULESET = "Owner-PR-Updates"
+OWNER_UPDATE_RECEIPT = {
+    "active_main_branch_ruleset_count": 2,
+    "owner_update_ruleset": OWNER_UPDATE_RULESET,
+    "owner_update_ref": "~DEFAULT_BRANCH",
+    "owner_update_fetch_and_merge": False,
+}
+
+
+def _select_main_ruleset_ids(summaries: object, repository: str) -> tuple[int, int]:
+    expected = (EXPECTED_MAIN_RULESET, OWNER_UPDATE_RULESET)
+    selected: dict[str, int] = {}
     for value in _array(summaries, "repository rulesets"):
         summary = _object(value, "repository ruleset summary")
-        if (
-            summary.get("target") == "branch"
-            and summary.get("enforcement") == "active"
-            and summary.get("source_type") == "Repository"
-            and summary.get("source") == repository
-        ):
-            candidates.append(summary)
-    if len(candidates) != 1 or candidates[0].get("name") != EXPECTED_MAIN_RULESET:
-        raise ContractError("expected exactly one active repository-owned Protect-Main ruleset")
-    ruleset_id = candidates[0].get("id")
-    if isinstance(ruleset_id, bool) or not isinstance(ruleset_id, int) or ruleset_id <= 0:
-        raise ContractError("Protect-Main ruleset has no authoritative numeric ID")
-    return ruleset_id
+        if summary.get("target") != "branch" or summary.get("enforcement") != "active":
+            continue
+        name, ruleset_id = summary.get("name"), summary.get("id")
+        if (name not in expected or name in selected
+                or summary.get("source_type") != "Repository"
+                or summary.get("source") != repository
+                or type(ruleset_id) is not int or ruleset_id <= 0
+                or ruleset_id in selected.values()):
+            raise ContractError("active main ruleset inventory is foreign or ambiguous")
+        selected[name] = ruleset_id
+    if set(selected) != set(expected):
+        raise ContractError("both core security and owner-update rulesets are required")
+    return selected[expected[0]], selected[expected[1]]
+
+
+def _validate_owner_update_ruleset(
+    ruleset_id: int, record: Mapping[str, object], repository: str
+) -> None:
+    if (type(record.get("id")) is not int or record.get("id") != ruleset_id
+            or record.get("name") != OWNER_UPDATE_RULESET
+            or record.get("target") != "branch"
+            or record.get("source_type") != "Repository"
+            or record.get("source") != repository
+            or record.get("enforcement") != "active"):
+        raise ContractError("owner-update ruleset identity or enforcement is not exact")
+    if record.get("conditions") != {
+        "ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": []}
+    }:
+        raise ContractError("owner-update restriction must target only the default branch")
+    rules = _array(record.get("rules"), "owner-update rules")
+    if len(rules) != 1:
+        raise ContractError("owner-update restriction must contain exactly one rule")
+    rule = _object(rules[0], "owner-update rule")
+    parameters = _object(rule.get("parameters"), "owner-update parameters")
+    if (set(rule) != {"type", "parameters"} or rule.get("type") != "update"
+            or set(parameters) != {"update_allows_fetch_and_merge"}
+            or parameters.get("update_allows_fetch_and_merge") is not False):
+        raise ContractError("owner-update restriction is missing or weakened")
+    # Administration-read credentials cannot observe bypass_actors. This
+    # proves the structural restriction only; the documented owner-visible
+    # check separately requires the exact sole User and pull_request bypass.
+
 
 
 def build_settings_receipt(
@@ -1142,6 +1186,8 @@ def build_settings_receipt(
     private_reporting_record: Mapping[str, object],
     ruleset_id: int,
     ruleset_record: Mapping[str, object],
+    owner_ruleset_id: int,
+    owner_ruleset_record: Mapping[str, object],
 ) -> dict[str, object]:
     """Derive and validate a privacy-bounded receipt from authoritative REST."""
     if repository_record.get("full_name") != repository or repository_record.get("default_branch") != "main":
@@ -1368,6 +1414,8 @@ def build_settings_receipt(
             "secret_scanning_push_protection"
         ),
     }
+    _validate_owner_update_ruleset(owner_ruleset_id, owner_ruleset_record, repository)
+    receipt.update(OWNER_UPDATE_RECEIPT)
     validate_settings_receipt(receipt, repository)
     return receipt
 
@@ -1427,10 +1475,14 @@ def observe_live_settings(repository: str) -> dict[str, object]:
         "private vulnerability reporting",
     )
     summaries = _github_api_get(f"repos/{repository}/rulesets", paginate=True)
-    ruleset_id = _select_main_ruleset_id(summaries, repository)
+    ruleset_id, owner_ruleset_id = _select_main_ruleset_ids(summaries, repository)
     ruleset_record = _object(
         _github_api_get(f"repos/{repository}/rulesets/{ruleset_id}"),
         "Protect-Main ruleset",
+    )
+    owner_ruleset_record = _object(
+        _github_api_get(f"repos/{repository}/rulesets/{owner_ruleset_id}"),
+        "owner-update ruleset",
     )
     return build_settings_receipt(
         repository,
@@ -1441,6 +1493,8 @@ def observe_live_settings(repository: str) -> dict[str, object]:
         private_reporting_record,
         ruleset_id,
         ruleset_record,
+        owner_ruleset_id,
+        owner_ruleset_record,
     )
 
 

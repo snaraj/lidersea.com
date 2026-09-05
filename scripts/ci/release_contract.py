@@ -1166,11 +1166,17 @@ def _validate_owner_update_ruleset(
     if len(rules) != 1:
         raise ContractError("owner-update restriction must contain exactly one rule")
     rule = _object(rules[0], "owner-update rule")
-    parameters = _object(rule.get("parameters"), "owner-update parameters")
-    if (set(rule) != {"type", "parameters"} or rule.get("type") != "update"
-            or set(parameters) != {"update_allows_fetch_and_merge"}
-            or parameters.get("update_allows_fetch_and_merge") is not False):
+    if (set(rule) not in ({"type"}, {"type", "parameters"})
+            or rule.get("type") != "update"):
         raise ContractError("owner-update restriction is missing or weakened")
+    # GitHub's GET response omits parameters after accepting the explicit
+    # false write. Accept that closed no-exception form, never null, an empty
+    # parameters map, an unknown field, or a truthy fetch/merge exception.
+    if "parameters" in rule:
+        parameters = _object(rule["parameters"], "owner-update parameters")
+        if (set(parameters) != {"update_allows_fetch_and_merge"}
+                or parameters.get("update_allows_fetch_and_merge") is not False):
+            raise ContractError("owner-update restriction is missing or weakened")
     # Administration-read credentials cannot observe bypass_actors. This
     # proves the structural restriction only; the documented owner-visible
     # check separately requires the exact sole User and pull_request bypass.

@@ -304,6 +304,10 @@ Two active repository-owned branch rulesets compose the protection:
   contains only `update` with `update_allows_fetch_and_merge: false`. Its sole
   bypass is the repository owner's numeric `User` ID in `pull_request` mode.
 
+GitHub omits the false update parameters from its GET response. The validator
+accepts either that exact no-exception rule or the explicit false form; null,
+empty parameters, foreign fields and a true fetch/merge exception are refused.
+
 The owner exception belongs only to the second ruleset. Adding it to the core
 ruleset would bypass security checks. Immutable tag protection and its empty
 bypass list remain separate. The receipt's existing `restrict_updates: false`
@@ -337,7 +341,8 @@ ruleset_id="$(gh api "repos/${repository}/rulesets" --paginate --slurp | jq -er 
 gh api "repos/${repository}/rulesets/${ruleset_id}" | jq -e --argjson owner "$owner_id" '
   .bypass_actors == [{actor_id:$owner, actor_type:"User", bypass_mode:"pull_request"}]
   and .conditions == {ref_name:{include:["~DEFAULT_BRANCH"], exclude:[]}}
-  and .rules == [{type:"update", parameters:{update_allows_fetch_and_merge:false}}]
+  and (.rules == [{type:"update"}]
+    or .rules == [{type:"update", parameters:{update_allows_fetch_and_merge:false}}])
 ' >/dev/null
 printf 'OWNER_PR_UPDATES=PASS\n'
 ```

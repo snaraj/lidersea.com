@@ -1250,6 +1250,19 @@ class SuccessfulMainInventoryTests(unittest.TestCase):
 
 
 class OwnerMergeRestrictionTests(unittest.TestCase):
+    def test_github_readback_omits_only_the_false_update_parameters(self):
+        exact = settings_api()
+        rule = exact["repos/owner/site/rulesets/44"]["rules"][0]
+        del rule["parameters"]
+        self.assertEqual(SettingsReceiptTests.observe(exact), settings_receipt())
+        for invalid in (None, {}, {"unknown": False},
+                        {"update_allows_fetch_and_merge": True},
+                        {"update_allows_fetch_and_merge": 0}):
+            changed = copy.deepcopy(exact)
+            changed["repos/owner/site/rulesets/44"]["rules"][0]["parameters"] = invalid
+            with self.subTest(parameters=invalid), self.assertRaises(RC.ContractError):
+                SettingsReceiptTests.observe(changed)
+
     def test_owner_restriction_requires_exact_structure_and_scalar_types(self):
         exact = settings_api()
         self.assertEqual(SettingsReceiptTests.observe(exact), settings_receipt())

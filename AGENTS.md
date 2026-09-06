@@ -598,7 +598,9 @@ authority: the owner alone merges.
   next patch still follows that base for an artifact-classified PR (a
   documentation-only PR reserves no patch at all), the automatic release consequence is
   proven, and the owner-observed release-control receipt proves immutable
-  releases plus strict exact required checks with no bypass. Only the
+  releases plus strict exact required checks with no core bypass. A separate
+  `Owner-PR-Updates` restriction permits only owner-account PR merges, without
+  bypassing those checks; release governance defines its exact shape. Only the
   coordinator flips Ready. The author and reviewer never do.
 
 ## Parallel agents in one checkout
@@ -1025,12 +1027,14 @@ is required rather than defaulted:
   `container` (PRs only; both production architectures built, never
   published — a REQUIRED PR check, skipped on the main push because that
   push's tree is the tree the check just built).
-- **coverage-badges** — `main` pushes only: recomputes the Go coverage
-  and the frontend test tally with the gate's own recipes and
-  force-updates the generated single-commit `badges` branch
+- **coverage-badges** — `main` pushes only: waits for `application` to
+  succeed and publishes its Go coverage and frontend test count from the same
+  run, without rebuilding or repeating tests. It force-updates the generated single-commit `badges` branch
   (`go-coverage.json`, `frontend-tests.json`). Badge numbers are
   CI-computed, never hand-edited; the badge publishes the identical
-  number the gate enforced.
+  Go number the gate enforced and the passing frontend test count. A badge
+  reports those measurements; the release publisher separately requires
+  every main gate job to pass.
 - **browser-smoke.yml** — pull requests and manual dispatch (no `main` push
   trigger, for the same reason `container` has none): three jobs, one CSS
   engine each, driving the built binary at phone viewports. It holds

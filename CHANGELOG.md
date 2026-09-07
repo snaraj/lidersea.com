@@ -7,6 +7,17 @@ Git, image, and GitHub Release tags use the exact plain `vX.Y.Z` form.
 
 ## [Unreleased]
 
+## [0.1.43] - 2026-09-07
+
+### Changed
+
+- Svelte advances from 5.56.10 to 5.57.0, removing its no-longer-required
+  runtime dependency on `@types/trusted-types`; the compatible svelte-check
+  4.7.6 pin remains unchanged.
+- `docker/setup-qemu-action` advances from v4.2.0 to v4.3.0 at the release's
+  full commit SHA in both the pull-request container build and protected-main
+  publisher.
+
 ## [0.1.42] - 2026-09-05
 
 ### Changed

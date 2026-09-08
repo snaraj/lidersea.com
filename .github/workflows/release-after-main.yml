@@ -413,7 +413,7 @@ jobs:
           codeql_state=absent
           codeql_run_id=''
           # CodeQL is a separate push workflow. Poll only the exact merged SHA
-          # and never infer its two conclusions from PR-gate aggregate success.
+          # and never infer its three conclusions from PR-gate aggregate success.
           for _ in $(seq 1 30); do
             gh api --method GET --paginate --slurp \
               --header 'Accept: application/vnd.github+json' \
@@ -452,7 +452,7 @@ jobs:
             "repos/${GITHUB_REPOSITORY}/actions/runs/${codeql_run_id}/jobs?filter=latest&per_page=100" \
             > "${codeql_jobs}"
           test "$(python3 -I -B scripts/ci/release_contract.py workflow-jobs \
-            --jobs-json "${codeql_jobs}" --workflow codeql --run-id "${codeql_run_id}")" = 2
+            --jobs-json "${codeql_jobs}" --workflow codeql --run-id "${codeql_run_id}")" = 3
           printf 'codeql_run_id=%s\n' "${codeql_run_id}" >> "${GITHUB_OUTPUT}"
       - name: Create or verify the exact immutable annotated tag
         if: steps.classify.outputs.class == 'artifact'

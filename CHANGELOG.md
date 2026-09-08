@@ -7,6 +7,16 @@ Git, image, and GitHub Release tags use the exact plain `vX.Y.Z` form.
 
 ## [Unreleased]
 
+## [0.1.45] - 2026-09-07
+
+### Fixed
+
+- Protected-main release authorization now accepts the exact three-job CodeQL
+  inventory required by the release contract. Both the orchestrator and the
+  publisher bind their count checks to Go, JavaScript/TypeScript, and Python,
+  preventing the stale two-job assertion from blocking publication after a
+  valid security scan.
+
 ## [0.1.44] - 2026-09-07
 
 ### Security

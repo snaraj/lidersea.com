@@ -103,6 +103,7 @@ PR_GATE_MAIN_JOBS = {
 CODEQL_MAIN_JOBS = {
     "analyze (go, manual)": "success",
     "analyze (javascript-typescript, none)": "success",
+    "analyze (python, none)": "success",
 }
 
 

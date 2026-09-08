@@ -7,6 +7,15 @@ Git, image, and GitHub Release tags use the exact plain `vX.Y.Z` form.
 
 ## [Unreleased]
 
+## [0.1.44] - 2026-09-07
+
+### Security
+
+- CodeQL now scans the repository's Python release and security tooling in
+  addition to Go and JavaScript/TypeScript. Protected-main release authorization
+  requires the exact Python analysis job to succeed and rejects missing,
+  skipped, duplicate, or foreign CodeQL job evidence.
+
 ## [0.1.43] - 2026-09-07
 
 ### Changed

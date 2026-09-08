@@ -37,7 +37,7 @@ orchestrator paginates the PR-gate jobs and requires the exact main inventory:
 PR-only jobs, `dependency-review` and `container`, are explicitly skipped. Both
 stay required checks for the pull request itself (below); only the redundant
 post-merge run of each is gone. It boundedly waits for
-the separate same-SHA main CodeQL run and requires both analyze jobs to succeed.
+the separate same-SHA main CodeQL run and requires all three analyze jobs to succeed.
 The publisher's read-only authorization job independently re-fetches both
 aggregate records and both paginated job inventories. Absent, pending, skipped,
 failed, duplicate, foreign, or wrong-SHA evidence is denied before a privileged

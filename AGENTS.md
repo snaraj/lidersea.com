@@ -178,8 +178,8 @@ Numbered for citation, repo-scoped, none negotiable in code:
     noncancelling path: the paginated PR-gate inventory requires four success
     conclusions plus TWO explicit push-only skips — `dependency-review` and
     `container`, the two `pull_request`-only jobs — and the separate same-SHA
-    CodeQL run requires both analyze jobs to succeed. The inventory stays a
-    closed set of six names either way; a `success` where a skip belongs denies,
+    CodeQL run requires all three analyze jobs to succeed. The PR-gate inventory
+    stays a closed set of six names either way; a `success` where a skip belongs denies,
     because it is the signature of a PR-only condition dropped from the
     workflow. Both jobs remain REQUIRED pull-request checks in the
     protected-main ruleset, so skipping them on the push relaxes nothing about
@@ -1055,7 +1055,7 @@ is required rather than defaulted:
   its separate `platform-release` job uses only the isolated settings token and
   must pass before the ordinary-token job paginates and validates the exact
   PR-gate job inventory, boundedly waits for the separate same-SHA CodeQL run
-  and its two successful analyze jobs, creates/verifies the annotated tag, and
+  and its three successful analyze jobs, creates/verifies the annotated tag, and
   dispatches the publisher on protected `main` with both completed-run IDs.
   Recovery validates the full intermediate history. Distinct main SHAs
   share no cancellation group.

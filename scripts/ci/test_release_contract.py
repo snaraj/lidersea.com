@@ -270,6 +270,12 @@ REQUIRED_CHECKS = (
     "security",
 )
 
+EXPECTED_CODEQL_MATRIX = (
+    ("go", "manual"),
+    ("javascript-typescript", "none"),
+    ("python", "none"),
+)
+
 
 def settings_receipt() -> dict[str, object]:
     return {
@@ -1119,6 +1125,13 @@ class SuccessfulMainInventoryTests(unittest.TestCase):
 
     def test_exact_paginated_pr_gate_and_codeql_jobs_are_required(self):
         self.assertEqual(
+            RC.CODEQL_MAIN_JOBS,
+            {
+                f"analyze ({language}, {build_mode})": "success"
+                for language, build_mode in EXPECTED_CODEQL_MATRIX
+            },
+        )
+        self.assertEqual(
             RC.validate_workflow_job_inventory(
                 job_pages("pr-gate", 123), workflow="pr-gate", expected_run_id=123
             ),
@@ -1170,6 +1183,29 @@ class SuccessfulMainInventoryTests(unittest.TestCase):
             changed = copy.deepcopy(codeql)
             next(job for job in changed if job["name"] == name)["conclusion"] = "skipped"
             with self.subTest(codeql_skip=name), self.assertRaises(RC.ContractError):
+                RC.validate_workflow_job_inventory(
+                    [{"total_count": len(changed), "jobs": changed}],
+                    workflow="codeql",
+                    expected_run_id=456,
+                )
+
+        python_name = "analyze (python, none)"
+        codeql_mutants: list[list[dict[str, object]]] = []
+        codeql_mutants.append(
+            [job for job in copy.deepcopy(codeql) if job["name"] != python_name]
+        )
+        duplicate_python = copy.deepcopy(codeql)
+        duplicate_python.append(
+            copy.deepcopy(next(job for job in codeql if job["name"] == python_name))
+        )
+        codeql_mutants.append(duplicate_python)
+        foreign_python = copy.deepcopy(codeql)
+        next(job for job in foreign_python if job["name"] == python_name)["name"] = (
+            "analyze (python-foreign, none)"
+        )
+        codeql_mutants.append(foreign_python)
+        for index, changed in enumerate(codeql_mutants):
+            with self.subTest(codeql_inventory=index), self.assertRaises(RC.ContractError):
                 RC.validate_workflow_job_inventory(
                     [{"total_count": len(changed), "jobs": changed}],
                     workflow="codeql",
@@ -6925,6 +6961,21 @@ class WorkflowStructureTests(unittest.TestCase):
         analyze = cls.job(codeql, "analyze")
         if re.search(r"(?m)^    if:", analyze):
             raise ValueError("CodeQL analyze job gained a skip condition")
+        matrix = tuple(
+            re.findall(
+                r"(?m)^          - language: ([a-z0-9-]+)\n"
+                r"            build-mode: ([a-z]+)$",
+                analyze,
+            )
+        )
+        if matrix != EXPECTED_CODEQL_MATRIX:
+            raise ValueError("CodeQL language/build matrix is not exact")
+        expected_jobs = {
+            f"analyze ({language}, {build_mode})": "success"
+            for language, build_mode in EXPECTED_CODEQL_MATRIX
+        }
+        if RC.CODEQL_MAIN_JOBS != expected_jobs:
+            raise ValueError("CodeQL release job inventory does not match the workflow matrix")
 
     @classmethod
     def require_badge_shell_strictness(cls, gate: str) -> None:
@@ -7345,6 +7396,22 @@ class WorkflowStructureTests(unittest.TestCase):
             (
                 gate,
                 codeql.replace("  analyze:\n    runs-on:", "  analyze:\n    if: false\n    runs-on:", 1),
+            ),
+            (
+                gate,
+                codeql.replace(
+                    "          - language: python\n            build-mode: none\n",
+                    "",
+                    1,
+                ),
+            ),
+            (
+                gate,
+                codeql.replace(
+                    "          - language: python\n            build-mode: none",
+                    "          - language: python\n            build-mode: manual",
+                    1,
+                ),
             ),
             # Container pin, both directions the workflow can regress: the
             # condition removed outright (the pre-#109 state, which rebuilds the

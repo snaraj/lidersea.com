@@ -7166,6 +7166,21 @@ class WorkflowStructureTests(unittest.TestCase):
     def require_successful_main_privilege_boundary(orchestrator: str, publisher: str) -> None:
         authorize = WorkflowStructureTests.job(publisher, "authorize", "immutable_settings")
         publish = WorkflowStructureTests.job(publisher, "publish")
+        expected_codeql_count = len(EXPECTED_CODEQL_MATRIX)
+        for workflow, exact_count_guard in (
+            (
+                orchestrator,
+                '--jobs-json "${codeql_jobs}" --workflow codeql '
+                f'--run-id "${{codeql_run_id}}")" = {expected_codeql_count}',
+            ),
+            (
+                authorize,
+                '--jobs-json "${codeql_jobs_json}" --workflow codeql '
+                f'--run-id "${{CODEQL_RUN_ID}}")" = {expected_codeql_count}',
+            ),
+        ):
+            if workflow.count(exact_count_guard) != 1:
+                raise ValueError("CodeQL authorization count does not match its exact matrix")
         for exact_destination in (
             f"IMAGE: {RC.EXPECTED_IMAGE}",
             f"CHART: {RC.EXPECTED_CHART}",
@@ -7383,6 +7398,28 @@ class WorkflowStructureTests(unittest.TestCase):
         audit = (ROOT / ".github/workflows/release-integrity-audit.yml").read_text(encoding="utf-8")
         self.require_releasable_main_job_definitions(gate, codeql)
         self.require_badge_shell_strictness(gate)
+        for changed_orchestrator, changed_publisher in (
+            (
+                orchestrator.replace(
+                    '--run-id "${codeql_run_id}")" = 3',
+                    '--run-id "${codeql_run_id}")" = 2',
+                    1,
+                ),
+                publisher,
+            ),
+            (
+                orchestrator,
+                publisher.replace(
+                    '--run-id "${CODEQL_RUN_ID}")" = 3',
+                    '--run-id "${CODEQL_RUN_ID}")" = 2',
+                    1,
+                ),
+            ),
+        ):
+            with self.assertRaises(ValueError):
+                self.require_successful_main_privilege_boundary(
+                    changed_orchestrator, changed_publisher
+                )
         # The whole container job body, so the two mutants below rewrite THAT
         # job's condition and nothing else — `dependency-review` carries the
         # byte-identical `if:` line, and a naive gate-wide replace would hit it

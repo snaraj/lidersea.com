@@ -95,7 +95,7 @@ jobs:
             "repos/${GITHUB_REPOSITORY}/actions/runs/${CODEQL_RUN_ID}/jobs?filter=latest&per_page=100" \
             > "${codeql_jobs_json}"
           test "$(python3 -I -B authority/scripts/ci/release_contract.py workflow-jobs \
-            --jobs-json "${codeql_jobs_json}" --workflow codeql --run-id "${CODEQL_RUN_ID}")" = 2
+            --jobs-json "${codeql_jobs_json}" --workflow codeql --run-id "${CODEQL_RUN_ID}")" = 3
           printf 'source_sha=%s\n' "${authorized_sha}" >> "${GITHUB_OUTPUT}"
 
   immutable_settings:

@@ -7,6 +7,16 @@ Git, image, and GitHub Release tags use the exact plain `vX.Y.Z` form.
 
 ## [Unreleased]
 
+## [0.1.46] - 2026-09-14
+
+### Changed
+
+- `@playwright/test` advances from 1.62.1 to 1.63.0 and Vite advances from
+  8.2.2 to 8.3.0, retaining the repository's pinned browser test and build
+  commands.
+- The grouped `github/codeql-action/init` and `analyze` roles advance together
+  from 4.37.9 to 4.38.0 at the release's full commit SHA.
+
 ## [0.1.45] - 2026-09-07
 
 ### Fixed

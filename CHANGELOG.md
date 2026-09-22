@@ -7,6 +7,28 @@ Git, image, and GitHub Release tags use the exact plain `vX.Y.Z` form.
 
 ## [Unreleased]
 
+## [0.1.48] - 2026-09-22
+
+### Removed
+
+- The release-control receipt no longer carries the four `owner_update_*`
+  fields, and the settings preflight no longer resolves or validates a second
+  branch ruleset: the `Owner-PR-Updates` restriction those fields described
+  was retired on 2026-09-22 by owner directive, because its one `update` rule
+  made the repository owner's bypass the only way to merge a passing pull
+  request.
+
+### Changed
+
+- The receipt now requires the branch-ruleset inventory itself —
+  `active_main_branch_ruleset_count: 1`, exactly `Protect-Main` — so its
+  existing `restrict_updates: false` describes the whole branch-protection
+  surface instead of one ruleset among several, and a second active branch
+  ruleset denies the preflight rather than going unread.
+- `docs/release-governance.md` and `AGENTS.md` record the retirement and drop
+  the owner-account merge restriction; the preflight stays GET-only and
+  value-only, with one ruleset read instead of two.
+
 ## [0.1.47] - 2026-09-21
 
 ### Changed

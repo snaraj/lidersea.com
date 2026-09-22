@@ -1020,6 +1020,7 @@ def _status_check_set(value: object) -> set[tuple[str, int]]:
 def validate_settings_receipt(receipt: Mapping[str, object], repository: str) -> None:
     """Validate the closed, value-only release-readiness receipt."""
     fields = {
+        "active_main_branch_ruleset_count",
         "actions_allowed",
         "actions_enabled",
         "actions_sha_pinning",
@@ -1051,13 +1052,20 @@ def validate_settings_receipt(receipt: Mapping[str, object], repository: str) ->
         "secret_scanning_push_protection",
         "strict_status_checks",
     }
-    fields.update(OWNER_UPDATE_RECEIPT)
     if set(receipt) != fields:
         raise ContractError("settings receipt fields are missing or foreign")
-    for field, expected in OWNER_UPDATE_RECEIPT.items():
-        actual = receipt.get(field)
-        if type(actual) is not type(expected) or actual != expected:
-            raise ContractError(f"settings receipt {field} is not exact")
+    # The inventory count is what closes the gap the retired owner-update
+    # ruleset opened: `restrict_updates` describes Protect-Main alone, so a
+    # second active branch ruleset could carry the `update` rule -- and the
+    # bypass actor that rule needs to stay mergeable -- where this receipt
+    # never looked. Exactly one active repository-owned branch ruleset means
+    # the rule types and the bypass state this receipt does state are the
+    # whole branch-protection story. Type-exact: `True == 1` in Python.
+    count = receipt.get("active_main_branch_ruleset_count")
+    if type(count) is not int or count != ACTIVE_MAIN_BRANCH_RULESETS:
+        raise ContractError(
+            "exactly one active repository-owned branch ruleset may protect main"
+        )
     if receipt.get("repository") != repository or receipt.get("branch") != "main":
         raise ContractError("settings receipt repository or branch is not exact")
     if _string_set(receipt.get("merge_methods"), "merge methods") != {"rebase", "squash"}:
@@ -1120,68 +1128,30 @@ def validate_settings_receipt(receipt: Mapping[str, object], repository: str) ->
         raise ContractError("repository code-coverage max drop must remain null")
 
 
-OWNER_UPDATE_RULESET = "Owner-PR-Updates"
-OWNER_UPDATE_RECEIPT = {
-    "active_main_branch_ruleset_count": 2,
-    "owner_update_ruleset": OWNER_UPDATE_RULESET,
-    "owner_update_ref": "~DEFAULT_BRANCH",
-    "owner_update_fetch_and_merge": False,
-}
+#: Exactly `Protect-Main`. The `Owner-PR-Updates` restriction was retired on
+#: 2026-09-22 by owner directive: its one `update` rule made the repository
+#: owner's bypass the only way to merge a passing pull request, from any
+#: device. Nothing replaces it -- the core ruleset already denies creation,
+#: deletion and force pushes, and it carries no `update` rule at all.
+ACTIVE_MAIN_BRANCH_RULESETS = 1
 
 
-def _select_main_ruleset_ids(summaries: object, repository: str) -> tuple[int, int]:
-    expected = (EXPECTED_MAIN_RULESET, OWNER_UPDATE_RULESET)
+def _select_main_ruleset_id(summaries: object, repository: str) -> int:
     selected: dict[str, int] = {}
     for value in _array(summaries, "repository rulesets"):
         summary = _object(value, "repository ruleset summary")
         if summary.get("target") != "branch" or summary.get("enforcement") != "active":
             continue
         name, ruleset_id = summary.get("name"), summary.get("id")
-        if (name not in expected or name in selected
+        if (name != EXPECTED_MAIN_RULESET or name in selected
                 or summary.get("source_type") != "Repository"
                 or summary.get("source") != repository
-                or type(ruleset_id) is not int or ruleset_id <= 0
-                or ruleset_id in selected.values()):
+                or type(ruleset_id) is not int or ruleset_id <= 0):
             raise ContractError("active main ruleset inventory is foreign or ambiguous")
         selected[name] = ruleset_id
-    if set(selected) != set(expected):
-        raise ContractError("both core security and owner-update rulesets are required")
-    return selected[expected[0]], selected[expected[1]]
-
-
-def _validate_owner_update_ruleset(
-    ruleset_id: int, record: Mapping[str, object], repository: str
-) -> None:
-    if (type(record.get("id")) is not int or record.get("id") != ruleset_id
-            or record.get("name") != OWNER_UPDATE_RULESET
-            or record.get("target") != "branch"
-            or record.get("source_type") != "Repository"
-            or record.get("source") != repository
-            or record.get("enforcement") != "active"):
-        raise ContractError("owner-update ruleset identity or enforcement is not exact")
-    if record.get("conditions") != {
-        "ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": []}
-    }:
-        raise ContractError("owner-update restriction must target only the default branch")
-    rules = _array(record.get("rules"), "owner-update rules")
-    if len(rules) != 1:
-        raise ContractError("owner-update restriction must contain exactly one rule")
-    rule = _object(rules[0], "owner-update rule")
-    if (set(rule) not in ({"type"}, {"type", "parameters"})
-            or rule.get("type") != "update"):
-        raise ContractError("owner-update restriction is missing or weakened")
-    # GitHub's GET response omits parameters after accepting the explicit
-    # false write. Accept that closed no-exception form, never null, an empty
-    # parameters map, an unknown field, or a truthy fetch/merge exception.
-    if "parameters" in rule:
-        parameters = _object(rule["parameters"], "owner-update parameters")
-        if (set(parameters) != {"update_allows_fetch_and_merge"}
-                or parameters.get("update_allows_fetch_and_merge") is not False):
-            raise ContractError("owner-update restriction is missing or weakened")
-    # Administration-read credentials cannot observe bypass_actors. This
-    # proves the structural restriction only; the documented owner-visible
-    # check separately requires the exact sole User and pull_request bypass.
-
+    if len(selected) != ACTIVE_MAIN_BRANCH_RULESETS:
+        raise ContractError("exactly the core security branch ruleset is required")
+    return selected[EXPECTED_MAIN_RULESET]
 
 
 def build_settings_receipt(
@@ -1193,8 +1163,6 @@ def build_settings_receipt(
     private_reporting_record: Mapping[str, object],
     ruleset_id: int,
     ruleset_record: Mapping[str, object],
-    owner_ruleset_id: int,
-    owner_ruleset_record: Mapping[str, object],
 ) -> dict[str, object]:
     """Derive and validate a privacy-bounded receipt from authoritative REST."""
     if repository_record.get("full_name") != repository or repository_record.get("default_branch") != "main":
@@ -1421,8 +1389,7 @@ def build_settings_receipt(
             "secret_scanning_push_protection"
         ),
     }
-    _validate_owner_update_ruleset(owner_ruleset_id, owner_ruleset_record, repository)
-    receipt.update(OWNER_UPDATE_RECEIPT)
+    receipt["active_main_branch_ruleset_count"] = ACTIVE_MAIN_BRANCH_RULESETS
     validate_settings_receipt(receipt, repository)
     return receipt
 
@@ -1482,14 +1449,10 @@ def observe_live_settings(repository: str) -> dict[str, object]:
         "private vulnerability reporting",
     )
     summaries = _github_api_get(f"repos/{repository}/rulesets", paginate=True)
-    ruleset_id, owner_ruleset_id = _select_main_ruleset_ids(summaries, repository)
+    ruleset_id = _select_main_ruleset_id(summaries, repository)
     ruleset_record = _object(
         _github_api_get(f"repos/{repository}/rulesets/{ruleset_id}"),
         "Protect-Main ruleset",
-    )
-    owner_ruleset_record = _object(
-        _github_api_get(f"repos/{repository}/rulesets/{owner_ruleset_id}"),
-        "owner-update ruleset",
     )
     return build_settings_receipt(
         repository,
@@ -1500,8 +1463,6 @@ def observe_live_settings(repository: str) -> dict[str, object]:
         private_reporting_record,
         ruleset_id,
         ruleset_record,
-        owner_ruleset_id,
-        owner_ruleset_record,
     )
 
 

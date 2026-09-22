@@ -598,9 +598,8 @@ authority: the owner alone merges.
   next patch still follows that base for an artifact-classified PR (a
   documentation-only PR reserves no patch at all), the automatic release consequence is
   proven, and the owner-observed release-control receipt proves immutable
-  releases plus strict exact required checks with no core bypass. A separate
-  `Owner-PR-Updates` restriction permits only owner-account PR merges, without
-  bypassing those checks; release governance defines its exact shape. Only the
+  releases plus strict exact required checks with no core bypass, `Protect-Main`
+  being the only active repository-owned branch ruleset. Only the
   coordinator flips Ready. The author and reviewer never do.
 
 ## Parallel agents in one checkout

@@ -69,8 +69,8 @@ App token to a mutation step.
 The preflight uses `gh api --method GET` only, with GitHub REST API version
 `2026-03-10`. It reads repository merge/security settings, immutable releases,
 Actions policy, default workflow-token permissions, private vulnerability
-reporting, the exhaustive ruleset inventory, and the two exact active
-repository-owned branch rulesets `Protect-Main` and `Owner-PR-Updates`.
+reporting, the exhaustive ruleset inventory, and the single exact active
+repository-owned branch ruleset `Protect-Main`.
 It does not create, update, or delete a
 setting, ref, Release, package, or other resource. Authentication, duplicate
 JSON members at any depth, a foreign field, or an inexact value is a denial.
@@ -135,10 +135,7 @@ The exact successful receipt is:
     {"context": "security", "integration_id": 15368}
   ],
   "restrict_updates": false,
-  "active_main_branch_ruleset_count": 2,
-  "owner_update_ruleset": "Owner-PR-Updates",
-  "owner_update_ref": "~DEFAULT_BRANCH",
-  "owner_update_fetch_and_merge": false,
+  "active_main_branch_ruleset_count": 1,
   "secret_scanning": true,
   "secret_scanning_push_protection": true,
   "strict_status_checks": true
@@ -174,6 +171,7 @@ who is holding the credential is not a fail-closed control.
 | Invariant | Proven by | Why |
 | --- | --- | --- |
 | Ruleset identity, active enforcement, `refs/heads/main`-only targeting | CI recheck | Visible to Administration read |
+| `Protect-Main` is the only active repository-owned branch ruleset | CI recheck | The inventory is visible to Administration read |
 | Exact rule-type set, strict required checks and their integration binding | CI recheck | Visible to Administration read |
 | Allowed merge methods are exactly squash and rebase | CI recheck | Read from the ruleset's `allowed_merge_methods` |
 | Immutable releases, Actions policy, workflow-token permissions, private vulnerability reporting, secret scanning | CI recheck | Visible to Administration read |
@@ -288,7 +286,7 @@ behavior in [Immutable releases](https://docs.github.com/en/code-security/concep
 and documents strict required checks in the
 [repository rulesets REST contract](https://docs.github.com/en/rest/repos/rules).
 
-## Owner-account merge restriction
+## Owner-account merge restriction, retired
 
 The current threat model is public source for a privately operated, single-owner
 homelab. Review this boundary before granting another collaborator, administrator,
@@ -296,57 +294,27 @@ automation principal, or tenant access. An agent holding the owner's credentials
 has the owner's GitHub identity; these rules cannot distinguish that agent from
 an interactive owner. Agents still have no delegated merge authority.
 
-Two active repository-owned branch rulesets compose the protection:
+`Owner-PR-Updates` — one `update` rule on `~DEFAULT_BRANCH` whose sole
+bypass actor was the repository owner's numeric `User` ID in `pull_request`
+mode — was retired on 2026-09-22 by owner directive, so any device the owner
+merges from merges through the rules instead of around them. A restriction that has to be
+bypassed on every ordinary merge of a passing pull request protects nothing it
+is not equally in the way of, and it made the bypass list it needed
+indistinguishable, to a reader, from a bypass of the security checks.
 
-- `Protect-Main` keeps every security check and signature requirement, with
-  an empty bypass list.
-- `Owner-PR-Updates` targets only `~DEFAULT_BRANCH`, has no exclusions, and
-  contains only `update` with `update_allows_fetch_and_merge: false`. Its sole
-  bypass is the repository owner's numeric `User` ID in `pull_request` mode.
+`Protect-Main` is now the one active repository-owned branch ruleset. It keeps
+every security check and signature requirement, denies force pushes and
+deletion, contains no `update` rule, and must carry an empty bypass list — the
+invariant the receipt states as `restrict_updates: false` and the owner
+preflight proves as `[]`. Tag protection and its own bypass state remain
+separate and unchanged.
 
-GitHub omits the false update parameters from its GET response. The validator
-accepts either that exact no-exception rule or the explicit false form; null,
-empty parameters, foreign fields and a true fetch/merge exception are refused.
-
-The owner exception belongs only to the second ruleset. Adding it to the core
-ruleset would bypass security checks. Immutable tag protection and its empty
-bypass list remain separate. The receipt's existing `restrict_updates: false`
-describes the core ruleset; the combined policy does restrict updates.
-
-The release settings receipt requires these additional observable facts:
-
-```json
-{
-  "active_main_branch_ruleset_count": 2,
-  "owner_update_ruleset": "Owner-PR-Updates",
-  "owner_update_ref": "~DEFAULT_BRANCH",
-  "owner_update_fetch_and_merge": false
-}
-```
-
-Administration-read callers cannot observe bypass actors. Their structural
-receipt must not claim owner-only authority. With the existing authorized
-ruleset-write credential, run this GET-only check alongside the existing
-core/tag zero-bypass checks; missing actor evidence fails, rather than becoming
-an empty list:
-
-```bash
-set -euo pipefail
-repository=snaraj/lidersea.com
-owner_id="$(gh api "users/${repository%%/*}" --jq '.id')"
-ruleset_id="$(gh api "repos/${repository}/rulesets" --paginate --slurp | jq -er '
-  add | map(select(.name == "Owner-PR-Updates" and .target == "branch"
-    and .enforcement == "active"))
-  | if length == 1 then .[0].id else error("ambiguous owner restriction") end')"
-gh api "repos/${repository}/rulesets/${ruleset_id}" | jq -e --argjson owner "$owner_id" '
-  .bypass_actors == [{actor_id:$owner, actor_type:"User", bypass_mode:"pull_request"}]
-  and .conditions == {ref_name:{include:["~DEFAULT_BRANCH"], exclude:[]}}
-  and (.rules == [{type:"update"}]
-    or .rules == [{type:"update", parameters:{update_allows_fetch_and_merge:false}}])
-' >/dev/null
-printf 'OWNER_PR_UPDATES=PASS\n'
-```
-
-Prepare and validate the release-validator compatibility change before adding
-the restriction. Read back both rulesets after applying it; preserve the
-existing zero-bypass security rules. No step in this procedure merges a PR.
+The receipt records the inventory itself — `active_main_branch_ruleset_count`
+above — which is what makes those two statements cover the whole
+branch-protection surface. A second active branch ruleset denies the preflight
+rather than being described by it: `restrict_updates` reads `Protect-Main`
+alone, so an `update` rule — and the bypass actor such a rule needs in order
+to stay mergeable — could otherwise sit beside it unread. Re-introducing any
+owner-account merge restriction is an owner decision that must first restore a
+validator for it here; no step in this document merges a pull request or
+changes a setting.

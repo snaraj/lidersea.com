@@ -7,6 +7,22 @@ Git, image, and GitHub Release tags use the exact plain `vX.Y.Z` form.
 
 ## [Unreleased]
 
+## [0.1.47] - 2026-09-21
+
+### Changed
+
+- The grouped `github/codeql-action/init` and `analyze` roles advance
+  together from 4.38.0 to 4.38.1 at the release's full commit SHA.
+- `docker/build-push-action` advances from v7.3.0 to v7.4.0 at the
+  release's full commit SHA in both the pull-request container build and
+  the protected-main publisher.
+- `docker/setup-buildx-action` advances from v4.3.0 to v4.4.1 at the
+  release's full commit SHA across the pull-request container build, the
+  protected-main publisher, and the read-only release integrity audit.
+- `docker/setup-qemu-action` advances from v4.3.0 to v4.4.0 at the
+  release's full commit SHA in both the pull-request container build and
+  the protected-main publisher.
+
 ## [0.1.46] - 2026-09-14
 
 ### Changed

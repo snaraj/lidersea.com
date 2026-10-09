@@ -1,0 +1,55 @@
+name: Compliance live check
+
+# What a visitor actually receives, judged against compliance.json (issue
+# #173). The PR gate and the browser smoke lanes hold the BUILD to the
+# manifest; only a request to production can see what the edge adds on top --
+# headers, injected scripts, reporting endpoints -- and that is where every
+# observation behind this workflow was found. See
+# scripts/ci/compliance_manifest.py for the rules and their lift.
+#
+# Weekly and on demand, plus on a pull request that changes the judge itself,
+# so a change to the gate is proven against the live site before it merges.
+# A pull request that only edits compliance.json does not trigger it: such a
+# change often declares something the next deployment ships, and judging it
+# against the current deployment would refuse the change for being early.
+# GitHub notifies whoever last changed this file's schedule when a scheduled
+# run fails.
+#
+# Zero spend and read-only by construction: one GitHub-hosted runner, no
+# secret, `contents: read`, and the only network traffic is ordinary GETs to
+# the site's own public pages.
+
+on:
+  schedule:
+    - cron: '23 14 * * 1'
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - scripts/ci/compliance_manifest.py
+      - .github/workflows/compliance-live.yml
+
+permissions: {}
+
+concurrency:
+  group: compliance-live-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  live:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Validate compliance.json
+        run: |
+          set -euo pipefail
+          python3 -I -B scripts/ci/compliance_manifest.py check
+      - name: Judge the live site against compliance.json
+        run: |
+          set -euo pipefail
+          python3 -I -B scripts/ci/compliance_manifest.py live

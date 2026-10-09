@@ -909,7 +909,8 @@ included; it is the same battery CI enforces:
     # because `break` succeeded, so it swallows the failure it just stopped on.
     rc=0; for s in test_release_contract test_dependabot_contract \
                    test_chart_render_census test_subcommand_callers \
-                   test_workflow_integrity test_commit_identity; do \
+                   test_workflow_integrity test_commit_identity \
+                   test_compliance_manifest; do \
       python3 -I -B -m unittest discover -s scripts/ci -p "$s.py" || rc=1; \
     done; test "${rc}" -eq 0
     docker build .                              # Dockerfile/build-input changes
@@ -1008,7 +1009,11 @@ is required rather than defaulted:
   pull request proposes and refuses any commit whose author OR committer is
   not the sanctioned noreply identity and any commit message carrying a
   co-author trailer. All three lift through
-  `scripts/ci/ci_gate_allowlist.toml`),
+  `scripts/ci/ci_gate_allowlist.toml`; and the compliance-manifest suite
+  (`scripts/ci/test_compliance_manifest.py`), which keeps `compliance.json`
+  valid and current and pins each rule of the live judge described under
+  `compliance-live.yml` below, lifting through the `compliance.json` entry
+  each refusal prints),
   `dependency-review` (PRs only; fails on high severity), `application`
   (toolchain pinned AND verified — Node 24.19.0, npm 11.17.0,
   Go 1.26.6; frontend check/test/build; gofmt/vet/tests/race; the
@@ -1069,6 +1074,19 @@ is required rather than defaulted:
   draft/upload/publish state machine, and unconditional terminal REST tag
   rebind are load-bearing; manual/unmerged dispatch, skip, force, clobber, or
   token crossover cannot publish (requirement 10).
+- **compliance-live.yml** — weekly, manual, and pull requests that change the
+  judge: GETs production and judges what the edge serves against
+  `compliance.json` with `scripts/ci/compliance_manifest.py live` — CSP
+  origins, framing, HSTS, nosniff, Referrer-Policy, no cookie on the document,
+  reporting endpoints, scripts in the served HTML, published legal pages
+  (issue #173). It holds `contents: read` and no secret. The build's own
+  behaviour — no undeclared origin, no CSP violation, nothing stored before the
+  visitor acts, the measurable WCAG 2.1 floors, no credential-shaped literal,
+  published legal pages linked — is `frontend/tests/browser/compliance.spec.mjs`
+  in the smoke lanes. The manifest is the lift, per rule 2 of the gate design
+  doctrine (a cheap widening path, not an allowlist specifically): every entry
+  carries a written reason, and an entry that no longer occurs is refused as
+  stale.
 - **release-integrity-audit.yml** — scheduled/manual read-only audit of the
   latest immutable manifest: annotated tag/source, mutable registry alias to
   immutable digest bindings, image/chart signatures, exact two-platform signed

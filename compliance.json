@@ -1,0 +1,35 @@
+{
+  "schema": "compliance/v1",
+  "liveUrl": "https://lidersea.com/",
+  "dataCollected": [],
+  "storage": [
+    {
+      "name": "lidersea_theme",
+      "kind": "cookie",
+      "writtenWhen": "visitor-action",
+      "purpose": "The reading theme a visitor picked, so the next page renders in it"
+    }
+  ],
+  "thirdParties": [],
+  "legalPages": [
+    {
+      "id": "privacy",
+      "status": "pending",
+      "decision": "https://github.com/snaraj/lidersea.com/issues/173"
+    }
+  ],
+  "edgeObservations": [
+    {
+      "kind": "injected-inline-script",
+      "marker": "/cdn-cgi/challenge-platform/",
+      "reason": "The edge appends a bot-detection loader to every HTML response; this origin's CSP blocks it, so it never runs. Keeping or disabling it is an owner decision.",
+      "issue": "https://github.com/snaraj/platform/issues/407"
+    },
+    {
+      "kind": "reporting-endpoint",
+      "origin": "https://a.nel.cloudflare.com",
+      "reason": "The edge adds NEL and Report-To headers, so browsers send network-error reports to the edge provider. Naming it in a privacy notice or disabling it is an owner decision.",
+      "issue": "https://github.com/snaraj/platform/issues/407"
+    }
+  ]
+}

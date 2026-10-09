@@ -7,6 +7,21 @@ Git, image, and GitHub Release tags use the exact plain `vX.Y.Z` form.
 
 ## [Unreleased]
 
+## [0.1.49] - 2026-10-08
+
+### Added
+
+- `compliance.json` states what the site stores on a visitor's device, which
+  third-party origins a page may contact, which legal pages exist, and which
+  edge behaviours are known and why.
+- The browser smoke lanes refuse a first visit that contacts an undeclared
+  origin, breaks the CSP, or writes to the device before the visitor acts; a
+  page that misses a measurable WCAG 2.1 floor; a credential-shaped literal in
+  the served bundle; and an unlinked or unserved published legal page.
+- A weekly read-only workflow judges the live site against the manifest:
+  security headers, cookies on the document, reporting endpoints and scripts
+  the edge adds, and published legal pages. Stale declarations fail.
+
 ## [0.1.48] - 2026-09-22
 
 ### Removed

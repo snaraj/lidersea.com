@@ -81,6 +81,15 @@ jobs:
         # synthetic commits, and checks the seeded historical exceptions
         # against the real objects so they cannot become decoration.
         run: python3 -I -B -m unittest discover -s scripts/ci -p 'test_commit_identity.py' -v
+      - name: Test the compliance manifest and its live judge
+        # Its own glob and its own named step, like every suite above. The
+        # suite keeps compliance.json valid and current (a closed schema, and
+        # storage names a frontend file still writes) and refuses each
+        # construct the live judge exists to catch, one change at a time from
+        # a passing baseline (issue #173). The judge itself runs against
+        # production in compliance-live.yml. Lift: the compliance.json entry
+        # each refusal prints, with its written reason.
+        run: python3 -I -B -m unittest discover -s scripts/ci -p 'test_compliance_manifest.py' -v
       - name: Refuse a foreign identity or co-author trailer in this pull request
         # Scoped to the range this pull request PROPOSES, deliberately. History
         # is append-only (requirement 2), so re-auditing every commit could

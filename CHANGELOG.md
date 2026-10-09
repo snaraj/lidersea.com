@@ -22,6 +22,12 @@ Git, image, and GitHub Release tags use the exact plain `vX.Y.Z` form.
   security headers, cookies on the document, reporting endpoints and scripts
   the edge adds, and published legal pages. Stale declarations fail.
 
+### Security
+
+- The frontend build resolves devalue 5.9.4 and source-map-js 1.2.2,
+  replacing versions with HIGH advisories (CVE-2026-92708 with three related
+  GHSAs, and CVE-2026-93749) that held the source scan red.
+
 ## [0.1.48] - 2026-09-22
 
 ### Removed

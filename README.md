@@ -73,7 +73,7 @@ defaulted:
     cd frontend && npx playwright install chromium firefox webkit && \
       LIDERSEA_SMOKE_BINARY=/tmp/lidersea-server npm run smoke
 
-Toolchain pins live in CI (`node 24.19.0`, `npm 11.17.0`, `go 1.26.6`);
+Toolchain pins live in CI (`node 24.22.1`, `npm 11.19.1`, `go 1.26.10`);
 CI is authoritative.
 
 ## Releases

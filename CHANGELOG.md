@@ -7,6 +7,14 @@ Git, image, and GitHub Release tags use the exact plain `vX.Y.Z` form.
 
 ## [Unreleased]
 
+## [0.1.49] - 2026-10-21
+
+### Security
+
+- Rebuild with fixed Go 1.26.10, Node 24.22.1 and its bundled npm 11.19.1, plus verified immutable builder and runtime image pins.
+- Remove the affected certificate trust paths through the updated public distroless bundle, retaining the default-off ratings collector and denied outbound network policy.
+- Update the vulnerable frontend build dependencies without changing runtime capabilities or weakening security gates.
+
 ## [0.1.48] - 2026-09-22
 
 ### Removed

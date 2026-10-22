@@ -18,8 +18,8 @@ the owner. In order:
    verify remote facts directly (`gh pr view`, `git ls-remote`).
 3. Verify identity and tooling: `gh auth status` shows the owner's
    account; commits carry the noreply identity per "Commit identity
-   mechanics"; know CI's pinned toolchain (Go 1.26.6, Node 24.19.0,
-   npm 11.17.0 — the gate verifies these exactly).
+   mechanics"; know CI's pinned toolchain (Go 1.26.10, Node 24.22.1,
+   npm 11.19.1 — the gate verifies these exactly).
 4. Survey the live state yourself: `gh issue list`, `gh pr list` —
    including the open-agent-PR count against the PR budget below.
 5. Claim work through an issue, branch from `origin/main`, and follow
@@ -1010,8 +1010,8 @@ is required rather than defaulted:
   co-author trailer. All three lift through
   `scripts/ci/ci_gate_allowlist.toml`),
   `dependency-review` (PRs only; fails on high severity), `application`
-  (toolchain pinned AND verified — Node 24.19.0, npm 11.17.0,
-  Go 1.26.6; frontend check/test/build; gofmt/vet/tests/race; the
+  (toolchain pinned AND verified — Node 24.22.1, npm 11.19.1,
+  Go 1.26.10; frontend check/test/build; gofmt/vet/tests/race; the
   coverage floor), `chart` (the ingress peer-identity pin,
   `scripts/ci/chart-ingress-pin.sh`; the egress-deny pin,
   `scripts/ci/chart-egress-pin.sh`, which pins the rendered policy against
